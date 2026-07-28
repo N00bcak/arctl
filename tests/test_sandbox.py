@@ -1,0 +1,148 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+import sys
+
+from arctl.errors import StateError
+from arctl.manifest import EvaluatorManifest
+from arctl.runner import _research_schema, _validate_codex_output_schema
+from arctl.sandbox import (
+    command_runtime_read_paths,
+    research_command,
+    sandbox_command,
+    sanitized_environment,
+)
+
+from .test_manifest import valid_manifest
+
+
+class SandboxCommandTests(unittest.TestCase):
+    def test_runtime_paths_include_the_active_virtual_environment(self) -> None:
+        paths = command_runtime_read_paths((sys.executable, "-V"))
+
+        self.assertIn(Path(sys.executable).resolve(), paths)
+        self.assertIn(Path(sys.prefix).resolve(), paths)
+        self.assertIn(Path(sys.base_prefix).resolve(), paths)
+
+    def test_runtime_paths_include_a_pyenv_shim_dispatcher(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / ".pyenv"
+            shim = root / "shims" / "python3"
+            dispatcher = root / "libexec" / "pyenv"
+            shim.parent.mkdir(parents=True)
+            dispatcher.parent.mkdir(parents=True)
+            shim.write_text("#!/bin/sh\n")
+            dispatcher.write_text("#!/bin/sh\n")
+
+            self.assertIn(root.resolve(), command_runtime_read_paths((str(shim),)))
+
+    def test_research_schema_matches_strict_codex_output_contract(self) -> None:
+        manifest = EvaluatorManifest.from_mapping(valid_manifest())
+
+        schema = _research_schema(manifest)
+
+        self.assertEqual(
+            schema["properties"]["schema_version"],
+            {"type": "integer", "const": 1},
+        )
+        telemetry = schema["properties"]["expected_telemetry"]
+        self.assertIs(telemetry["additionalProperties"], False)
+        self.assertEqual(telemetry["required"], list(manifest.public_telemetry))
+        self.assertEqual(set(telemetry["properties"]), set(manifest.public_telemetry))
+        self.assertTrue(
+            all(
+                property_schema["type"] == ["string", "null"]
+                for property_schema in telemetry["properties"].values()
+            )
+        )
+
+    def test_research_schema_preflight_rejects_open_or_untyped_nodes(self) -> None:
+        with self.assertRaisesRegex(StateError, "lacks a type"):
+            _validate_codex_output_schema(
+                {
+                    "type": "object",
+                    "properties": {"version": {"const": 1}},
+                    "required": ["version"],
+                    "additionalProperties": False,
+                }
+            )
+        with self.assertRaisesRegex(StateError, "not strict"):
+            _validate_codex_output_schema(
+                {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": True,
+                }
+            )
+
+    def test_subject_profile_uses_exact_paths_and_disables_network(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            worktree = root / "candidate"
+            batch = root / "batch.json"
+            output = root / "output"
+            command = sandbox_command(
+                ("python3", "subject.py", str(batch), str(output / "result.json")),
+                cwd=worktree,
+                read_paths=(worktree, batch),
+                write_paths=(output,),
+                profile="arctl-subject",
+            )
+            joined = "\n".join(command)
+            self.assertIn('":minimal"="read"', joined)
+            self.assertIn('":root"="deny"', joined)
+            self.assertIn(f'"{worktree}"="read"', joined)
+            self.assertIn(f'"{batch}"="read"', joined)
+            self.assertIn(f'"{output}"="write"', joined)
+            self.assertIn("permissions.arctl-subject.network.enabled=false", joined)
+            self.assertNotIn("--sandbox", command)
+
+    def test_refuses_conflicting_read_and_write_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)
+            with self.assertRaisesRegex(StateError, "both read-only and writable"):
+                sandbox_command(
+                    ("true",),
+                    cwd=path,
+                    read_paths=(path,),
+                    write_paths=(path,),
+                    profile="arctl-test",
+                )
+
+    def test_research_is_ephemeral_noninteractive_and_plugin_free(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            command = research_command(
+                worktree=root / "worktree",
+                scratch=root / "scratch",
+                output_schema=root / "schema.json",
+                prompt="Make one improvement.",
+            )
+            self.assertIn("--ephemeral", command)
+            self.assertIn("--ignore-user-config", command)
+            self.assertIn("--strict-config", command)
+            self.assertIn("approval_policy=\"never\"", command)
+            self.assertIn("multi_agent", command)
+            self.assertIn("permissions.arctl-research.network.enabled=false", command)
+            joined = "\n".join(command)
+            self.assertIn(f'"{(root / "worktree" / ".git").resolve()}"="read"', joined)
+            self.assertIn(f'"{(root / "worktree").resolve()}"="write"', joined)
+
+    def test_environment_does_not_inherit_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = sanitized_environment(
+                codex_home=root / "codex-home",
+                writable_home=root / "output",
+            )
+            self.assertEqual(
+                set(environment),
+                {"PATH", "HOME", "CODEX_HOME", "TMPDIR"}
+                | ({"LANG"} if "LANG" in environment else set())
+                | ({"LC_ALL"} if "LC_ALL" in environment else set())
+                | ({"TZ"} if "TZ" in environment else set()),
+            )
+            self.assertNotIn("OPENAI_API_KEY", environment)

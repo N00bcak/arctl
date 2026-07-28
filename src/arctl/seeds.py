@@ -1,0 +1,48 @@
+"""Versioned, domain-separated deterministic seed derivation."""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import secrets
+
+from .errors import ValidationError
+
+_VERSION = b"arctl-seed-v1"
+_PHASES = frozenset({"calibration", "primary", "suspect"})
+_SUBJECTS = frozenset({"champion", "candidate", "evaluator"})
+
+
+def new_master_seed() -> bytes:
+    return secrets.token_bytes(32)
+
+
+def derive_seed(
+    master: bytes,
+    *,
+    experiment_id: int,
+    phase: str,
+    subject: str,
+    trial: int,
+) -> int:
+    if len(master) < 32:
+        raise ValidationError("master seed must contain at least 256 bits")
+    if isinstance(experiment_id, bool) or experiment_id < 0:
+        raise ValidationError("experiment_id must be a non-negative integer")
+    if phase not in _PHASES:
+        raise ValidationError(f"unknown seed phase: {phase}")
+    if subject not in _SUBJECTS:
+        raise ValidationError(f"unknown seed subject: {subject}")
+    if isinstance(trial, bool) or trial < 0:
+        raise ValidationError("trial must be a non-negative integer")
+    message = b"\0".join(
+        (
+            _VERSION,
+            str(experiment_id).encode("ascii"),
+            phase.encode("ascii"),
+            subject.encode("ascii"),
+            str(trial).encode("ascii"),
+        )
+    )
+    digest = hmac.new(master, message, hashlib.sha256).digest()
+    return int.from_bytes(digest[:8], "big")
