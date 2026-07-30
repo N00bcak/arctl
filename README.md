@@ -23,3 +23,24 @@ public checks and probes, but cannot read evaluator or task-private artifacts.
 
 See [the evaluator design boundary](docs/evaluator-design.md) and
 [empirical validation protocols](docs/empirical-validation.md).
+
+## Development
+
+Run the portable test suite from the repository root:
+
+```bash
+python -W error -m unittest discover -v
+python -m compileall -q src tests
+bash -n install.sh
+```
+
+The suite creates temporary subject repositories and uses portable evaluator
+fixtures from `tests/fixtures/`. `test_tris/` is an ignored local lab and is
+not required to build, test, or install arctl.
+
+The two host-sandbox boundary tests are opt-in because they require a host
+that can create a Codex sandbox:
+
+```bash
+ARCTL_HOST_SANDBOX_TEST=1 python -m unittest tests.test_sandbox_host -v
+```

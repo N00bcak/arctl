@@ -217,4 +217,7 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-test_tris/
+# Local arctl development and private experiment state
+/test_tris/
+.arctl-data/
+/SCRATCHPAD.md
