@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "subject_command": ["python3", "subject.py", "{input}", "{output}"],
+  "prepare_command": ["python3", "evaluator.py", "{request}", "{response}"],
+  "calibrate_command": null,
+  "score_command": ["python3", "evaluator.py", "{request}", "{response}"],
+  "limits": {"timeout_seconds": 60, "max_output_bytes": 1000000},
+  "schemas": {
+    "public_case": {"type": "object", "additionalProperties": false},
+    "subject_result": {
+      "type": "object",
+      "required": ["score"],
+      "properties": {"score": {"type": "number"}},
+      "additionalProperties": false
+    }
+  },
+  "public": {
+    "statistic": "median paired score difference",
+    "subject_interface": "One numeric result per independent case.",
+    "telemetry": []
+  },
+  "trial": {
+    "meaning": "one independently generated case",
+    "dependence": "cases are independent; scores are paired within case",
+    "seed_to_case": "the controller seed initializes the case generator",
+    "subject_visible_seed": false
+  },
+  "statistics": {
+    "score": "sample median of paired candidate-minus-champion differences",
+    "uncertainty": "distribution-free one-sided sign-test order-statistic bound",
+    "positive_effect": "the candidate has a larger median paired score"
+  },
+  "variation": {
+    "known": "discrete scores may create ties at the median",
+    "mitigations": ["identical paired cases", "ties retained"]
+  },
+  "suspect_test": {"trigger": null, "reason_codes": []},
+  "calibration": {"supported": false, "policy": null, "ceiling": null}
+}

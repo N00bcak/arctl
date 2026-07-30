@@ -143,13 +143,17 @@ class ExperimentIntegrationTests(unittest.TestCase):
         finalizing = save_comparison_result(self.experiment_directory, primary)
         self.assertEqual(finalizing.state, "FINALIZING")
 
-        public = publish_final_result(
-            self.task,
-            self.experiment_directory,
-            self.manifest,
-            request,
-            primary,
-        )
+        with mock.patch(
+            "arctl.experiment.ensure_experiment_dossier",
+            side_effect=StateError("derived report unavailable"),
+        ):
+            public = publish_final_result(
+                self.task,
+                self.experiment_directory,
+                self.manifest,
+                request,
+                primary,
+            )
         self.assertEqual(public["decision"], "ACCEPT")
         self.assertEqual(
             resolve_commit(self.repo, "refs/arctl/demo/champion"),

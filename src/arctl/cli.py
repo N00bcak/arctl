@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
+import sys
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -71,27 +73,170 @@ def _payload(
     }
 
 
-def _emit(payload: dict[str, Any], *, as_json: bool) -> None:
+def _result_line(result: dict[str, Any]) -> str:
+    from .dossier import safe_terminal_text
+
+    comparisons = result.get("evaluation", {}).get("comparisons", [])
+    final = comparisons[-1] if comparisons else {}
+    measurement = (
+        f" · effect {final.get('effect_estimate')} · lower bound "
+        f"{final.get('one_sided_lower_bound')}"
+        if final
+        else ""
+    )
+    return (
+        f"{result['experiment_id']:>3}  {result['decision']:<7}"
+        f"{measurement} · {safe_terminal_text(result['hypothesis'], limit=180)}"
+    )
+
+
+def _emit_human(
+    payload: dict[str, Any],
+    *,
+    show_artifacts: bool,
+) -> None:
+    from .dossier import safe_terminal_text
+
+    state = payload["state"]
+    if not payload["success"]:
+        print(payload["message"], file=sys.stderr)
+        if payload["evidence_valid"] is not None:
+            print(
+                "Saved evidence: "
+                + ("valid and preserved." if payload["evidence_valid"] else "invalid."),
+                file=sys.stderr,
+            )
+        if payload["log_path"] is not None:
+            print(f"Details: {payload['log_path']}", file=sys.stderr)
+    elif state == "REPORT":
+        report = payload["report"]
+        print(
+            f"Task {payload['task_id']} · "
+            f"{report['completed_experiments']} completed experiment(s)"
+        )
+        for result in report["results"]:
+            print(_result_line(result))
+            print(f"     Dossier: {result['dossier_path']}")
+        if report["results"]:
+            print(
+                "\nNote: uncertainty is evaluator-owned; adaptive search has no "
+                "task-wide false-promotion guarantee."
+            )
+    elif state == "INSPECT":
+        result = payload.get("result")
+        if result is None:
+            print(payload["message"])
+        else:
+            print(f"Experiment {result['experiment_id']} · {result['decision']}")
+            print(f"Hypothesis: {safe_terminal_text(result['hypothesis'])}")
+            comparisons = result.get("evaluation", {}).get("comparisons", [])
+            for comparison in comparisons:
+                print(
+                    f"{comparison['kind'].capitalize()}: "
+                    f"{comparison['trials']} paired trial(s) · effect "
+                    f"{comparison['effect_estimate']} · lower bound "
+                    f"{comparison['one_sided_lower_bound']}"
+                )
+            print(f"Candidate: {result['candidate'][:12]}")
+            print(f"Champion after: {result['champion_after'][:12]}")
+            print(f"Dossier: {payload['dossier_path']}")
+        if show_artifacts:
+            print("\nSafe artifact inventory:")
+            for artifact in payload["artifacts"]:
+                print(f"- [{artifact['visibility']}] {artifact['path']}")
+    elif state == "RUN_COMPLETE":
+        results = payload.get("results", [])
+        accepted = sum(result["decision"] == "ACCEPT" for result in results)
+        print(
+            f"Done: {len(results)} tested · {accepted} promoted · "
+            f"{len(results) - accepted} not promoted"
+        )
+    elif state == "STOPPED":
+        print(payload["message"])
+    elif state == "TASK_DRAFT":
+        print(payload["message"])
+        for artifact in payload["artifacts"]:
+            print(f"Edit: {artifact['path']}")
+    elif state == "APPROVAL_REQUIRED":
+        print(payload["message"])
+    elif state == "READY" and "status" in payload:
+        status = payload["status"]
+        print(
+            f"Task {payload['task_id']} · {status['state']} · "
+            f"{status['trial_count'] or 'unfrozen'} trial(s)"
+        )
+        print(f"Champion: {(status['champion'] or 'none')[:12]}")
+        if status["last_result"] is not None:
+            print("Latest: " + _result_line(status["last_result"]).lstrip())
+        if status["provisional"]:
+            print("A candidate is provisional; its suspect test is pending.")
+        if status["stop_requested"]:
+            print("A safe stop has been requested.")
+    else:
+        print(payload["message"])
+    print(f"Next: {payload['next_command']}")
+
+
+def _emit(
+    payload: dict[str, Any],
+    *,
+    as_json: bool,
+    show_artifacts: bool = False,
+) -> None:
     if as_json:
         print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
         return
-    print(payload["message"])
-    validity = payload["evidence_valid"]
-    print("Saved evidence: none." if validity is None else f"Saved evidence valid: {validity}.")
-    continuation = payload["can_continue"]
-    print(
-        "Work can continue: unknown."
-        if continuation is None
-        else f"Work can continue: {'yes' if continuation else 'no'}."
-    )
-    if payload["log_path"] is not None:
-        print(f"Logs: {payload['log_path']}")
-    print(
-        "User action required: yes."
-        if payload["action_required"]
-        else "User action required: no."
-    )
-    print(f"Next: {payload['next_command']}")
+    _emit_human(payload, show_artifacts=show_artifacts)
+
+
+def _progress(event: dict[str, Any]) -> None:
+    from .dossier import safe_terminal_text
+
+    kind = event["event"]
+    if kind == "calibration":
+        print("Checking frozen calibration…", flush=True)
+    elif kind == "ready":
+        print(f"Official evaluation: {event['trial_count']} paired trial(s).", flush=True)
+    elif kind == "experiment":
+        print(f"\nExperiment {event['experiment_id']}", flush=True)
+    elif kind == "research":
+        print("  Researching from the current champion…", flush=True)
+    elif kind == "candidate":
+        print(
+            f"  Proposed: {safe_terminal_text(event['claim'], limit=180)}",
+            flush=True,
+        )
+        print(f"  Implemented candidate {event['candidate'][:12]}.", flush=True)
+    elif kind == "public_checks":
+        print("  Checking public constraints…", flush=True)
+    elif kind == "public_checks_complete":
+        outcome = "passed" if event["passed"] else "failed"
+        print(f"  Public checks {outcome}.", flush=True)
+    elif kind == "comparison":
+        label = "Primary" if event["kind"] == "primary" else "Suspect"
+        print(
+            f"  {label} evaluation: {event['trial_count']} paired trial(s)…",
+            flush=True,
+        )
+    elif kind == "provisional":
+        print("  Apparent win flagged; champion unchanged pending suspect test.", flush=True)
+    elif kind == "result":
+        print("  " + _result_line(event["result"]).lstrip(), flush=True)
+
+
+def _invoked_program(argv: Sequence[str] | None) -> str:
+    if argv is not None:
+        return "arctl"
+    invoked = Path(sys.argv[0])
+    if invoked.name == "__main__.py":
+        return shlex.join((sys.executable, "-m", "arctl"))
+    return shlex.quote(sys.argv[0])
+
+
+def _rewrite_next_command(payload: dict[str, Any], program: str) -> None:
+    command = payload.get("next_command")
+    if isinstance(command, str) and (command == "arctl" or command.startswith("arctl ")):
+        payload["next_command"] = program + command[5:]
 
 
 def _doctor() -> dict[str, Any]:
@@ -380,6 +525,7 @@ def _inspect(
     )
     payload["experiment_id"] = selected
     payload["result"] = inspection["result"]
+    payload["dossier_path"] = inspection["dossier_path"]
     return payload
 
 
@@ -411,6 +557,7 @@ def _run(
     max_experiments: int | None,
     *,
     preflight: bool = True,
+    progress=None,
 ) -> dict[str, Any]:
     from .doctor import run_doctor
     from .runner import run_task
@@ -424,7 +571,11 @@ def _run(
                 "runtime or sandbox preflight failed: " + ", ".join(failed)
             )
     with TaskLock(task.directory / "lock"):
-        outcome = run_task(task, max_experiments=max_experiments)
+        outcome = run_task(
+            task,
+            max_experiments=max_experiments,
+            progress=progress,
+        )
     results = outcome.results
     identifier = task.config.task_id
     last = results[-1] if results else None
@@ -467,6 +618,7 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--confirm")
         if name == "inspect":
             command.add_argument("experiment_id", nargs="?", type=int)
+            command.add_argument("--artifacts", action="store_true")
     init = subparsers.add_parser("init")
     init.add_argument("--json", action="store_true")
     init.add_argument("--repo", type=Path, required=True)
@@ -475,6 +627,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    program = _invoked_program(argv)
     arguments = build_parser().parse_args(argv)
     try:
         if arguments.command == "doctor":
@@ -517,6 +670,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _data_root(arguments.data),
                 arguments.task_id,
                 arguments.max_experiments,
+                progress=None if arguments.json else _progress,
             )
         else:
             raise StateError(f"unsupported command: {arguments.command}")
@@ -533,6 +687,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.task_id,
             arguments.max_experiments,
             preflight=False,
+            progress=None if arguments.json else _progress,
         )
     except ArctlError as error:
         if arguments.debug:
@@ -559,12 +714,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             allowed_actions=("status",),
             next_command=next_command,
             message=(
-                f"Failed: {error}. Valid saved evidence remains unchanged; "
-                "this command cannot continue until status is inspected."
+                f"Failed: {error}."
             ),
             evidence_valid=True,
             can_continue=False,
             log_path=log_path,
         )
-    _emit(payload, as_json=arguments.json)
+    _rewrite_next_command(payload, program)
+    _emit(
+        payload,
+        as_json=arguments.json,
+        show_artifacts=bool(
+            arguments.command == "inspect" and arguments.artifacts
+        ),
+    )
     return 0 if payload["success"] else 1

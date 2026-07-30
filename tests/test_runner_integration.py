@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -9,11 +10,13 @@ from unittest import mock
 
 from arctl.approval import confirm_approval, preview_approval
 from arctl.errors import StateError
+from arctl.experiment import start_experiment
 from arctl.git import resolve_commit
 from arctl.models import TaskConfig
-from arctl.operations import inspect_experiment, task_status
+from arctl.operations import inspect_experiment, task_report, task_status
 from arctl.registry import LocatedTask
-from arctl.runner import run_task
+from arctl.runner import _default_research_command, _run_research, run_task
+from arctl.taskio import load_manifest
 
 from .helpers import valid_task
 from .test_comparison_run_integration import _EVALUATOR, _SUBJECT
@@ -123,6 +126,7 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
 
     def test_runs_fresh_research_through_promotion_and_publication(self) -> None:
         prompts: list[str] = []
+        events: list[dict] = []
 
         def research(worktree: Path, scratch: Path, _schema: Path, prompt: str):
             prompts.append(prompt)
@@ -134,6 +138,7 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
             research_command_builder=research,
             public_check_command_builder=self.unconfined_public,
             comparison_command_builder=self.unconfined_comparison,
+            progress=events.append,
         )
 
         self.assertFalse(outcome.stopped)
@@ -162,6 +167,39 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
         self.assertFalse(
             (self.task_directory / "worktrees" / "000001-candidate").exists()
         )
+        self.assertEqual(
+            [event["event"] for event in events],
+            [
+                "ready",
+                "experiment",
+                "research",
+                "candidate",
+                "public_checks",
+                "public_checks_complete",
+                "comparison",
+                "result",
+                "complete",
+            ],
+        )
+        self.assertTrue(
+            (
+                self.task_directory
+                / "reports"
+                / "experiments"
+                / "000001"
+                / "README.md"
+            ).is_file()
+        )
+        dossier = (
+            self.task_directory / "reports" / "experiments" / "000001"
+        )
+        shutil.rmtree(dossier)
+        reported = task_report(self.task)
+        self.assertTrue((dossier / "README.md").is_file())
+        self.assertEqual(
+            reported["results"][0]["dossier_path"],
+            str(dossier / "README.md"),
+        )
 
         exhausted = run_task(
             self.task,
@@ -173,6 +211,57 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
             comparison_command_builder=self.unconfined_comparison,
         )
         self.assertEqual(exhausted.results, ())
+
+    def test_default_research_receives_approved_public_runtime_paths(self) -> None:
+        experiment, _ = start_experiment(self.task_directory, self.original_champion)
+        runtime = self.root / "approved-runtime"
+        runtime.mkdir()
+        captured: dict = {}
+
+        def build_research_command(**arguments):
+            captured.update(arguments)
+            return ("true",)
+
+        def complete_research(*_arguments, **_keywords):
+            scratch = experiment / "research"
+            (scratch / "request.public.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "claim": "Use the approved public runtime.",
+                        "mechanism": "Run public development tools.",
+                        "expected_effect": "Improve the score.",
+                        "expected_telemetry": {},
+                        "falsifiers": ["The effect is not positive."],
+                    }
+                )
+            )
+            return {"return_code": 0}
+
+        with (
+            mock.patch(
+                "arctl.runner.command_runtime_read_paths",
+                return_value=(runtime,),
+            ),
+            mock.patch(
+                "arctl.runner.research_command",
+                side_effect=build_research_command,
+            ),
+            mock.patch(
+                "arctl.runner.run_or_load_once",
+                side_effect=complete_research,
+            ),
+        ):
+            _run_research(
+                self.task,
+                experiment,
+                self.subject,
+                load_manifest(self.task_directory / "evaluator.manifest.json")[0],
+                command_builder=_default_research_command,
+                stop_path=self.task_directory / "stop.requested",
+            )
+
+        self.assertEqual(captured["read_paths"], (runtime,))
 
     def test_resumes_finalizing_experiment_without_research_or_evaluation_reruns(
         self,

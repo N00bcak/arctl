@@ -37,6 +37,10 @@ def candidate_changed_paths(repo: Path, champion: str, candidate: str) -> tuple[
     return tuple(path for path in output.split("\0") if path)
 
 
+def candidate_diff(repo: Path, champion: str, candidate: str) -> str:
+    return _git(repo, ["diff", "--no-ext-diff", "--binary", champion, candidate])
+
+
 def validate_changed_paths(
     paths: Sequence[str],
     *,

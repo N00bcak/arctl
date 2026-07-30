@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from arctl.cli import main
+from arctl.cli import _emit, _invoked_program, _progress, main
 from arctl.experiment import start_experiment
 
 
@@ -58,7 +58,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 1)
             error = json.loads(output)
             self.assertFalse(error["success"])
-            self.assertIn("Valid saved evidence remains unchanged", error["message"])
+            self.assertIn("Failed:", error["message"])
             self.assertTrue(error["evidence_valid"])
             self.assertFalse(error["can_continue"])
             self.assertIn("log_path", error)
@@ -68,6 +68,50 @@ class CliTests(unittest.TestCase):
         self.assertIn(code, (0, 1))
         next_lines = [line for line in output.splitlines() if line.startswith("Next: ")]
         self.assertEqual(len(next_lines), 1)
+
+    def test_human_success_omits_generic_machine_boilerplate(self) -> None:
+        payload = {
+            "schema_version": 1,
+            "success": True,
+            "task_id": "demo",
+            "experiment_id": None,
+            "state": "APPROVED",
+            "action_required": False,
+            "allowed_actions": ["run"],
+            "artifacts": [],
+            "message": "Approved and locked task demo.",
+            "evidence_valid": None,
+            "can_continue": True,
+            "log_path": "/private/task",
+            "next_command": "arctl run demo",
+        }
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _emit(payload, as_json=False)
+        rendered = output.getvalue()
+        self.assertNotIn("Saved evidence", rendered)
+        self.assertNotIn("Work can continue", rendered)
+        self.assertNotIn("User action required", rendered)
+        self.assertEqual(rendered.splitlines()[-1], "Next: arctl run demo")
+
+    def test_progress_is_safe_single_line_narration(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _progress(
+                {
+                    "event": "candidate",
+                    "candidate": "a" * 40,
+                    "claim": "Try this.\n\u001b[31mFAKE STATUS",
+                }
+            )
+        rendered = output.getvalue()
+        self.assertNotIn("\u001b", rendered)
+        self.assertNotIn("\nFAKE STATUS", rendered)
+        self.assertIn("Implemented candidate aaaaaaaaaaaa", rendered)
+
+    def test_real_entrypoint_is_preserved_in_recommended_commands(self) -> None:
+        with mock.patch("sys.argv", ["./.venv/bin/arctl", "status"]):
+            self.assertEqual(_invoked_program(None), "./.venv/bin/arctl")
 
     def test_init_rejects_non_git_repo_and_unsafe_task_id(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -161,6 +205,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual(json.loads(output)["state"], "STOPPED")
             self.assertEqual(run.call_count, 2)
+            self.assertIsNone(run.call_args_list[0].kwargs["progress"])
             self.assertTrue(
                 (data / "tasks" / "subject" / "stop.requested").is_file()
             )

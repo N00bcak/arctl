@@ -115,11 +115,13 @@ class SandboxCommandTests(unittest.TestCase):
     def test_research_is_ephemeral_noninteractive_and_plugin_free(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            runtime = root / "approved-runtime"
             command = research_command(
                 worktree=root / "worktree",
                 scratch=root / "scratch",
                 output_schema=root / "schema.json",
                 prompt="Make one improvement.",
+                read_paths=(runtime,),
             )
             self.assertIn("--ephemeral", command)
             self.assertIn("--ignore-user-config", command)
@@ -129,6 +131,7 @@ class SandboxCommandTests(unittest.TestCase):
             self.assertIn("permissions.arctl-research.network.enabled=false", command)
             joined = "\n".join(command)
             self.assertIn(f'"{(root / "worktree" / ".git").resolve()}"="read"', joined)
+            self.assertIn(f'"{runtime.resolve()}"="read"', joined)
             self.assertIn(f'"{(root / "worktree").resolve()}"="write"', joined)
 
     def test_environment_does_not_inherit_credentials(self) -> None:

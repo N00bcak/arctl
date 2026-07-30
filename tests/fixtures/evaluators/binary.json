@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "subject_command": ["python3", "subject.py", "{input}", "{output}"],
+  "prepare_command": ["python3", "evaluator.py", "{request}", "{response}"],
+  "calibrate_command": null,
+  "score_command": ["python3", "evaluator.py", "{request}", "{response}"],
+  "limits": {"timeout_seconds": 60, "max_output_bytes": 1000000},
+  "schemas": {
+    "public_case": {"type": "object", "additionalProperties": false},
+    "subject_result": {
+      "type": "object",
+      "required": ["success"],
+      "properties": {"success": {"type": "boolean"}},
+      "additionalProperties": false
+    }
+  },
+  "public": {
+    "statistic": "paired binary win rate among non-tied cases",
+    "subject_interface": "One Boolean success result per independent case.",
+    "telemetry": []
+  },
+  "trial": {
+    "meaning": "one independently generated success/failure case",
+    "dependence": "cases are independent; outcomes are paired within case",
+    "seed_to_case": "the controller seed initializes the case generator",
+    "subject_visible_seed": false
+  },
+  "statistics": {
+    "score": "two times candidate win proportion among discordant pairs minus one",
+    "uncertainty": "exact one-sided Clopper-Pearson bound transformed to [-1, 1]",
+    "positive_effect": "the candidate wins more discordant pairs than the champion"
+  },
+  "variation": {
+    "known": "ties reduce the effective discordant-pair sample",
+    "mitigations": ["identical paired cases", "ties disclosed before approval"]
+  },
+  "suspect_test": {"trigger": null, "reason_codes": []},
+  "calibration": {"supported": false, "policy": null, "ceiling": null}
+}

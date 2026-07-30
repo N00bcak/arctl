@@ -91,7 +91,7 @@ The session ends before candidate freeze and official test choice. It is never r
 `arctl` uses the sandbox already provided by Codex.
 | Profile | Can use | Must not read | Network |
 |---|---|---|---|
-| `RESEARCH` | candidate worktree, public task data, scratch | evaluator, private results, other experiments | user-approved research access |
+| `RESEARCH` | candidate worktree, public task data, scratch, read-only runtimes named by approved public checks and probe | evaluator, task data, private results, other experiments | none |
 | `SUBJECT` | frozen code, runtime, public input, fresh output | evaluator, controller files, history | none |
 | `EVALUATOR` | evaluator commit, private case data, saved subject output | writable target repo, Git refs | none |
 `arctl doctor` must test file reads, file writes, network access, timeouts, and child-process cleanup before a task runs.
@@ -155,6 +155,14 @@ Every command uses the same interaction contract:
 - say what happened, whether saved evidence remains valid, and whether the user must act;
 - finish with exactly one recommended next command.
 
+Human output uses progressive disclosure rather than printing every machine
+field as prose. `run` narrates safe experiment-state transitions and final
+outcomes; `status` shows the current operational facts; `report` shows compact
+aggregate history; and `inspect` shows one experiment summary plus its readable
+dossier. Researcher-authored text is treated as untrusted terminal and Markdown
+content. The detailed approval view remains intentionally verbose because it is
+a trust boundary.
+
 The same eight commands accept `--json` as the sanctioned AI-operation route. JSON output contains a schema version, success or failure, task and experiment IDs, stable state, action requirement, allowed actions, safe artifact metadata, and the next command. It never contains private seeds, cases, raw subject output, or private evidence. The configured operator AI is trusted to orchestrate through this route; research sessions remain untrusted and separately sandboxed. Human-readable and JSON output describe the same permitted operational facts.
 
 ### 9.3 Errors and stop
@@ -166,6 +174,15 @@ Running `stop` more than once must be safe.
 
 ### 9.4 Audit
 Each completed experiment must have one small folder with all key files. A human should be able to audit it with normal file tools and Git commands. A database must not be required.
+
+Publication also creates a derived public-only Markdown dossier containing the
+research rationale, exact Git diff, public checks, approved aggregate telemetry,
+comparison aggregates, decision, and promotion outcome. It contains and links
+no private paths, cases, seeds, schedules, subject output, evaluator output,
+process commands, environments, or private evidence. Missing dossiers for
+completed pre-existing experiments may be created when first reported or
+inspected, but an existing dossier is never rewritten. Git and validated JSON
+remain authoritative.
 
 ## 10. Experiment workflow
 
@@ -303,6 +320,11 @@ and prints the activation command. The script must be safe to rerun and must not
     published
   worktrees/
   reports/
+    experiments/000001/
+      README.md
+      change.diff
+      research.md
+      evaluation.md
 ```
 `comparisons/suspect/` is absent unless the primary result required it. `calibration.private.json` is absent when `trials` is an integer. `trial-count.json` records whether the frozen count was automatic or fixed and contains no private seeds. Each comparison uses the same artifact shape. Private reservations and evidence contain complete trial identities; public results contain only aggregates.
 

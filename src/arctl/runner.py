@@ -41,13 +41,23 @@ from .models import Evidence
 from .process import run_or_load_once
 from .registry import LocatedTask
 from .results import validate_public_result
-from .sandbox import research_command, sanitized_environment
+from .sandbox import command_runtime_read_paths, research_command, sanitized_environment
 from .storage import write_json_once
 from .taskio import load_manifest
 from .trials import load_trial_count
 
 ResearchCommandBuilder = Callable[[Path, Path, Path, str], Sequence[str]]
 PublicCheckCommandBuilder = Callable[[Sequence[str], Path, Path], Sequence[str]]
+ProgressCallback = Callable[[dict[str, Any]], None]
+
+
+def _notify(
+    progress: ProgressCallback | None,
+    event: str,
+    **fields: Any,
+) -> None:
+    if progress is not None:
+        progress({"event": event, **fields})
 
 def _validate_codex_output_schema(schema: Mapping[str, Any]) -> None:
     try:
@@ -232,13 +242,24 @@ def _run_research(
     scratch.mkdir(parents=True, exist_ok=True)
     schema = scratch / "request.schema.json"
     write_json_once(schema, _research_schema(manifest))
-    command = command_builder(
-        worktree,
-        scratch,
-        schema,
-        _research_prompt(task, manifest),
-    )
+    prompt = _research_prompt(task, manifest)
     if command_builder is _default_research_command:
+        runtime_paths: list[Path] = []
+        for public_command in (*task.config.public_checks, task.config.public_probe):
+            runtime_paths.extend(command_runtime_read_paths(public_command))
+        command = research_command(
+            worktree=worktree,
+            scratch=scratch,
+            output_schema=schema,
+            prompt=prompt,
+            read_paths=tuple(
+                dict.fromkeys(
+                    path
+                    for path in runtime_paths
+                    if not path.is_relative_to(worktree)
+                )
+            ),
+        )
         codex_home = Path(
             os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
         )
@@ -247,6 +268,7 @@ def _run_research(
             writable_home=scratch,
         )
     else:
+        command = command_builder(worktree, scratch, schema, prompt)
         environment = None
     try:
         try:
@@ -516,6 +538,7 @@ def run_task(
     public_check_command_builder: PublicCheckCommandBuilder | None = None,
     comparison_command_builder: CommandBuilder | None = None,
     calibration_command_builder: CalibrationCommandBuilder | None = None,
+    progress: ProgressCallback | None = None,
 ) -> RunOutcome:
     """Run a bounded sequence of fixed-trial experiments for one approved task."""
     approval = verify_approval(task.directory, task.config)
@@ -542,6 +565,7 @@ def run_task(
         approval["evaluator_commit"],
     )
     if task.config.trials == "auto":
+        _notify(progress, "calibration")
         calibration_arguments: dict[str, Any] = {}
         if calibration_command_builder is not None:
             calibration_arguments["command_builder"] = calibration_command_builder
@@ -557,6 +581,7 @@ def run_task(
         )
     else:
         trial_count = load_trial_count(task.directory, task.config)
+    _notify(progress, "ready", trial_count=trial_count)
     results: list[dict[str, Any]] = []
     stopped = False
     for _ in range(limit):
@@ -634,6 +659,12 @@ def run_task(
             experiment, record = start_experiment(task.directory, champion)
         else:
             record = load_experiment(experiment)
+        _notify(
+            progress,
+            "experiment",
+            experiment_id=record.experiment_id,
+            limit=limit,
+        )
         research_worktree = (
             task.directory / "worktrees" / f"{record.experiment_id:06d}-research"
         )
@@ -645,6 +676,7 @@ def run_task(
         )
         try:
             if record.state == "RESEARCHING":
+                _notify(progress, "research", experiment_id=record.experiment_id)
                 _checkout(task.config.repo, research_worktree, record.champion)
                 _run_research(
                     task,
@@ -660,6 +692,13 @@ def run_task(
                     task.config,
                     manifest,
                 )
+                _notify(
+                    progress,
+                    "candidate",
+                    experiment_id=record.experiment_id,
+                    candidate=record.candidate,
+                    claim=request.claim,
+                )
             else:
                 request = load_research_request(
                     experiment / "request.public.json",
@@ -668,6 +707,11 @@ def run_task(
 
             if record.state == "CANDIDATE_FROZEN":
                 if record.public_checks_passed is None:
+                    _notify(
+                        progress,
+                        "public_checks",
+                        experiment_id=record.experiment_id,
+                    )
                     check_arguments: dict[str, Any] = {}
                     if public_check_command_builder is not None:
                         check_arguments["command_builder"] = public_check_command_builder
@@ -679,11 +723,18 @@ def run_task(
                         **check_arguments,
                     )
                     record = load_experiment(experiment)
+                    _notify(
+                        progress,
+                        "public_checks_complete",
+                        experiment_id=record.experiment_id,
+                        passed=record.public_checks_passed,
+                    )
                 if record.public_checks_passed is False:
                     from .experiment import publish_candidate_rejection
 
                     result = publish_candidate_rejection(task.config, experiment, request)
                     results.append(result)
+                    _notify(progress, "result", result=result)
                     _remove_experiment_worktrees(task, record.experiment_id)
                     continue
         except StoppedError:
@@ -705,6 +756,13 @@ def run_task(
             raise StateError("active experiment has no frozen candidate")
         _checkout(task.config.repo, champion_worktree, record.champion)
         _checkout(task.config.repo, candidate_worktree, record.candidate)
+        _notify(
+            progress,
+            "comparison",
+            experiment_id=record.experiment_id,
+            kind="primary",
+            trial_count=trial_count,
+        )
         try:
             primary = _run_reserved_comparison(
                 task,
@@ -737,6 +795,18 @@ def run_task(
                 current = save_comparison_result(experiment, primary)
             state = current
             if state.state in ("PROVISIONAL", "SUSPECT_RESERVED"):
+                _notify(
+                    progress,
+                    "provisional",
+                    experiment_id=record.experiment_id,
+                )
+                _notify(
+                    progress,
+                    "comparison",
+                    experiment_id=record.experiment_id,
+                    kind="suspect",
+                    trial_count=trial_count,
+                )
                 try:
                     suspect = _run_reserved_comparison(
                         task,
@@ -810,9 +880,16 @@ def run_task(
                     primary,
                 )
         results.append(result)
+        _notify(progress, "result", result=result)
         _remove_experiment_worktrees(task, record.experiment_id)
         if stop.exists():
             stop.unlink()
             stopped = True
             break
+    _notify(
+        progress,
+        "complete",
+        experiments=len(results),
+        stopped=stopped,
+    )
     return RunOutcome(tuple(results), stopped)

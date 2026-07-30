@@ -170,7 +170,7 @@ def run_doctor() -> dict[str, Any]:
         }
         for path in allowed.values():
             path.write_text("allowed")
-        secret = private / "secret"
+        secret = private / "calibration.private.json"
         secret.write_text("private")
         (target / "hidden").write_text("target")
         research_scratch = root / "research-output"

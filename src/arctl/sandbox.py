@@ -132,6 +132,7 @@ def research_command(
     scratch: Path,
     output_schema: Path,
     prompt: str,
+    read_paths: Sequence[Path] = (),
     codex: str = "codex",
 ) -> tuple[str, ...]:
     profile = "arctl-research"
@@ -158,7 +159,7 @@ def research_command(
         "--config",
         _filesystem_override(
             profile,
-            read_paths=(worktree / ".git",),
+            read_paths=(worktree / ".git", *read_paths),
             write_paths=(worktree, scratch),
             codex=codex,
         ),

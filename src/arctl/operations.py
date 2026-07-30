@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .dossier import ensure_experiment_dossier
 from .errors import ArctlError, StateError
 from .experiment import ExperimentRecord, load_experiment
 from .registry import LocatedTask
@@ -116,11 +117,18 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
 
 
 def task_report(task: LocatedTask) -> dict[str, Any]:
-    results = [
-        result
-        for directory in _experiment_directories(task)
-        if (result := _public_result(task, directory)) is not None
-    ]
+    results: list[dict[str, Any]] = []
+    for directory in _experiment_directories(task):
+        result = _public_result(task, directory)
+        if result is None:
+            continue
+        dossier = ensure_experiment_dossier(
+            task.directory,
+            task.config,
+            directory,
+            result,
+        )
+        results.append({**result, "dossier_path": str(dossier)})
     return {
         "task_id": task.config.task_id,
         "completed_experiments": len(results),
@@ -159,6 +167,17 @@ def inspect_experiment(
         if not directory.is_dir():
             raise StateError(f"experiment does not exist: {experiment_id}")
     record = load_experiment(directory)
+    result = _public_result(task, directory)
+    dossier = (
+        ensure_experiment_dossier(
+            task.directory,
+            task.config,
+            directory,
+            result,
+        )
+        if result is not None
+        else None
+    )
     artifacts = [
         {
             "path": str(path.relative_to(directory)),
@@ -173,7 +192,8 @@ def inspect_experiment(
     ]
     return {
         "experiment": record.to_json(),
-        "result": _public_result(task, directory),
+        "result": result,
+        "dossier_path": str(dossier) if dossier is not None else None,
         "artifacts": artifacts,
     }
 

@@ -10,6 +10,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, Literal, Mapping
 
 from .decisions import Decision, failure_decision
+from .dossier import ensure_experiment_dossier
 from .errors import ProcessError, StateError, StoppedError, ValidationError
 from .git import (
     create_candidate_commit,
@@ -59,6 +60,23 @@ _FIELDS = {
     "public_checks_passed",
     "decision",
 }
+
+
+def _create_public_dossier(
+    task: TaskConfig,
+    experiment_directory: Path,
+    public: dict[str, Any],
+) -> None:
+    try:
+        ensure_experiment_dossier(
+            experiment_directory.parent.parent,
+            task,
+            experiment_directory,
+            public,
+        )
+    except (OSError, StateError):
+        # A derived view must never invalidate already-published official evidence.
+        pass
 
 
 @dataclass(frozen=True)
@@ -398,6 +416,7 @@ def publish_final_result(
     if record.state != "COMPLETE":
         save_experiment(experiment_directory, replace(record, state="COMPLETE"))
     atomic_write_text(experiment_directory / "published", "")
+    _create_public_dossier(task, experiment_directory, public)
     return public
 
 
@@ -430,6 +449,7 @@ def publish_candidate_rejection(
     updated = replace(record, state="COMPLETE", decision=Decision.REJECT)
     save_experiment(experiment_directory, updated)
     atomic_write_text(experiment_directory / "published", "")
+    _create_public_dossier(task, experiment_directory, public)
     return public
 
 
@@ -495,4 +515,5 @@ def publish_comparison_failure(
         replace(record, state="COMPLETE", decision=decision),
     )
     atomic_write_text(experiment_directory / "published", "")
+    _create_public_dossier(task, experiment_directory, public)
     return public

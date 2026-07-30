@@ -99,13 +99,15 @@ result.write_text(json.dumps(checks))
                 directory.mkdir()
             git_file = worktree / ".git"
             git_file.write_text("gitdir: protected")
+            private = root / "calibration.private.json"
+            private.write_text("private")
             result = scratch / "probe.json"
             script = """\
 import json
 import sys
 from pathlib import Path
 
-worktree, git_file, result = map(Path, sys.argv[1:])
+worktree, git_file, private, result = map(Path, sys.argv[1:])
 checks = {}
 try:
     git_file.write_text("tampered")
@@ -113,6 +115,12 @@ except OSError:
     checks["git_write_denied"] = True
 else:
     checks["git_write_denied"] = False
+try:
+    private.read_text()
+except OSError:
+    checks["private_read_denied"] = True
+else:
+    checks["private_read_denied"] = False
 (worktree / "candidate.py").write_text("changed")
 checks["candidate_write_allowed"] = (worktree / "candidate.py").is_file()
 result.write_text(json.dumps(checks))
@@ -124,6 +132,7 @@ result.write_text(json.dumps(checks))
                     script,
                     str(worktree),
                     str(git_file),
+                    str(private),
                     str(result),
                 ),
                 cwd=worktree,
