@@ -22,15 +22,16 @@ request = json.loads(Path(sys.argv[1]).read_text())
 response = Path(sys.argv[2])
 if request["operation"] == "calibrate":
     response.write_text(json.dumps({
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": "calibrate",
         "champion": request["champion"],
         "evaluator": request["evaluator"],
         "manifest": request["manifest"],
         "policy": request["policy"],
-        "recommended_trial_count": 4,
-        "criterion_met": True,
-        "evidence": {"policy": "toy precision target met"},
+        "assessments": [
+            {"trial_count": count, "diagnostic_value": 0.5}
+            for count in request["ladder"]
+        ],
     }))
 elif request["operation"] == "prepare":
     cases = [{"value": seed % 100} for seed in request["trial_seeds"]]

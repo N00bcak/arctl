@@ -59,6 +59,10 @@ def preview_approval(task_file: Path, task: TaskConfig) -> ApprovalPreview:
         raise ValidationError("approved evaluator manifest must contain one object")
     manifest = EvaluatorManifest.from_mapping(value)
     manifest.validate_trial_setting(task.trials)
+    if task.trials == "auto" and not manifest.calibration.controller_pilot:
+        raise ValidationError(
+            "new automatic tasks require a manifest-v2 controller-run pilot"
+        )
     task_hash = hashlib.sha256(task_file.read_bytes()).hexdigest()
     manifest_hash = hashlib.sha256(raw_manifest).hexdigest()
     token = hashlib.sha256(

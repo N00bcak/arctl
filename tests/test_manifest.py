@@ -10,9 +10,9 @@ from arctl.errors import ValidationError
 from arctl.manifest import EvaluatorManifest
 
 
-def valid_manifest() -> dict:
-    return {
-        "schema_version": 1,
+def valid_manifest(*, version: int = 2) -> dict:
+    manifest = {
+        "schema_version": version,
         "subject_command": ["python3", "subject.py", "{input}", "{output}"],
         "prepare_command": ["python3", "evaluator.py", "{request}", "{response}"],
         "calibrate_command": ["python3", "evaluator.py", "{request}", "{response}"],
@@ -56,12 +56,27 @@ def valid_manifest() -> dict:
             "trigger": "unusual timeout reduction",
             "reason_codes": ["timeout_shift"],
         },
-        "calibration": {
+        "calibration": {},
+    }
+    manifest["calibration"] = (
+        {
+            "supported": True,
+            "policy": "smallest stable ladder count meeting target precision",
+            "ladder": [4, 16, 64, 256],
+            "diagnostic": {
+                "name": "baseline standard error",
+                "units": "score",
+                "maximum": 1.0,
+            },
+        }
+        if version == 2
+        else {
             "supported": True,
             "policy": "smallest ladder count meeting target precision",
             "ceiling": 256,
-        },
-    }
+        }
+    )
+    return manifest
 
 
 class ManifestTests(unittest.TestCase):
@@ -110,7 +125,12 @@ class ManifestTests(unittest.TestCase):
 
     def test_calibration_contract_is_coherent(self) -> None:
         raw = valid_manifest()
-        raw["calibration"] = {"supported": False, "policy": None, "ceiling": None}
+        raw["calibration"] = {
+            "supported": False,
+            "policy": None,
+            "ladder": None,
+            "diagnostic": None,
+        }
         raw["calibrate_command"] = None
         manifest = EvaluatorManifest.from_mapping(raw)
         with self.assertRaisesRegex(ValidationError, "no calibration"):
@@ -130,6 +150,21 @@ class ManifestTests(unittest.TestCase):
         manifest = EvaluatorManifest.from_mapping(valid_manifest())
         with self.assertRaisesRegex(ValidationError, "ceiling"):
             manifest.validate_trial_setting(257)
+
+    def test_controller_pilot_requires_ordered_ladder_and_finite_diagnostic(
+        self,
+    ) -> None:
+        for ladder in ([], [16, 8], [8, 8], [0, 8]):
+            with self.subTest(ladder=ladder):
+                raw = valid_manifest()
+                raw["calibration"]["ladder"] = ladder
+                with self.assertRaisesRegex(ValidationError, "ladder"):
+                    EvaluatorManifest.from_mapping(raw)
+
+        raw = valid_manifest()
+        raw["calibration"]["diagnostic"]["maximum"] = float("inf")
+        with self.assertRaisesRegex(ValidationError, "maximum"):
+            EvaluatorManifest.from_mapping(raw)
 
     def test_suspect_trigger_and_reasons_are_coupled(self) -> None:
         raw = valid_manifest()

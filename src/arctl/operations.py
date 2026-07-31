@@ -14,7 +14,7 @@ from .registry import LocatedTask
 from .results import validate_public_result
 from .storage import atomic_write_json
 from .taskio import load_manifest
-from .trials import load_trial_count
+from .trials import load_trial_count, load_trial_count_record
 
 
 def _experiment_directories(task: LocatedTask) -> list[Path]:
@@ -50,15 +50,22 @@ def _public_result(task: LocatedTask, directory: Path) -> dict[str, Any] | None:
 def task_status(task: LocatedTask) -> dict[str, Any]:
     approved = (task.directory / "approval.json").is_file()
     trial_count: int | None = None
+    calibration_summary: dict[str, Any] | None = None
     calibration = "not_started" if task.config.trials == "auto" else "fixed"
     if approved:
         try:
             trial_count = load_trial_count(task.directory, task.config)
+            trial_record = load_trial_count_record(task.directory, task.config)
+            calibration_summary = trial_record.get("calibration")
             calibration = "complete" if task.config.trials == "auto" else "fixed"
         except StateError:
             if task.config.trials != "auto":
                 raise
-            if (task.directory / "calibration" / "process" / "started.json").is_file():
+            calibration_processes = task.directory / "calibration" / "process"
+            if (
+                (calibration_processes / "started.json").is_file()
+                or any(calibration_processes.glob("*/started.json"))
+            ):
                 calibration = "failed"
 
     directories = _experiment_directories(task)
@@ -102,6 +109,7 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
         "approved": approved,
         "calibration": calibration,
         "trial_count": trial_count,
+        "calibration_summary": calibration_summary,
         "experiment_id": latest.experiment_id if latest is not None else None,
         "champion": champion,
         "provisional": latest is not None and latest.state in (
@@ -129,10 +137,16 @@ def task_report(task: LocatedTask) -> dict[str, Any]:
             result,
         )
         results.append({**result, "dossier_path": str(dossier)})
+    calibration_summary = None
+    if (task.directory / "trial-count.json").is_file():
+        calibration_summary = load_trial_count_record(
+            task.directory, task.config
+        ).get("calibration")
     return {
         "task_id": task.config.task_id,
         "completed_experiments": len(results),
         "results": results,
+        "calibration_summary": calibration_summary,
         "limitations": (
             "Uncertainty is calculated by the approved evaluator for each candidate "
             "comparison. arctl validates the protocol and evidence shape, not the "
@@ -195,6 +209,11 @@ def inspect_experiment(
         "result": result,
         "dossier_path": str(dossier) if dossier is not None else None,
         "artifacts": artifacts,
+        "calibration_summary": (
+            load_trial_count_record(task.directory, task.config).get("calibration")
+            if (task.directory / "trial-count.json").is_file()
+            else None
+        ),
     }
 
 

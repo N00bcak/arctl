@@ -41,6 +41,28 @@ CommandBuilder = Callable[
     ],
     Sequence[str],
 ]
+ProgressCallback = Callable[[dict[str, Any]], None]
+
+
+def _notify(
+    progress: ProgressCallback | None,
+    *,
+    kind: str,
+    stage: str,
+    status: str,
+    **fields: Any,
+) -> None:
+    if progress is not None:
+        progress(
+            {
+                "event": "stage",
+                "scope": "comparison",
+                "kind": kind,
+                "stage": stage,
+                "status": status,
+                **fields,
+            }
+        )
 
 
 def _codex_command_builder(
@@ -119,7 +141,8 @@ def _run_process(
 
 def _validate_batch(
     path: Path,
-    reservation: ComparisonReservation,
+    *,
+    trial_count: int,
     manifest: EvaluatorManifest,
 ) -> None:
     batch = _load_json_object(path, source="evaluator", label="public batch")
@@ -128,9 +151,9 @@ def _validate_batch(
     cases = batch["cases"]
     if (
         batch["schema_version"] != 1
-        or batch["trial_count"] != reservation.trial_count
+        or batch["trial_count"] != trial_count
         or not isinstance(cases, list)
-        or len(cases) != reservation.trial_count
+        or len(cases) != trial_count
     ):
         raise ComparisonFailure("evaluator", "public batch trial count is invalid")
     validator = Draft202012Validator(manifest.public_case_schema)
@@ -145,7 +168,7 @@ def _validate_subject_output(
     path: Path,
     *,
     subject: Literal["champion", "candidate"],
-    reservation: ComparisonReservation,
+    trial_count: int,
     manifest: EvaluatorManifest,
 ) -> None:
     output = _load_json_object(path, source=subject, label=f"{subject} output")
@@ -154,9 +177,9 @@ def _validate_subject_output(
     results = output["results"]
     if (
         output["schema_version"] != 1
-        or output["trial_count"] != reservation.trial_count
+        or output["trial_count"] != trial_count
         or not isinstance(results, list)
-        or len(results) != reservation.trial_count
+        or len(results) != trial_count
     ):
         raise ComparisonFailure(subject, f"{subject} result count is invalid")
     validator = Draft202012Validator(manifest.subject_result_schema)
@@ -169,14 +192,16 @@ def _validate_subject_output(
 
 def _validate_prepare_response(
     path: Path,
-    reservation: ComparisonReservation,
+    *,
+    kind: str,
+    trial_count: int,
 ) -> None:
     response = _load_json_object(path, source="evaluator", label="prepare response")
     expected = {
         "schema_version": 1,
         "operation": "prepare",
-        "kind": reservation.kind,
-        "trial_count": reservation.trial_count,
+        "kind": kind,
+        "trial_count": trial_count,
     }
     if response != expected:
         raise ComparisonFailure("evaluator", "prepare response does not match its request")
@@ -193,6 +218,7 @@ def run_comparison(
     candidate_directory: Path,
     command_builder: CommandBuilder = _codex_command_builder,
     stop_path: Path | None = None,
+    progress: ProgressCallback | None = None,
 ) -> Evidence:
     """Run or recover one immutable comparison without redrawing any process."""
     expected_commands = {
@@ -222,6 +248,13 @@ def run_comparison(
 
     evidence_path = directory / "evidence.private.json"
     if evidence_path.exists():
+        _notify(
+            progress,
+            kind=reservation.kind,
+            stage="comparison",
+            status="recovered",
+            trial_count=reservation.trial_count,
+        )
         raw = _load_json_object(evidence_path, source="evidence", label="saved evidence")
         try:
             return Evidence.from_mapping(
@@ -264,8 +297,17 @@ def run_comparison(
         {"request": prepare_request, "response": prepare_response},
         allowed_roots=(directory,),
     )
+    prepare_process = process_root / "prepare"
+    prepare_recovered = (prepare_process / "result.json").is_file()
+    _notify(
+        progress,
+        kind=reservation.kind,
+        stage="prepare",
+        status="started",
+        trial_count=reservation.trial_count,
+    )
     _run_process(
-        process_root / "prepare",
+        prepare_process,
         command_builder(
             marked_command(prepare_command, prepare_output / "execution.started"),
             evaluator_directory,
@@ -285,8 +327,23 @@ def run_comparison(
         stop_path=stop_path,
         execution_marker=prepare_output / "execution.started",
     )
-    _validate_prepare_response(prepare_response, reservation)
-    _validate_batch(batch_path, reservation, manifest)
+    _notify(
+        progress,
+        kind=reservation.kind,
+        stage="prepare",
+        status="recovered" if prepare_recovered else "complete",
+        trial_count=reservation.trial_count,
+    )
+    _validate_prepare_response(
+        prepare_response,
+        kind=reservation.kind,
+        trial_count=reservation.trial_count,
+    )
+    _validate_batch(
+        batch_path,
+        trial_count=reservation.trial_count,
+        manifest=manifest,
+    )
     if scoring_path.is_symlink() or not scoring_path.is_file():
         raise ComparisonFailure(
             "evaluator", "private scoring data was not written to the reserved path"
@@ -297,7 +354,7 @@ def run_comparison(
         "champion": champion_directory,
         "candidate": candidate_directory,
     }
-    for subject in reservation.subject_order:
+    for subject_index, subject in enumerate(reservation.subject_order, start=1):
         output_directory = outputs / subject
         output_directory.mkdir(parents=True, exist_ok=True)
         output = output_directory / "result.json"
@@ -306,8 +363,19 @@ def run_comparison(
             {"input": batch_path, "output": output},
             allowed_roots=(directory,),
         )
+        subject_process = process_root / subject
+        subject_recovered = (subject_process / "result.json").is_file()
+        _notify(
+            progress,
+            kind=reservation.kind,
+            stage="subject",
+            status="started",
+            batch=subject_index,
+            batches=2,
+            trial_count=reservation.trial_count,
+        )
         _run_process(
-            process_root / subject,
+            subject_process,
             command_builder(
                 marked_command(command, output_directory / "execution.started"),
                 subject_directories[subject],
@@ -327,10 +395,19 @@ def run_comparison(
             stop_path=stop_path,
             execution_marker=output_directory / "execution.started",
         )
+        _notify(
+            progress,
+            kind=reservation.kind,
+            stage="subject",
+            status="recovered" if subject_recovered else "complete",
+            batch=subject_index,
+            batches=2,
+            trial_count=reservation.trial_count,
+        )
         _validate_subject_output(
             output,
             subject=subject,  # type: ignore[arg-type]
-            reservation=reservation,
+            trial_count=reservation.trial_count,
             manifest=manifest,
         )
         subject_outputs[subject] = output
@@ -357,8 +434,17 @@ def run_comparison(
         {"request": score_request, "response": score_response},
         allowed_roots=(directory,),
     )
+    score_process = process_root / "score"
+    score_recovered = (score_process / "result.json").is_file()
+    _notify(
+        progress,
+        kind=reservation.kind,
+        stage="score",
+        status="started",
+        trial_count=reservation.trial_count,
+    )
     _run_process(
-        process_root / "score",
+        score_process,
         command_builder(
             marked_command(score_command, score_output / "execution.started"),
             evaluator_directory,
@@ -381,6 +467,20 @@ def run_comparison(
         stop_path=stop_path,
         execution_marker=score_output / "execution.started",
     )
+    _notify(
+        progress,
+        kind=reservation.kind,
+        stage="score",
+        status="recovered" if score_recovered else "complete",
+        trial_count=reservation.trial_count,
+    )
+    _notify(
+        progress,
+        kind=reservation.kind,
+        stage="validate",
+        status="started",
+        trial_count=reservation.trial_count,
+    )
     raw_evidence = _load_json_object(
         score_response,
         source="evidence",
@@ -397,4 +497,11 @@ def run_comparison(
     except ValidationError as error:
         raise ComparisonFailure("evidence", "comparison evidence is invalid") from error
     atomic_write_json(evidence_path, raw_evidence)
+    _notify(
+        progress,
+        kind=reservation.kind,
+        stage="validate",
+        status="complete",
+        trial_count=reservation.trial_count,
+    )
     return evidence

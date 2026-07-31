@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from arctl.approval import confirm_approval, preview_approval, verify_approval
-from arctl.errors import StateError
+from arctl.errors import StateError, ValidationError
 from arctl.models import TaskConfig
 
 from .helpers import valid_task
@@ -97,6 +97,24 @@ class ApprovalIntegrationTests(unittest.TestCase):
                 preview,
                 preview.confirmation_token,
             )
+
+    def test_new_automatic_task_rejects_legacy_evaluator_selected_count(
+        self,
+    ) -> None:
+        (self.evaluator / "evaluator.manifest.json").write_text(
+            json.dumps(valid_manifest(version=1), sort_keys=True)
+        )
+        git(self.evaluator, "add", ".")
+        git(self.evaluator, "commit", "-qm", "legacy calibration")
+        raw = valid_task()
+        raw["repo"] = str(self.subject)
+        raw["evaluator"] = {
+            "repo": str(self.evaluator),
+            "commit": git(self.evaluator, "rev-parse", "HEAD"),
+        }
+        task = TaskConfig.from_mapping(raw)
+        with self.assertRaisesRegex(ValidationError, "controller-run pilot"):
+            preview_approval(self.task_file, task)
 
     def test_verification_detects_tampering(self) -> None:
         preview = preview_approval(self.task_file, self.task)

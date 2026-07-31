@@ -44,7 +44,7 @@ from .results import validate_public_result
 from .sandbox import command_runtime_read_paths, research_command, sanitized_environment
 from .storage import write_json_once
 from .taskio import load_manifest
-from .trials import load_trial_count
+from .trials import load_trial_count, load_trial_count_record
 
 ResearchCommandBuilder = Callable[[Path, Path, Path, str], Sequence[str]]
 PublicCheckCommandBuilder = Callable[[Sequence[str], Path, Path], Sequence[str]]
@@ -386,6 +386,7 @@ def _run_reserved_comparison(
     evaluator_worktree: Path,
     command_builder: CommandBuilder | None,
     stop_path: Path,
+    progress: ProgressCallback | None,
 ):
     record_path = experiment / "comparisons" / kind / "reservation.private.json"
     record = load_experiment(experiment)
@@ -421,6 +422,7 @@ def _run_reserved_comparison(
         champion_directory=champion_worktree,
         candidate_directory=candidate_worktree,
         stop_path=stop_path,
+        progress=progress,
         **arguments,
     )
 
@@ -569,6 +571,16 @@ def run_task(
         calibration_arguments: dict[str, Any] = {}
         if calibration_command_builder is not None:
             calibration_arguments["command_builder"] = calibration_command_builder
+        calibration_champion = (
+            task.directory / "worktrees" / "calibration-champion"
+        )
+        if manifest.calibration.controller_pilot:
+            champion = resolve_commit(
+                task.config.repo,
+                f"refs/arctl/{task.config.task_id}/champion",
+            )
+            _checkout(task.config.repo, calibration_champion, champion)
+            calibration_arguments["champion_directory"] = calibration_champion
         trial_count = calibrate_trial_count(
             task.directory,
             task.config,
@@ -577,11 +589,20 @@ def run_task(
             evaluator_commit=approval["evaluator_commit"],
             evaluator_directory=evaluator_worktree,
             stop_path=task.directory / "stop.requested",
+            progress=progress,
             **calibration_arguments,
         )
+        if manifest.calibration.controller_pilot:
+            remove_worktree(task.config.repo, calibration_champion)
     else:
         trial_count = load_trial_count(task.directory, task.config)
-    _notify(progress, "ready", trial_count=trial_count)
+    trial_record = load_trial_count_record(task.directory, task.config)
+    _notify(
+        progress,
+        "ready",
+        trial_count=trial_count,
+        calibration_summary=trial_record.get("calibration"),
+    )
     results: list[dict[str, Any]] = []
     stopped = False
     for _ in range(limit):
@@ -777,6 +798,7 @@ def run_task(
                 evaluator_worktree=evaluator_worktree,
                 command_builder=comparison_command_builder,
                 stop_path=stop,
+                progress=progress,
             )
         except ComparisonFailure as error:
             current = load_experiment(experiment)
@@ -821,6 +843,7 @@ def run_task(
                         evaluator_worktree=evaluator_worktree,
                         command_builder=comparison_command_builder,
                         stop_path=stop,
+                        progress=progress,
                     )
                 except ComparisonFailure as error:
                     result = publish_comparison_failure(
@@ -859,6 +882,7 @@ def run_task(
                         evaluator_worktree=evaluator_worktree,
                         command_builder=comparison_command_builder,
                         stop_path=stop,
+                        progress=progress,
                     )
                     if suspect_path.is_file()
                     else None

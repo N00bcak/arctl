@@ -67,7 +67,7 @@ git update-ref refs/arctl/$TASK/champion $CANDIDATE $EXPECTED_CHAMPION
 `arctl` never changes a normal production branch.
 The evaluator must live outside the target repo. A separate private Git repo is the normal setup. The task stores one evaluator commit and its manifest approved by the user. Every calibration and official test uses that exact commit and manifest. Changing either means creating a new task.
 
-The manifest contains the frozen subject, preparation, calibration, and scoring argument-vector commands; their schemas and limits; the public telemetry allowlist; the meaning of one trial and any known dependence between trials; the score statistic; the uncertainty method; the seed-to-case procedure; known uncontrolled score variation and attempted mitigations; the optional suspect-test trigger and its allowed reason codes; and, when supported, the automatic calibration policy and ceiling. The same preparation and scoring commands handle both comparison kinds. The approval screen explains these items in plain language. Evaluator commands are data fixed by the approved manifest; evaluator processes may not return new commands or launch subjects.
+The manifest contains the frozen subject, preparation, calibration, and scoring argument-vector commands; their schemas and limits; the public telemetry allowlist; the meaning of one trial and any known dependence between trials; the score statistic; the uncertainty method; the seed-to-case procedure; known uncontrolled score variation and attempted mitigations; the optional suspect-test trigger and its allowed reason codes; and, when supported, the automatic-calibration ladder, scalar diagnostic, maximum acceptable value, and ceiling-fallback policy. The same preparation and scoring commands handle both comparison kinds. The approval screen explains these items in plain language. Evaluator commands are data fixed by the approved manifest; evaluator processes may not return new commands or launch subjects.
 
 Every evaluator comparison must use a direction-normalized effect:
 ```text
@@ -113,7 +113,7 @@ evaluator:
 trials: auto
 max_experiments: 30
 ```
-`trials` must be exactly `auto` or a positive integer other than a Boolean. `auto` runs the approved evaluator's calibration once and freezes the selected count. An integer skips calibration and fixes that count; `1` is the deterministic special case. The fixed or calibrated count must be supported by the evaluator manifest and must not exceed its approved safety ceiling. `arctl init` uses `auto` by default.
+`trials` must be exactly `auto` or a positive integer other than a Boolean. `auto` runs one controller-orchestrated champion pilot at the approved ladder ceiling, asks the evaluator for one finite diagnostic at every nested ladder prefix, and has `arctl` freeze the smallest stable passing rung. An integer skips calibration and fixes that count; `1` is the deterministic special case. The fixed or calibrated count must be supported by the evaluator manifest and must not exceed its approved safety ceiling. `arctl init` uses `auto` by default.
 
 All evaluator-manifest commands must be argument lists, not shell strings.
 Allowed full-argument placeholders:
@@ -153,7 +153,7 @@ Every command uses the same interaction contract:
 - infer the task from the current repo when exactly one task matches;
 - require an explicit task ID only when inference is impossible or ambiguous;
 - say what happened, whether saved evidence remains valid, and whether the user must act;
-- finish with exactly one recommended next command.
+- omit command recommendations from human output; orchestration uses `--json`.
 
 Human output uses progressive disclosure rather than printing every machine
 field as prose. `run` narrates safe experiment-state transitions and final
@@ -166,7 +166,7 @@ a trust boundary.
 The same eight commands accept `--json` as the sanctioned AI-operation route. JSON output contains a schema version, success or failure, task and experiment IDs, stable state, action requirement, allowed actions, safe artifact metadata, and the next command. It never contains private seeds, cases, raw subject output, or private evidence. The configured operator AI is trusted to orchestrate through this route; research sessions remain untrusted and separately sandboxed. Human-readable and JSON output describe the same permitted operational facts.
 
 ### 9.3 Errors and stop
-Each error must say what failed, whether the result is still valid, whether work can continue, the next safe command, and the log path. Show stack traces only with `--debug`.
+Each error must say what failed, whether the result is still valid, whether work can continue, and the log path. Show stack traces only with `--debug`.
 `Ctrl-C` and `arctl stop` must do the same thing.
 Before the primary comparison is reserved: stop, discard the unfinished experiment, and do not count an experiment.
 After any comparison is reserved: stop active processes, keep valid saved output, publish `INVALID`, and never rerun or redraw that comparison.
@@ -189,9 +189,9 @@ remain authoritative.
 ### 10.1 Fix the trial count
 When `trials` is a positive integer, `arctl` freezes that value for every comparison and skips calibration.
 
-With `trials: auto`, calibration happens once after approval and before research. It freezes the initial champion and manifest, reserves non-reusable calibration seeds, runs the approved calibration protocol, validates the recommended positive count against the manifest and its ceiling, saves private evidence, and freezes the count for the task. Calibration reuses the controller's seed allocator and `ProcessRun` rules.
+With `trials: auto`, calibration happens once after approval and before research. It freezes the initial champion and manifest, reserves non-reusable calibration seeds, prepares one ceiling-sized batch, runs the champion once, and asks the evaluator for the approved scalar diagnostic at every nested ladder prefix. `arctl` validates the exact ladder and finite values, then selects the smallest rung whose value and every later value are at or below the approved maximum. It saves private evidence and freezes the count for the task. Calibration reuses the controller's seed allocator, sandbox profiles, and `ProcessRun` rules.
 
-The evaluator owns and explains its calibration criterion. The starter template uses `32, 64, 128, 256`, an evaluator-defined 95% uncertainty statement, and a 10% relative-uncertainty target, but these are not universal assumptions. Calibration means only that the approved criterion was met on its evidence; it does not prove that all variation is controlled or that uncertainty has nominal coverage. Failure blocks research and is never silently retried or given replacement seeds.
+The evaluator owns and explains how its diagnostic is calculated; `arctl` owns threshold application and count selection. If no rung passes, `arctl` freezes the ceiling and persistently warns that the criterion was unmet. Champion-only calibration measures the approved baseline property and does not guarantee power for unknown future paired candidate effects. Failure blocks research and is never silently retried or given replacement seeds.
 
 ### 10.2 Develop and freeze
 `arctl` creates a clean champion worktree and starts one `RESEARCH` session with the approved public packet. The session may use public probes and must write:
@@ -363,7 +363,7 @@ The MVP is done when one toy repo and one real repo show:
 9. Only `arctl` decides: positive lower bound accepts, flagged acceptance waits for its suspect result, positive uncertainty archives, and non-positive effect rejects.
 10. Candidate failure gives `REJECT`, system or incoherent-evidence failure gives `INVALID`, and only final `ACCEPT` changes the champion.
 11. Later research sessions see only checked aggregate final results; private per-trial evidence remains auditable from the experiment folder and Git history.
-12. All eight commands infer unambiguous tasks, explain validity and the next command, and provide schema-valid sanctioned `--json` output without private evidence.
+12. All eight commands infer unambiguous tasks, explain validity in human output, and provide schema-valid sanctioned `--json` output with a next command and without private evidence.
 13. AI-operated approval reports that human permission is required; approval, status, stop, errors, and the novice setup path require no source reading.
 14. A real task runs several experiments without repeated approval, preserves failed ideas, and reports the best-effort and non-search-wide limits.
 15. `install.sh` creates a working local editable installation and exposes `arctl` without PyPI, `sudo`, or system-Python changes.

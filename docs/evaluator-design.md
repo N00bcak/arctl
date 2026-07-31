@@ -35,9 +35,17 @@ The author must also explain:
 - why the fixed trial count or calibration criterion is adequate;
 - any suspect trigger, its approved reason codes, and the pathology it targets.
 
-Calibration can choose a count under an approved empirical criterion. It cannot
-remove systematic bias or prove coverage. A suspect test can investigate one
-declared warning sign. It is not a general multiple-testing correction.
+For new automatic tasks, arctl runs the frozen champion once at the approved
+ladder ceiling. The evaluator reports one non-negative scalar diagnostic for
+every nested prefix; arctl applies the approved maximum and freezes the
+smallest stable passing suffix. If the ceiling misses the target, arctl uses it
+only with a persistent warning.
+
+This champion-only pilot can size an approved baseline-precision property. It
+does not know the paired-difference variance of future candidates and therefore
+does not prove candidate power, remove systematic bias, or prove coverage. A
+suspect test can investigate one declared warning sign. It is not a general
+multiple-testing correction.
 
 ## Reference conformance fixtures
 

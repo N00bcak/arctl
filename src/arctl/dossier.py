@@ -16,6 +16,7 @@ from .errors import StateError
 from .git import candidate_changed_paths, candidate_diff
 from .models import TaskConfig
 from .storage import atomic_write_text
+from .trials import load_trial_count_record
 
 _CONTROL = re.compile(
     r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]"
@@ -99,6 +100,7 @@ def _public_check_lines(
 
 
 def _documents(
+    task_directory: Path,
     task: TaskConfig,
     experiment: Path,
     result: dict[str, Any],
@@ -165,6 +167,19 @@ def _documents(
         )
     )
     telemetry = result.get("telemetry", {})
+    trial_record = (
+        load_trial_count_record(task_directory, task)
+        if (task_directory / "trial-count.json").is_file()
+        else {}
+    )
+    calibration = trial_record.get("calibration")
+    calibration_note = (
+        "Calibration warning: the approved diagnostic did not meet its "
+        f"maximum of {calibration['maximum']} {safe_text(calibration['units'])} "
+        "at the approved ceiling; the ceiling count was used."
+        if calibration is not None and not calibration["criterion_met"]
+        else None
+    )
     evaluation = "\n".join(
         (
             f"# Evaluation — Experiment {identifier}",
@@ -192,6 +207,7 @@ def _documents(
             "",
             f"Champion after: {_code(str(result['champion_after'])[:12])}",
             "",
+            *([f"**{calibration_note}**", ""] if calibration_note else []),
             "The approved evaluator calculates uncertainty for each candidate "
             "comparison. arctl validates the protocol and evidence shape, not the "
             "evaluator's mathematics. This adaptive search has no task-wide "
@@ -229,7 +245,9 @@ def ensure_experiment_dossier(
     parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=parent))
     try:
-        for name, content in _documents(task, experiment, result).items():
+        for name, content in _documents(
+            task_directory, task, experiment, result
+        ).items():
             atomic_write_text(temporary / name, content)
         try:
             os.rename(temporary, target)

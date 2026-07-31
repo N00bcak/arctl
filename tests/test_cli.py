@@ -9,7 +9,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from arctl.cli import _emit, _invoked_program, _progress, main
+from arctl.cli import (
+    _ProgressView,
+    _emit,
+    _invoked_program,
+    _progress,
+    _rewrite_next_command,
+    main,
+)
 from arctl.experiment import start_experiment
 
 
@@ -41,7 +48,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(payload["schema_version"], 1)
             self.assertEqual(payload["state"], "TASK_DRAFT")
             self.assertTrue(payload["action_required"])
-            self.assertEqual(payload["next_command"], "arctl approve subject")
+            self.assertEqual(
+                payload["next_command"],
+                f"arctl --data {root / 'data'} approve subject",
+            )
             task = root / "data" / "tasks" / "subject" / "task.yaml"
             self.assertIn(f'repo: "{repo}"', task.read_text())
 
@@ -63,11 +73,11 @@ class CliTests(unittest.TestCase):
             self.assertFalse(error["can_continue"])
             self.assertIn("log_path", error)
 
-    def test_human_output_ends_with_exactly_one_next_command(self) -> None:
+    def test_human_output_omits_machine_next_command(self) -> None:
         code, output = self.run_cli(["doctor"])
         self.assertIn(code, (0, 1))
         next_lines = [line for line in output.splitlines() if line.startswith("Next: ")]
-        self.assertEqual(len(next_lines), 1)
+        self.assertEqual(next_lines, [])
 
     def test_human_success_omits_generic_machine_boilerplate(self) -> None:
         payload = {
@@ -92,7 +102,7 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("Saved evidence", rendered)
         self.assertNotIn("Work can continue", rendered)
         self.assertNotIn("User action required", rendered)
-        self.assertEqual(rendered.splitlines()[-1], "Next: arctl run demo")
+        self.assertEqual(rendered.splitlines()[-1], "Approved and locked task demo.")
 
     def test_progress_is_safe_single_line_narration(self) -> None:
         output = io.StringIO()
@@ -107,11 +117,104 @@ class CliTests(unittest.TestCase):
         rendered = output.getvalue()
         self.assertNotIn("\u001b", rendered)
         self.assertNotIn("\nFAKE STATUS", rendered)
-        self.assertIn("Implemented candidate aaaaaaaaaaaa", rendered)
+        self.assertIn("Candidate: aaaaaaaaaaaa", rendered)
+
+    def test_non_tty_progress_shows_fsm_duration_without_ansi(self) -> None:
+        now = [10.0]
+        output = io.StringIO()
+        view = _ProgressView(
+            output,
+            clock=lambda: now[0],
+            interactive=False,
+        )
+        view({"event": "research"})
+        now[0] = 12.5
+        view(
+            {
+                "event": "candidate",
+                "candidate": "b" * 40,
+                "claim": "Focused change.",
+            }
+        )
+        view.close()
+        rendered = output.getvalue()
+        self.assertIn("✓ RESEARCHING · 2.5s", rendered)
+        self.assertIn("✓ CANDIDATE_FROZEN", rendered)
+        self.assertNotIn("\033", rendered)
+
+    def test_each_progress_stage_requires_only_its_own_fields(self) -> None:
+        events = [
+            {"scope": "calibration", "stage": "reserve"},
+            {"scope": "calibration", "stage": "prepare"},
+            {"scope": "calibration", "stage": "champion_pilot"},
+            {"scope": "calibration", "stage": "assessment"},
+            {"scope": "calibration", "stage": "freeze"},
+            {"scope": "comparison", "stage": "comparison"},
+            {"scope": "comparison", "stage": "prepare"},
+            {
+                "scope": "comparison",
+                "stage": "subject",
+                "batch": 1,
+                "batches": 2,
+            },
+            {"scope": "comparison", "stage": "score"},
+            {"scope": "comparison", "stage": "validate"},
+        ]
+        labels = [_ProgressView._stage_label(event) for event in events]
+        self.assertEqual(labels[6], "evaluator prepare")
+        self.assertEqual(labels[7], "subject batch 1/2")
+
+    def test_human_status_discloses_ceiling_fallback(self) -> None:
+        payload = {
+            "schema_version": 1,
+            "success": True,
+            "task_id": "demo",
+            "experiment_id": None,
+            "state": "READY",
+            "action_required": False,
+            "allowed_actions": ["run"],
+            "artifacts": [],
+            "message": "Ready.",
+            "evidence_valid": None,
+            "can_continue": True,
+            "log_path": None,
+            "next_command": "arctl run demo",
+            "status": {
+                "state": "READY",
+                "trial_count": 64,
+                "champion": "a" * 40,
+                "last_result": None,
+                "provisional": False,
+                "stop_requested": False,
+                "calibration_summary": {
+                    "criterion_met": False,
+                    "diagnostic": "baseline standard error",
+                    "units": "score",
+                    "maximum": 3.0,
+                    "selected_value": 3.4,
+                    "ceiling_fallback": True,
+                },
+            },
+        }
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _emit(payload, as_json=False)
+        self.assertIn("approved ceiling was used", output.getvalue())
 
     def test_real_entrypoint_is_preserved_in_recommended_commands(self) -> None:
         with mock.patch("sys.argv", ["./.venv/bin/arctl", "status"]):
             self.assertEqual(_invoked_program(None), "./.venv/bin/arctl")
+
+        payload = {"next_command": "arctl run demo"}
+        _rewrite_next_command(
+            payload,
+            "./.venv/bin/arctl",
+            Path("/tmp/arctl task data"),
+        )
+        self.assertEqual(
+            payload["next_command"],
+            "./.venv/bin/arctl --data '/tmp/arctl task data' run demo",
+        )
 
     def test_init_rejects_non_git_repo_and_unsafe_task_id(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -152,7 +255,10 @@ class CliTests(unittest.TestCase):
             status = json.loads(output)
             self.assertEqual(code, 0)
             self.assertEqual(status["state"], "TASK_DRAFT")
-            self.assertEqual(status["next_command"], "arctl approve subject")
+            self.assertEqual(
+                status["next_command"],
+                f"arctl --data {data} approve subject",
+            )
 
             code, output = self.run_cli(
                 ["--data", str(data), "report", "subject", "--json"]

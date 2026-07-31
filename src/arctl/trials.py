@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -10,7 +11,16 @@ from .errors import StateError
 from .models import TaskConfig
 from .storage import write_json_once
 
-_FIELDS = {"schema_version", "source", "trial_count"}
+_V1_FIELDS = {"schema_version", "source", "trial_count"}
+_V2_FIELDS = _V1_FIELDS | {"calibration"}
+_CALIBRATION_FIELDS = {
+    "criterion_met",
+    "diagnostic",
+    "units",
+    "maximum",
+    "selected_value",
+    "ceiling_fallback",
+}
 
 
 def freeze_fixed_trial_count(task_directory: Path, task: TaskConfig) -> None:
@@ -30,22 +40,29 @@ def freeze_automatic_trial_count(
     task_directory: Path,
     task: TaskConfig,
     trial_count: int,
+    *,
+    calibration: Mapping[str, Any] | None = None,
 ) -> None:
     if task.trials != "auto":
         raise StateError("cannot save automatic calibration for a fixed task")
     if isinstance(trial_count, bool) or not isinstance(trial_count, int) or trial_count <= 0:
         raise StateError("automatic trial count must be a positive integer")
-    write_json_once(
-        task_directory / "trial-count.json",
-        {
-            "schema_version": 1,
-            "source": "automatic",
-            "trial_count": trial_count,
-        },
-    )
+    value: dict[str, Any] = {
+        "schema_version": 1 if calibration is None else 2,
+        "source": "automatic",
+        "trial_count": trial_count,
+    }
+    if calibration is not None:
+        if set(calibration) != _CALIBRATION_FIELDS:
+            raise StateError("automatic calibration summary fields are invalid")
+        value["calibration"] = dict(calibration)
+    write_json_once(task_directory / "trial-count.json", value)
 
 
-def load_trial_count(task_directory: Path, task: TaskConfig) -> int:
+def load_trial_count_record(
+    task_directory: Path,
+    task: TaskConfig,
+) -> dict[str, Any]:
     try:
         value: Any = json.loads(
             (task_directory / "trial-count.json").read_text(encoding="utf-8")
@@ -54,12 +71,16 @@ def load_trial_count(task_directory: Path, task: TaskConfig) -> int:
         if task.trials == "auto":
             raise StateError("automatic trial calibration has not completed") from error
         raise StateError("fixed trial-count record is missing") from error
-    if not isinstance(value, Mapping) or set(value) != _FIELDS:
+    if (
+        not isinstance(value, Mapping)
+        or value.get("schema_version") not in (1, 2)
+        or set(value)
+        != (_V1_FIELDS if value.get("schema_version") == 1 else _V2_FIELDS)
+    ):
         raise StateError("trial-count record fields are invalid")
     count = value["trial_count"]
     if (
-        value["schema_version"] != 1
-        or value["source"] not in ("fixed", "automatic")
+        value["source"] not in ("fixed", "automatic")
         or isinstance(count, bool)
         or not isinstance(count, int)
         or count <= 0
@@ -71,4 +92,35 @@ def load_trial_count(task_directory: Path, task: TaskConfig) -> int:
         raise StateError("fixed trial-count record differs from the approved task")
     if task.trials == "auto" and value["source"] != "automatic":
         raise StateError("automatic task has a non-automatic trial-count record")
-    return count
+    if value["schema_version"] == 2:
+        if value["source"] != "automatic":
+            raise StateError("version-2 trial-count record must be automatic")
+        calibration = value["calibration"]
+        if not isinstance(calibration, Mapping) or set(calibration) != _CALIBRATION_FIELDS:
+            raise StateError("automatic calibration summary fields are invalid")
+        maximum = calibration["maximum"]
+        selected = calibration["selected_value"]
+        if (
+            not isinstance(calibration["criterion_met"], bool)
+            or not isinstance(calibration["ceiling_fallback"], bool)
+            or not isinstance(calibration["diagnostic"], str)
+            or not calibration["diagnostic"]
+            or not isinstance(calibration["units"], str)
+            or not calibration["units"]
+            or isinstance(maximum, bool)
+            or not isinstance(maximum, (int, float))
+            or isinstance(selected, bool)
+            or not isinstance(selected, (int, float))
+            or not math.isfinite(float(maximum))
+            or maximum < 0
+            or not math.isfinite(float(selected))
+            or selected < 0
+            or calibration["ceiling_fallback"]
+            == calibration["criterion_met"]
+        ):
+            raise StateError("automatic calibration summary values are invalid")
+    return dict(value)
+
+
+def load_trial_count(task_directory: Path, task: TaskConfig) -> int:
+    return int(load_trial_count_record(task_directory, task)["trial_count"])

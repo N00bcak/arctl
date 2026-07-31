@@ -168,7 +168,7 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
             (self.task_directory / "worktrees" / "000001-candidate").exists()
         )
         self.assertEqual(
-            [event["event"] for event in events],
+            [event["event"] for event in events if event["event"] != "stage"],
             [
                 "ready",
                 "experiment",
@@ -179,6 +179,25 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
                 "comparison",
                 "result",
                 "complete",
+            ],
+        )
+        self.assertEqual(
+            [
+                (event["stage"], event["status"])
+                for event in events
+                if event["event"] == "stage"
+            ],
+            [
+                ("prepare", "started"),
+                ("prepare", "complete"),
+                ("subject", "started"),
+                ("subject", "complete"),
+                ("subject", "started"),
+                ("subject", "complete"),
+                ("score", "started"),
+                ("score", "complete"),
+                ("validate", "started"),
+                ("validate", "complete"),
             ],
         )
         self.assertTrue(

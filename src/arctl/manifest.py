@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -30,7 +31,9 @@ _TRIAL_FIELDS = {"meaning", "dependence", "seed_to_case", "subject_visible_seed"
 _STATISTIC_FIELDS = {"score", "uncertainty", "positive_effect"}
 _VARIATION_FIELDS = {"known", "mitigations"}
 _SUSPECT_FIELDS = {"trigger", "reason_codes"}
-_CALIBRATION_FIELDS = {"supported", "policy", "ceiling"}
+_CALIBRATION_V1_FIELDS = {"supported", "policy", "ceiling"}
+_CALIBRATION_V2_FIELDS = {"supported", "policy", "ladder", "diagnostic"}
+_DIAGNOSTIC_FIELDS = {"name", "units", "maximum"}
 
 
 def _object(value: Any, fields: set[str], label: str) -> Mapping[str, Any]:
@@ -87,10 +90,16 @@ class CalibrationPolicy:
     supported: bool
     policy: str | None
     ceiling: int | None
+    ladder: tuple[int, ...]
+    diagnostic_name: str | None
+    diagnostic_units: str | None
+    diagnostic_maximum: float | None
+    controller_pilot: bool
 
 
 @dataclass(frozen=True)
 class EvaluatorManifest:
+    schema_version: int
     subject_command: tuple[str, ...]
     prepare_command: tuple[str, ...]
     calibrate_command: tuple[str, ...] | None
@@ -117,8 +126,9 @@ class EvaluatorManifest:
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> EvaluatorManifest:
         root = _object(value, _FIELDS, "manifest")
-        if root["schema_version"] != 1:
-            raise ValidationError("manifest.schema_version must equal 1")
+        schema_version = root["schema_version"]
+        if schema_version not in (1, 2):
+            raise ValidationError("manifest.schema_version must equal 1 or 2")
 
         limits = _object(root["limits"], _LIMIT_FIELDS, "limits")
         schemas = _object(root["schemas"], _SCHEMA_FIELDS, "schemas")
@@ -127,7 +137,15 @@ class EvaluatorManifest:
         statistics = _object(root["statistics"], _STATISTIC_FIELDS, "statistics")
         variation = _object(root["variation"], _VARIATION_FIELDS, "variation")
         suspect = _object(root["suspect_test"], _SUSPECT_FIELDS, "suspect_test")
-        calibration = _object(root["calibration"], _CALIBRATION_FIELDS, "calibration")
+        calibration = _object(
+            root["calibration"],
+            (
+                _CALIBRATION_V1_FIELDS
+                if schema_version == 1
+                else _CALIBRATION_V2_FIELDS
+            ),
+            "calibration",
+        )
 
         try:
             from jsonschema import Draft202012Validator
@@ -157,19 +175,84 @@ class EvaluatorManifest:
                 placeholders=("request", "response"),
             )
             policy = _text(calibration["policy"], "calibration.policy")
-            ceiling = _positive_integer(calibration["ceiling"], "calibration.ceiling")
+            if schema_version == 1:
+                ceiling = _positive_integer(
+                    calibration["ceiling"], "calibration.ceiling"
+                )
+                ladder = (ceiling,)
+                diagnostic_name = None
+                diagnostic_units = None
+                diagnostic_maximum = None
+            else:
+                raw_ladder = calibration["ladder"]
+                if (
+                    not isinstance(raw_ladder, list)
+                    or not raw_ladder
+                    or any(
+                        isinstance(count, bool)
+                        or not isinstance(count, int)
+                        or count <= 0
+                        for count in raw_ladder
+                    )
+                    or raw_ladder != sorted(set(raw_ladder))
+                ):
+                    raise ValidationError(
+                        "calibration.ladder must be strictly increasing positive integers"
+                    )
+                ladder = tuple(raw_ladder)
+                ceiling = ladder[-1]
+                diagnostic = _object(
+                    calibration["diagnostic"],
+                    _DIAGNOSTIC_FIELDS,
+                    "calibration.diagnostic",
+                )
+                diagnostic_name = _text(
+                    diagnostic["name"], "calibration.diagnostic.name"
+                )
+                diagnostic_units = _text(
+                    diagnostic["units"], "calibration.diagnostic.units"
+                )
+                maximum = diagnostic["maximum"]
+                if (
+                    isinstance(maximum, bool)
+                    or not isinstance(maximum, (int, float))
+                    or not math.isfinite(maximum)
+                    or maximum < 0
+                ):
+                    raise ValidationError(
+                        "calibration.diagnostic.maximum must be a finite "
+                        "non-negative number"
+                    )
+                diagnostic_maximum = float(maximum)
         else:
             if calibration_command is not None:
                 raise ValidationError(
                     "calibrate_command must be null when calibration is unsupported"
                 )
-            if calibration["policy"] is not None or calibration["ceiling"] is not None:
+            if schema_version == 1:
+                if (
+                    calibration["policy"] is not None
+                    or calibration["ceiling"] is not None
+                ):
+                    raise ValidationError(
+                        "calibration policy and ceiling must be null when unsupported"
+                    )
+            elif (
+                calibration["policy"] is not None
+                or calibration["ladder"] is not None
+                or calibration["diagnostic"] is not None
+            ):
                 raise ValidationError(
-                    "calibration policy and ceiling must be null when unsupported"
+                    "calibration policy, ladder, and diagnostic must be null "
+                    "when unsupported"
                 )
             command = None
             policy = None
             ceiling = None
+            ladder = ()
+            diagnostic_name = None
+            diagnostic_units = None
+            diagnostic_maximum = None
 
         trigger = suspect["trigger"]
         reasons = _string_tuple(suspect["reason_codes"], "suspect_test.reason_codes")
@@ -182,6 +265,7 @@ class EvaluatorManifest:
                 raise ValidationError("suspect trigger requires at least one reason code")
 
         return cls(
+            schema_version=schema_version,
             subject_command=validate_command_template(
                 root["subject_command"],
                 label="subject_command",
@@ -228,7 +312,16 @@ class EvaluatorManifest:
             ),
             suspect_trigger=trigger,
             suspect_reason_codes=reasons,
-            calibration=CalibrationPolicy(calibration_supported, policy, ceiling),
+            calibration=CalibrationPolicy(
+                calibration_supported,
+                policy,
+                ceiling,
+                ladder,
+                diagnostic_name,
+                diagnostic_units,
+                diagnostic_maximum,
+                schema_version == 2 and calibration_supported,
+            ),
         )
 
     def validate_trial_setting(self, trials: str | int) -> None:

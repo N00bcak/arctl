@@ -13,10 +13,15 @@ arctl doctor
 ```
 
 Normal operation uses `run`, `status`, `stop`, `report`, and `inspect`.
-Interactive `run` narrates safe experiment transitions. Every published
+Interactive `run` shows the experiment FSM, comparison substages, and live
+stage timing. Every published
 experiment receives a public-only Markdown dossier under the task’s
 `reports/experiments/` directory; `report` and `inspect` print its path.
 Use `--json` for AI orchestration.
+
+Automatic trial sizing is a one-time controller-run champion pilot over an
+approved ladder. The evaluator calculates the task-specific diagnostic; arctl
+selects and freezes the smallest stable passing rung.
 
 Research sessions are offline. They may read the runtimes named by approved
 public checks and probes, but cannot read evaluator or task-private artifacts.

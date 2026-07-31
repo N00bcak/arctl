@@ -7,8 +7,10 @@ import json
 import os
 import shlex
 import sys
+import threading
+import time
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, TextIO, Sequence
 
 from .errors import ArctlError, StateError
 from .models import validate_task_id
@@ -90,6 +92,16 @@ def _result_line(result: dict[str, Any]) -> str:
     )
 
 
+def _calibration_warning(summary: dict[str, Any] | None) -> str | None:
+    if summary is None or summary["criterion_met"]:
+        return None
+    return (
+        "Warning: calibration did not meet "
+        f"{summary['diagnostic']} ≤ {summary['maximum']} {summary['units']}; "
+        "the approved ceiling was used."
+    )
+
+
 def _emit_human(
     payload: dict[str, Any],
     *,
@@ -122,6 +134,9 @@ def _emit_human(
                 "\nNote: uncertainty is evaluator-owned; adaptive search has no "
                 "task-wide false-promotion guarantee."
             )
+        warning = _calibration_warning(report.get("calibration_summary"))
+        if warning is not None:
+            print("\n" + warning)
     elif state == "INSPECT":
         result = payload.get("result")
         if result is None:
@@ -144,6 +159,9 @@ def _emit_human(
             print("\nSafe artifact inventory:")
             for artifact in payload["artifacts"]:
                 print(f"- [{artifact['visibility']}] {artifact['path']}")
+        warning = _calibration_warning(payload.get("calibration_summary"))
+        if warning is not None:
+            print(warning)
     elif state == "RUN_COMPLETE":
         results = payload.get("results", [])
         accepted = sum(result["decision"] == "ACCEPT" for result in results)
@@ -172,9 +190,11 @@ def _emit_human(
             print("A candidate is provisional; its suspect test is pending.")
         if status["stop_requested"]:
             print("A safe stop has been requested.")
+        warning = _calibration_warning(status.get("calibration_summary"))
+        if warning is not None:
+            print(warning)
     else:
         print(payload["message"])
-    print(f"Next: {payload['next_command']}")
 
 
 def _emit(
@@ -189,39 +209,183 @@ def _emit(
     _emit_human(payload, show_artifacts=show_artifacts)
 
 
-def _progress(event: dict[str, Any]) -> None:
-    from .dossier import safe_terminal_text
+class _ProgressView:
+    """Render live FSM stages without making timing part of official evidence."""
 
-    kind = event["event"]
-    if kind == "calibration":
-        print("Checking frozen calibration…", flush=True)
-    elif kind == "ready":
-        print(f"Official evaluation: {event['trial_count']} paired trial(s).", flush=True)
-    elif kind == "experiment":
-        print(f"\nExperiment {event['experiment_id']}", flush=True)
-    elif kind == "research":
-        print("  Researching from the current champion…", flush=True)
-    elif kind == "candidate":
-        print(
-            f"  Proposed: {safe_terminal_text(event['claim'], limit=180)}",
-            flush=True,
+    def __init__(
+        self,
+        stream: TextIO | None = None,
+        *,
+        clock=time.monotonic,
+        interactive: bool | None = None,
+    ) -> None:
+        self.stream = sys.stdout if stream is None else stream
+        self.clock = clock
+        self.interactive = (
+            self.stream.isatty() if interactive is None else interactive
         )
-        print(f"  Implemented candidate {event['candidate'][:12]}.", flush=True)
-    elif kind == "public_checks":
-        print("  Checking public constraints…", flush=True)
-    elif kind == "public_checks_complete":
-        outcome = "passed" if event["passed"] else "failed"
-        print(f"  Public checks {outcome}.", flush=True)
-    elif kind == "comparison":
-        label = "Primary" if event["kind"] == "primary" else "Suspect"
-        print(
-            f"  {label} evaluation: {event['trial_count']} paired trial(s)…",
-            flush=True,
+        self._active: tuple[str, float, str] | None = None
+        self._lock = threading.Lock()
+        self._closed = threading.Event()
+        self._thread: threading.Thread | None = None
+        if self.interactive:
+            self._thread = threading.Thread(target=self._refresh, daemon=True)
+            self._thread.start()
+
+    @staticmethod
+    def _duration(seconds: float) -> str:
+        if seconds < 60:
+            return f"{seconds:.1f}s"
+        minutes, remainder = divmod(int(seconds), 60)
+        return f"{minutes}m {remainder:02d}s"
+
+    def _clear_active(self) -> None:
+        if self.interactive and self._active is not None:
+            self.stream.write("\r\033[2K")
+
+    def _line(self, text: str) -> None:
+        self._clear_active()
+        self.stream.write(text + "\n")
+        self.stream.flush()
+
+    def _start(self, label: str, *, indent: str = "  ") -> None:
+        if self._active is not None:
+            self._finish("complete")
+        self._active = (label, self.clock(), indent)
+        if not self.interactive:
+            self._line(f"{indent}› {label}")
+
+    def _finish(self, status: str = "complete") -> None:
+        if self._active is None:
+            return
+        label, started, indent = self._active
+        elapsed = self._duration(max(0.0, self.clock() - started))
+        self._clear_active()
+        marker = {"recovered": "↺", "failed": "✗"}.get(status, "✓")
+        suffix = (
+            " · recovered"
+            if status == "recovered"
+            else f" · {elapsed}" + (" · failed" if status == "failed" else "")
         )
-    elif kind == "provisional":
-        print("  Apparent win flagged; champion unchanged pending suspect test.", flush=True)
-    elif kind == "result":
-        print("  " + _result_line(event["result"]).lstrip(), flush=True)
+        self.stream.write(f"{indent}{marker} {label}{suffix}\n")
+        self.stream.flush()
+        self._active = None
+
+    def _refresh(self) -> None:
+        while not self._closed.wait(0.2):
+            with self._lock:
+                if self._active is None:
+                    continue
+                label, started, indent = self._active
+                elapsed = self._duration(max(0.0, self.clock() - started))
+                self.stream.write(f"\r\033[2K{indent}› {label} · {elapsed}")
+                self.stream.flush()
+
+    def close(self, *, failed: bool = False) -> None:
+        self._closed.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1)
+        with self._lock:
+            self._finish("failed" if failed else "complete")
+
+    def __call__(self, event: dict[str, Any]) -> None:
+        from .dossier import safe_terminal_text
+
+        with self._lock:
+            kind = event["event"]
+            if kind == "calibration":
+                self._line("Calibration")
+            elif kind == "ready":
+                self._finish()
+                self._line(
+                    f"Official evaluation: {event['trial_count']} paired trial(s)."
+                )
+                warning = _calibration_warning(event.get("calibration_summary"))
+                if warning is not None:
+                    self._line(warning)
+            elif kind == "experiment":
+                self._finish()
+                self._line(f"\nExperiment {event['experiment_id']}")
+            elif kind == "research":
+                self._start("RESEARCHING")
+            elif kind == "candidate":
+                self._finish()
+                self._line("  ✓ CANDIDATE_FROZEN")
+                self._line(
+                    "    Proposed: "
+                    + safe_terminal_text(event["claim"], limit=180)
+                )
+                self._line(f"    Candidate: {event['candidate'][:12]}")
+            elif kind == "public_checks":
+                self._start("public checks", indent="    ")
+            elif kind == "public_checks_complete":
+                self._finish()
+                outcome = "passed" if event["passed"] else "failed"
+                self._line(f"    Public checks {outcome}.")
+            elif kind == "comparison":
+                self._finish()
+                label = (
+                    "PRIMARY_RESERVED"
+                    if event["kind"] == "primary"
+                    else "SUSPECT_RESERVED"
+                )
+                self._line(
+                    f"  › {label} · {event['trial_count']} paired trial(s)"
+                )
+            elif kind == "stage":
+                label = self._stage_label(event)
+                if event["status"] == "started":
+                    self._start(label, indent="      ")
+                elif self._active is not None:
+                    self._finish(event["status"])
+                else:
+                    marker = "↺" if event["status"] == "recovered" else "✓"
+                    self._line(f"      {marker} {label}")
+            elif kind == "provisional":
+                self._finish()
+                self._line("  ✓ PROVISIONAL · suspect comparison required")
+            elif kind == "result":
+                self._finish()
+                self._line("  ✓ FINALIZING")
+                self._line("  ✓ COMPLETE")
+                self._line("    " + _result_line(event["result"]).lstrip())
+            elif kind == "complete":
+                self._finish()
+
+    @staticmethod
+    def _stage_label(event: dict[str, Any]) -> str:
+        stage = event["stage"]
+        if event["scope"] == "calibration":
+            labels = {
+                "reserve": "reserve calibration seeds",
+                "prepare": "evaluator prepare",
+                "champion_pilot": "champion pilot",
+                "assessment": "evaluator assessment",
+                "freeze": "freeze trial count",
+            }
+            label = labels[stage]
+        else:
+            if stage == "subject":
+                label = f"subject batch {event['batch']}/{event['batches']}"
+            else:
+                label = {
+                    "comparison": "saved comparison",
+                    "prepare": "evaluator prepare",
+                    "score": "evaluator score",
+                    "validate": "validate evidence",
+                }[stage]
+        if "trial_count" in event and stage in ("champion_pilot", "subject"):
+            label += f" · {event['trial_count']} trials"
+        return label
+
+
+def _progress(event: dict[str, Any]) -> None:
+    """Compatibility helper for direct callers and focused rendering tests."""
+    view = _ProgressView(interactive=False)
+    try:
+        view(event)
+    finally:
+        view.close()
 
 
 def _invoked_program(argv: Sequence[str] | None) -> str:
@@ -233,10 +397,17 @@ def _invoked_program(argv: Sequence[str] | None) -> str:
     return shlex.quote(sys.argv[0])
 
 
-def _rewrite_next_command(payload: dict[str, Any], program: str) -> None:
+def _rewrite_next_command(
+    payload: dict[str, Any],
+    program: str,
+    data_root: Path | None = None,
+) -> None:
     command = payload.get("next_command")
     if isinstance(command, str) and (command == "arctl" or command.startswith("arctl ")):
-        payload["next_command"] = program + command[5:]
+        prefix = program
+        if data_root is not None:
+            prefix += " --data " + shlex.quote(str(data_root.resolve()))
+        payload["next_command"] = prefix + command[5:]
 
 
 def _doctor() -> dict[str, Any]:
@@ -327,7 +498,14 @@ def _approve(
         )
         manifest = preview.manifest
         calibration = (
-            f"{manifest.calibration.policy}; ceiling {manifest.calibration.ceiling}"
+            (
+                f"{manifest.calibration.policy}; ladder "
+                f"{list(manifest.calibration.ladder)}; diagnostic "
+                f"{manifest.calibration.diagnostic_name} ≤ "
+                f"{manifest.calibration.diagnostic_maximum} "
+                f"{manifest.calibration.diagnostic_units}; use the ceiling with "
+                "a persistent warning if no rung meets the target"
+            )
             if located.config.trials == "auto"
             else (
                 f"skipped; fixed count {located.config.trials} will be used "
@@ -629,6 +807,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     program = _invoked_program(argv)
     arguments = build_parser().parse_args(argv)
+    progress_view = (
+        _ProgressView()
+        if arguments.command == "run" and not arguments.json
+        else None
+    )
     try:
         if arguments.command == "doctor":
             payload = _doctor()
@@ -670,7 +853,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _data_root(arguments.data),
                 arguments.task_id,
                 arguments.max_experiments,
-                progress=None if arguments.json else _progress,
+                progress=progress_view,
             )
         else:
             raise StateError(f"unsupported command: {arguments.command}")
@@ -687,10 +870,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.task_id,
             arguments.max_experiments,
             preflight=False,
-            progress=None if arguments.json else _progress,
+            progress=progress_view,
         )
     except ArctlError as error:
         if arguments.debug:
+            if progress_view is not None:
+                progress_view.close(failed=True)
             raise
         identifier = getattr(arguments, "task_id", None)
         log_path = (
@@ -720,7 +905,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             can_continue=False,
             log_path=log_path,
         )
-    _rewrite_next_command(payload, program)
+    if progress_view is not None:
+        progress_view.close(failed=not payload["success"])
+    _rewrite_next_command(payload, program, arguments.data)
     _emit(
         payload,
         as_json=arguments.json,
