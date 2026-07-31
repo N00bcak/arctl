@@ -78,7 +78,41 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
         if result is not None:
             last_result = result
 
-    if (
+    strategies = sorted((task.directory / "strategy").glob("*.public.json"))
+    strategy_failures = sorted(
+        (task.directory / "strategy").glob(
+            "[0-9][0-9][0-9][0-9][0-9][0-9]/strategy.failure.json"
+        )
+    )
+    searches = sorted((task.directory / "searches").glob("[0-9]" * 6))
+    latest_search = searches[-1] if searches else None
+    search_stalled = (
+        latest_search is not None
+        and (latest_search / "stalled.public.json").is_file()
+        and (latest is None or latest.state == "COMPLETE")
+    )
+    attempts = (
+        sorted((latest_search / "attempts").glob("[0-9][0-9]"))
+        if latest_search is not None
+        else []
+    )
+    search_research_failed = bool(
+        attempts and (attempts[-1] / "research.failure.json").is_file()
+    )
+
+    strategy_failed = bool(
+        strategy_failures
+        and int(strategy_failures[-1].parent.name)
+        > max(
+            (int(path.name.split(".")[0]) for path in strategies),
+            default=0,
+        )
+    )
+    if strategy_failed:
+        state = "STRATEGY_FAILED"
+    elif search_research_failed:
+        state = "RESEARCH_FAILED"
+    elif (
         latest is not None
         and (directories[-1] / "research.failure.json").is_file()
     ):
@@ -90,6 +124,8 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
         state = "PUBLIC_CHECK_FAILED"
     elif latest is not None and latest.state != "COMPLETE":
         state = latest.state
+    elif search_stalled:
+        state = "SEARCH_STALLED"
     elif approved and trial_count is not None:
         state = "READY"
     elif approved and calibration == "failed":
@@ -118,9 +154,41 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
         ),
         "last_result": last_result,
         "stop_requested": (task.directory / "stop.requested").exists(),
+        "strategy_revision": len(strategies),
+        "search_id": int(latest_search.name) if latest_search is not None else None,
+        "search_attempt": len(attempts) if attempts else None,
         "log_path": (
-            str(directories[-1] / "process") if directories else str(task.directory)
+            str(strategy_failures[-1].parent / "process")
+            if strategy_failed
+            else str(attempts[-1] / "process")
+            if search_research_failed
+            else str(directories[-1] / "process")
+            if directories
+            else str(task.directory)
         ),
+    }
+
+
+def exploration_history(
+    task: LocatedTask,
+    *,
+    query: str | None = None,
+    path: str | None = None,
+    decision: str | None = None,
+) -> dict[str, Any]:
+    from .search import search_ledger
+
+    entries = search_ledger(
+        task.directory,
+        query=query,
+        path=path,
+        decision=decision,
+    )
+    return {
+        "task_id": task.config.task_id,
+        "entries": entries,
+        "count": len(entries),
+        "ledger_path": str(task.directory / "exploration" / "ledger.public.jsonl"),
     }
 
 

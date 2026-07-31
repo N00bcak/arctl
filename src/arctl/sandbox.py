@@ -134,8 +134,15 @@ def research_command(
     prompt: str,
     read_paths: Sequence[Path] = (),
     codex: str = "codex",
+    output_name: str = "request.public.json",
+    model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> tuple[str, ...]:
     profile = "arctl-research"
+    overrides: tuple[str, ...] = ()
+    if reasoning_effort is not None:
+        overrides += ("--config", f"model_reasoning_effort={json.dumps(reasoning_effort)}")
+    model_option: tuple[str, ...] = ("--model", model) if model is not None else ()
     return (
         codex,
         "exec",
@@ -149,7 +156,9 @@ def research_command(
         "--output-schema",
         str(output_schema.resolve()),
         "--output-last-message",
-        str((scratch / "request.public.json").resolve()),
+        str((scratch / output_name).resolve()),
+        *model_option,
+        *overrides,
         "--config",
         f"default_permissions={json.dumps(profile)}",
         "--config",

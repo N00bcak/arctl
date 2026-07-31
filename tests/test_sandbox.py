@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import sys
+from unittest import mock
 
 from arctl.errors import StateError
 from arctl.manifest import EvaluatorManifest
@@ -133,6 +134,29 @@ class SandboxCommandTests(unittest.TestCase):
             self.assertIn(f'"{(root / "worktree" / ".git").resolve()}"="read"', joined)
             self.assertIn(f'"{runtime.resolve()}"="read"', joined)
             self.assertIn(f'"{(root / "worktree").resolve()}"="write"', joined)
+
+    def test_strategy_selects_explicit_model_effort_and_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            worktree = root / "worktree"
+            scratch = root / "scratch"
+            worktree.mkdir()
+            scratch.mkdir()
+            schema = scratch / "schema.json"
+            schema.write_text("{}")
+            with mock.patch("arctl.sandbox.shutil.which", return_value="/usr/bin/codex"):
+                command = research_command(
+                    worktree=worktree,
+                    scratch=scratch,
+                    output_schema=schema,
+                    prompt="orient",
+                    output_name="strategy.public.json",
+                    model="gpt-5.6-sol",
+                    reasoning_effort="high",
+                )
+            self.assertIn("gpt-5.6-sol", command)
+            self.assertIn('model_reasoning_effort="high"', command)
+            self.assertIn(str((scratch / "strategy.public.json").resolve()), command)
 
     def test_environment_does_not_inherit_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

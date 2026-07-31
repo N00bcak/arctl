@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from arctl.errors import StateError
+from arctl.errors import ResearchMiss, StateError
 from arctl.git import (
     create_candidate_commit,
     create_candidate_ref,
@@ -174,7 +174,7 @@ class GitIntegrationTests(unittest.TestCase):
         create_candidate_ref(self.repo, ref, candidate)
         self.assertEqual(resolve_commit(self.repo, ref), candidate)
 
-        with self.assertRaisesRegex(StateError, "already tested"):
+        with self.assertRaisesRegex(ResearchMiss, "already tested"):
             create_candidate_commit(
                 self.repo,
                 champion=self.champion,

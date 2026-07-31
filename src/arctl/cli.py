@@ -30,6 +30,9 @@ public_probe: [python, tools/dev_benchmark.py]
 evaluator:
   repo: /absolute/path/to/private/evaluator
   commit: REPLACE_WITH_COMMIT
+strategy:
+  model: gpt-5.6-sol
+  reasoning_effort: high
 trials: auto
 max_experiments: 30
 """
@@ -171,6 +174,16 @@ def _emit_human(
         )
     elif state == "STOPPED":
         print(payload["message"])
+    elif state == "SEARCH_STALLED":
+        print(payload["message"])
+        print("Review with: arctl history " + str(payload["task_id"]))
+    elif state == "HISTORY":
+        history = payload["history"]
+        print(f"Exploration history · {history['count']} matching entrie(s)")
+        for entry in history["entries"]:
+            detail = entry.get("claim") or entry.get("kind")
+            outcome = entry.get("decision") or entry.get("rejection_code") or "saved"
+            print(f"- {entry['entry_id']} · {outcome} · {safe_terminal_text(str(detail))}")
     elif state == "TASK_DRAFT":
         print(payload["message"])
         for artifact in payload["artifacts"]:
@@ -184,6 +197,11 @@ def _emit_human(
             f"{status['trial_count'] or 'unfrozen'} trial(s)"
         )
         print(f"Champion: {(status['champion'] or 'none')[:12]}")
+        if status.get("strategy_revision"):
+            print(f"Strategy: revision {status['strategy_revision']}")
+        if status.get("search_id") is not None:
+            attempt = status.get("search_attempt") or 0
+            print(f"Candidate search: {status['search_id']} · {attempt}/6 attempt(s)")
         if status["last_result"] is not None:
             print("Latest: " + _result_line(status["last_result"]).lstrip())
         if status["provisional"]:
@@ -306,6 +324,20 @@ class _ProgressView:
             elif kind == "experiment":
                 self._finish()
                 self._line(f"\nExperiment {event['experiment_id']}")
+            elif kind == "strategy":
+                self._finish()
+                label = "Strategy refresh" if event["refresh"] else "Strategy"
+                self._line(f"{label} · revision {event['revision']}")
+            elif kind == "search_attempt":
+                self._start(
+                    f"candidate search · attempt {event['attempt']}/{event['attempts']}"
+                )
+            elif kind == "search_miss":
+                self._finish("failed")
+                self._line(
+                    "    Miss: "
+                    + safe_terminal_text(event["message"], limit=180)
+                )
             elif kind == "research":
                 self._start("RESEARCHING")
             elif kind == "candidate":
@@ -524,6 +556,8 @@ def _approve(
                 f"Public probe: {' '.join(located.config.public_probe)}",
                 f"Evaluator repo: {located.config.evaluator.repo}",
                 f"Evaluator commit: {preview.evaluator_commit}",
+                "Strategy model: "
+                f"{located.config.strategy_model} ({located.config.strategy_reasoning_effort})",
                 f"Manifest SHA-256: {preview.manifest_hash}",
                 f"Trials: {located.config.trials}",
                 f"Trial meaning: {manifest.trial_meaning}",
@@ -606,7 +640,12 @@ def _status(data_root: Path, task_id: str | None) -> dict[str, Any]:
     elif status["state"] == "CALIBRATION_FAILED":
         next_command = f"arctl status {identifier}"
         action_required = True
-    elif status["state"] in ("RESEARCH_FAILED", "PUBLIC_CHECK_FAILED"):
+    elif status["state"] in (
+        "RESEARCH_FAILED",
+        "STRATEGY_FAILED",
+        "PUBLIC_CHECK_FAILED",
+        "SEARCH_STALLED",
+    ):
         next_command = f"arctl run {identifier}"
         action_required = True
     elif status["state"] in ("READY", "CALIBRATION_REQUIRED"):
@@ -636,7 +675,7 @@ def _status(data_root: Path, task_id: str | None) -> dict[str, Any]:
             else (
                 ("status", "report")
                 if status["state"] == "CALIBRATION_FAILED"
-                else ("run", "status", "stop", "report")
+                else ("run", "status", "stop", "report", "history")
             )
         ),
         next_command=next_command,
@@ -757,19 +796,30 @@ def _run(
     results = outcome.results
     identifier = task.config.task_id
     last = results[-1] if results else None
-    state = "STOPPED" if outcome.stopped else "RUN_COMPLETE"
+    state = (
+        "STOPPED"
+        if outcome.stopped
+        else "SEARCH_STALLED"
+        if outcome.stalled
+        else "RUN_COMPLETE"
+    )
     next_command = f"arctl status {identifier}"
     payload = _payload(
         success=True,
         state=state,
         task_id=identifier,
-        action_required=False,
-        allowed_actions=("status", "report", "inspect", "run"),
+        action_required=outcome.stalled,
+        allowed_actions=("status", "history", "report", "inspect", "run"),
         next_command=next_command,
         message=(
             f"Task {identifier} stopped safely after {len(results)} experiments."
             if outcome.stopped
-            else f"Task {identifier} completed {len(results)} experiments."
+            else (
+                f"Candidate search for {identifier} stalled after six attempts; "
+                "the exploration history was preserved."
+                if outcome.stalled
+                else f"Task {identifier} completed {len(results)} experiments."
+            )
         ),
         evidence_valid=True if results else None,
         log_path=str(task.directory),
@@ -780,12 +830,39 @@ def _run(
     return payload
 
 
+def _history(
+    data_root: Path,
+    task_id: str | None,
+    *,
+    query: str | None,
+    path: str | None,
+    decision: str | None,
+) -> dict[str, Any]:
+    from .operations import exploration_history
+
+    task = _located(data_root, task_id)
+    history = exploration_history(task, query=query, path=path, decision=decision)
+    return {
+        **_payload(
+            success=True,
+            state="HISTORY",
+            task_id=task.config.task_id,
+            action_required=False,
+            allowed_actions=("history", "run", "status"),
+            next_command=f"arctl status {task.config.task_id}",
+            message=f"Found {history['count']} exploration entries.",
+            log_path=history["ledger_path"],
+        ),
+        "history": history,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="arctl")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--data", type=Path, help=argparse.SUPPRESS)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ("doctor", "approve", "run", "status", "stop", "report", "inspect"):
+    for name in ("doctor", "approve", "run", "status", "stop", "report", "inspect", "history"):
         command = subparsers.add_parser(name)
         command.add_argument("--json", action="store_true")
         if name not in ("doctor",):
@@ -797,6 +874,10 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "inspect":
             command.add_argument("experiment_id", nargs="?", type=int)
             command.add_argument("--artifacts", action="store_true")
+        if name == "history":
+            command.add_argument("--query")
+            command.add_argument("--path")
+            command.add_argument("--decision")
     init = subparsers.add_parser("init")
     init.add_argument("--json", action="store_true")
     init.add_argument("--repo", type=Path, required=True)
@@ -827,6 +908,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = _status(_data_root(arguments.data), arguments.task_id)
         elif arguments.command == "report":
             payload = _report(_data_root(arguments.data), arguments.task_id)
+        elif arguments.command == "history":
+            payload = _history(
+                _data_root(arguments.data),
+                arguments.task_id,
+                query=arguments.query,
+                path=arguments.path,
+                decision=arguments.decision,
+            )
         elif arguments.command == "inspect":
             inspect_task = arguments.task_id
             inspect_experiment = arguments.experiment_id

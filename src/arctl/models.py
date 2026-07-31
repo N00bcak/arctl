@@ -25,6 +25,8 @@ _TASK_FIELDS = {
     "trials",
     "max_experiments",
 }
+_OPTIONAL_TASK_FIELDS = {"strategy"}
+_STRATEGY_FIELDS = {"model", "reasoning_effort"}
 _EVALUATOR_FIELDS = {"repo", "commit"}
 _EVIDENCE_FIELDS = {
     "schema_version",
@@ -45,6 +47,12 @@ _RESEARCH_FIELDS = {
     "expected_effect",
     "expected_telemetry",
     "falsifiers",
+}
+_RESEARCH_DIRECTION_FIELDS = {
+    "kind",
+    "prior_entry_id",
+    "strategy_direction_id",
+    "rationale",
 }
 
 
@@ -111,10 +119,16 @@ class TaskConfig:
     evaluator: EvaluatorRef
     trials: Literal["auto"] | int
     max_experiments: int
+    strategy_model: str = "gpt-5.6-sol"
+    strategy_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] = "high"
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> TaskConfig:
-        _require_exact_fields(value, _TASK_FIELDS, "task")
+        actual = set(value)
+        if not _TASK_FIELDS <= actual or not actual <= _TASK_FIELDS | _OPTIONAL_TASK_FIELDS:
+            missing = sorted(_TASK_FIELDS - actual)
+            extra = sorted(actual - _TASK_FIELDS - _OPTIONAL_TASK_FIELDS)
+            raise ValidationError(f"task fields differ: missing={missing}, extra={extra}")
         if value["schema_version"] != 1:
             raise ValidationError("task.schema_version must equal 1")
         repo = Path(_string(value["repo"], "repo"))
@@ -128,6 +142,15 @@ class TaskConfig:
         maximum = value["max_experiments"]
         if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
             raise ValidationError("max_experiments must be a positive integer")
+        strategy = value.get("strategy", {})
+        if not isinstance(strategy, Mapping):
+            raise ValidationError("strategy must be an object")
+        if strategy:
+            _require_exact_fields(strategy, _STRATEGY_FIELDS, "strategy")
+        strategy_model = _string(strategy.get("model", "gpt-5.6-sol"), "strategy.model")
+        strategy_effort = strategy.get("reasoning_effort", "high")
+        if strategy_effort not in {"minimal", "low", "medium", "high", "xhigh"}:
+            raise ValidationError("strategy.reasoning_effort is invalid")
         return cls(
             task_id=validate_task_id(value["task_id"]),
             repo=repo,
@@ -139,6 +162,8 @@ class TaskConfig:
             evaluator=EvaluatorRef.from_mapping(value["evaluator"]),
             trials=trials,
             max_experiments=maximum,
+            strategy_model=strategy_model,
+            strategy_reasoning_effort=strategy_effort,
         )
 
 
@@ -166,9 +191,29 @@ class ResearchRequest:
         *,
         allowed_telemetry: Sequence[str],
     ) -> ResearchRequest:
-        _require_exact_fields(value, _RESEARCH_FIELDS, "research request")
+        actual = set(value)
+        if actual not in (_RESEARCH_FIELDS, _RESEARCH_FIELDS | {"direction"}):
+            missing = sorted(_RESEARCH_FIELDS - actual)
+            extra = sorted(actual - _RESEARCH_FIELDS - {"direction"})
+            raise ValidationError(
+                f"research request fields differ: missing={missing}, extra={extra}"
+            )
         if value["schema_version"] != 1:
             raise ValidationError("research request schema_version must equal 1")
+        direction = value.get("direction")
+        if direction is not None:
+            if not isinstance(direction, Mapping):
+                raise ValidationError("research request direction must be an object")
+            _require_exact_fields(direction, _RESEARCH_DIRECTION_FIELDS, "research direction")
+            if direction["kind"] not in ("new", "refinement"):
+                raise ValidationError("research direction kind is invalid")
+            prior = direction["prior_entry_id"]
+            if prior is not None and (not isinstance(prior, str) or not prior):
+                raise ValidationError("research direction prior_entry_id is invalid")
+            if direction["kind"] == "refinement" and prior is None:
+                raise ValidationError("a refinement must name a prior ledger entry")
+            _string(direction["strategy_direction_id"], "research direction strategy_direction_id")
+            _string(direction["rationale"], "research direction rationale")
         telemetry = value["expected_telemetry"]
         if not isinstance(telemetry, Mapping) or any(
             not isinstance(name, str)

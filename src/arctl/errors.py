@@ -19,3 +19,11 @@ class ProcessError(ArctlError):
 
 class StoppedError(ProcessError):
     """A managed process was terminated by a controller stop request."""
+
+
+class ResearchMiss(ArctlError):
+    """A completed research attempt did not produce a usable novel candidate."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code

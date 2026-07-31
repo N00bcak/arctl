@@ -59,6 +59,22 @@ class CliTests(unittest.TestCase):
                 [
                     "--data",
                     str(root / "data"),
+                    "history",
+                    "subject",
+                    "--query",
+                    "routing",
+                    "--json",
+                ]
+            )
+            self.assertEqual(code, 0)
+            history = json.loads(output)
+            self.assertEqual(history["state"], "HISTORY")
+            self.assertEqual(history["history"]["entries"], [])
+
+            code, output = self.run_cli(
+                [
+                    "--data",
+                    str(root / "data"),
                     "init",
                     "--repo",
                     str(repo),
@@ -141,6 +157,24 @@ class CliTests(unittest.TestCase):
         self.assertIn("✓ RESEARCHING · 2.5s", rendered)
         self.assertIn("✓ CANDIDATE_FROZEN", rendered)
         self.assertNotIn("\033", rendered)
+
+    def test_progress_explains_strategy_attempts_and_search_misses(self) -> None:
+        output = io.StringIO()
+        view = _ProgressView(output, interactive=False)
+        view({"event": "strategy", "revision": 1, "refresh": False})
+        view({"event": "search_attempt", "attempt": 1, "attempts": 6})
+        view(
+            {
+                "event": "search_miss",
+                "code": "exact_duplicate",
+                "message": "same candidate was already tested",
+            }
+        )
+        view.close()
+        rendered = output.getvalue()
+        self.assertIn("Strategy · revision 1", rendered)
+        self.assertIn("candidate search · attempt 1/6", rendered)
+        self.assertIn("Miss: same candidate was already tested", rendered)
 
     def test_each_progress_stage_requires_only_its_own_fields(self) -> None:
         events = [

@@ -11,11 +11,17 @@ from unittest import mock
 from arctl.approval import confirm_approval, preview_approval
 from arctl.errors import StateError
 from arctl.experiment import start_experiment
-from arctl.git import resolve_commit
+from arctl.git import create_candidate_commit, create_candidate_ref, resolve_commit
 from arctl.models import TaskConfig
 from arctl.operations import inspect_experiment, task_report, task_status
 from arctl.registry import LocatedTask
-from arctl.runner import _default_research_command, _run_research, run_task
+from arctl.runner import (
+    _compatibility_strategy_command,
+    _default_research_command,
+    _run_research,
+    run_task,
+)
+from arctl.search import search_ledger
 from arctl.taskio import load_manifest
 
 from .helpers import valid_task
@@ -120,6 +126,12 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
     "expected_effect": "The paired score difference is positive.",
     "expected_telemetry": {},
     "falsifiers": ["The paired effect is not positive."],
+    "direction": {
+        "kind": "new",
+        "prior_entry_id": None,
+        "strategy_direction_id": "public-baseline",
+        "rationale": "This focused score change has not been attempted.",
+    },
 }))
 """
         return ("python3", "-c", script, str(worktree), str(scratch))
@@ -171,8 +183,9 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
             [event["event"] for event in events if event["event"] != "stage"],
             [
                 "ready",
+                "strategy",
+                "search_attempt",
                 "experiment",
-                "research",
                 "candidate",
                 "public_checks",
                 "public_checks_complete",
@@ -209,9 +222,7 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
                 / "README.md"
             ).is_file()
         )
-        dossier = (
-            self.task_directory / "reports" / "experiments" / "000001"
-        )
+        dossier = self.task_directory / "reports" / "experiments" / "000001"
         shutil.rmtree(dossier)
         reported = task_report(self.task)
         self.assertTrue((dossier / "README.md").is_file())
@@ -230,6 +241,74 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
             comparison_command_builder=self.unconfined_comparison,
         )
         self.assertEqual(exhausted.results, ())
+
+    def test_exact_duplicates_refresh_strategy_then_stall_without_an_experiment(self) -> None:
+        (self.subject / "subject.py").write_text(
+            (self.subject / "subject.py").read_text().replace("+ 0", "+ 1")
+        )
+        prior, _ = create_candidate_commit(
+            self.subject,
+            champion=self.original_champion,
+            editable_paths=("subject.py",),
+            denied_paths=(".git/**",),
+            prior_candidate_ref_prefix="refs/arctl/demo/candidates/",
+            message="prior candidate",
+        )
+        create_candidate_ref(
+            self.subject,
+            "refs/arctl/demo/candidates/000099",
+            prior,
+        )
+        git(self.subject, "restore", "--staged", "--worktree", "subject.py")
+        strategy_calls: list[str] = []
+
+        def strategy(worktree, scratch, schema, prompt):
+            strategy_calls.append(prompt)
+            return _compatibility_strategy_command(worktree, scratch, schema, prompt)
+
+        outcome = run_task(
+            self.task,
+            max_experiments=1,
+            research_command_builder=self.research_command,
+            strategy_command_builder=strategy,
+            public_check_command_builder=self.unconfined_public,
+            comparison_command_builder=self.unconfined_comparison,
+        )
+
+        self.assertTrue(outcome.stalled)
+        self.assertEqual(outcome.results, ())
+        self.assertEqual(len(strategy_calls), 2)
+        self.assertFalse((self.task_directory / "experiments").exists())
+        misses = search_ledger(
+            self.task_directory,
+            decision=None,
+            path=None,
+            query="exact_duplicate",
+        )
+        self.assertEqual(len(misses), 6)
+        self.assertEqual(task_status(self.task)["state"], "SEARCH_STALLED")
+
+    def test_malformed_requests_are_bounded_search_misses(self) -> None:
+        def malformed(_worktree, scratch, _schema, _prompt):
+            script = "import pathlib,sys;pathlib.Path(sys.argv[1]).write_text('{}')"
+            return ("python3", "-c", script, str(scratch / "request.public.json"))
+
+        outcome = run_task(
+            self.task,
+            max_experiments=1,
+            research_command_builder=malformed,
+            public_check_command_builder=self.unconfined_public,
+            comparison_command_builder=self.unconfined_comparison,
+        )
+
+        self.assertTrue(outcome.stalled)
+        misses = search_ledger(
+            self.task_directory,
+            query="invalid_request",
+            path=None,
+            decision=None,
+        )
+        self.assertEqual(len(misses), 6)
 
     def test_default_research_receives_approved_public_runtime_paths(self) -> None:
         experiment, _ = start_experiment(self.task_directory, self.original_champion)
@@ -519,9 +598,9 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
 
         self.assertEqual(outcome.results, ())
         self.assertTrue(outcome.stopped)
-        self.assertEqual(list((self.task_directory / "experiments").iterdir()), [])
+        self.assertFalse((self.task_directory / "experiments").exists())
         self.assertFalse(
-            (self.task_directory / "worktrees" / "000001-research").exists()
+            (self.task_directory / "worktrees" / "search-000001-attempt-01").exists()
         )
 
     def test_failed_research_is_inspectable_and_next_run_retries_cleanly(self) -> None:
@@ -533,20 +612,10 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
                 public_check_command_builder=self.unconfined_public,
                 comparison_command_builder=self.unconfined_comparison,
             )
-        experiments = self.task_directory / "experiments"
-        experiment = experiments / "000001"
-        self.assertTrue((experiment / "research.failure.json").is_file())
-        self.assertTrue((experiment / "process" / "research" / "result.json").is_file())
+        attempt = self.task_directory / "searches" / "000001" / "attempts" / "01"
+        self.assertTrue((attempt / "research.failure.json").is_file())
+        self.assertTrue((attempt / "process" / "research" / "result.json").is_file())
         self.assertEqual(task_status(self.task)["state"], "RESEARCH_FAILED")
-        artifacts = {
-            artifact["path"]: artifact["visibility"]
-            for artifact in inspect_experiment(self.task, 1)["artifacts"]
-        }
-        self.assertEqual(artifacts["research.failure.json"], "private")
-        self.assertEqual(
-            artifacts["process/research/stderr.bin"],
-            "private",
-        )
 
         outcome = run_task(
             self.task,
@@ -556,7 +625,7 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
             comparison_command_builder=self.unconfined_comparison,
         )
         self.assertEqual(outcome.results[0]["experiment_id"], 1)
-        self.assertFalse((experiment / "research.failure.json").exists())
+        self.assertTrue((attempt / "research.failure.json").exists())
 
     def test_public_check_sandbox_failure_is_inspectable_and_retryable(self) -> None:
         with mock.patch(

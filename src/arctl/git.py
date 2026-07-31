@@ -7,7 +7,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Sequence
 
-from .errors import StateError
+from .errors import ResearchMiss, StateError
 
 
 def _git(repo: Path, arguments: Sequence[str], *, check: bool = True) -> str:
@@ -111,15 +111,18 @@ def create_candidate_commit(
     output = _git(worktree, ["diff", "--cached", "--name-only", "-z", champion_commit])
     paths = tuple(path for path in output.split("\0") if path)
     if not paths:
-        raise StateError("candidate tree is unchanged")
-    validate_changed_paths(
-        paths,
-        editable_paths=editable_paths,
-        denied_paths=denied_paths,
-    )
+        raise ResearchMiss("unchanged", "candidate tree is unchanged")
+    try:
+        validate_changed_paths(
+            paths,
+            editable_paths=editable_paths,
+            denied_paths=denied_paths,
+        )
+    except StateError as error:
+        raise ResearchMiss("scope_violation", str(error)) from error
     tree = _git(worktree, ["write-tree"])
     if tree == _git(worktree, ["rev-parse", f"{champion_commit}^{{tree}}"]):
-        raise StateError("candidate tree is unchanged")
+        raise ResearchMiss("unchanged", "candidate tree is unchanged")
 
     refs = _git(
         worktree,
@@ -130,7 +133,8 @@ def create_candidate_commit(
         if parents == [champion_commit] and _git(
             worktree, ["rev-parse", f"{prior}^{{tree}}"]
         ) == tree:
-            raise StateError(
+            raise ResearchMiss(
+                "exact_duplicate",
                 "the same candidate tree was already tested against this champion"
             )
 

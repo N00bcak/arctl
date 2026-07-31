@@ -20,7 +20,7 @@ For each experiment:
 2. Codex provides fresh sessions and sandbox rules.
 3. The private evaluator and its manifest are locked before calibration or experiments start.
 4. Research and subject runs cannot read the evaluator.
-5. Each experiment uses one fresh Codex session. It is never resumed.
+5. Each strategy revision and research attempt uses one fresh Codex session. It is never resumed.
 6. Every evaluation uses one best-effort random-seed paired-trial protocol. A deterministic test is `trials: 1`.
 7. Every experiment uses one primary trial batch and, only when the approved evaluator flags an apparent win as suspect, at most one fresh suspect-test batch. A batch is chosen once and each subject runs it once. Batches are never redrawn, extended, or selectively retried.
 8. The model may suggest. Only `arctl` may test, decide, publish, or promote.
@@ -29,12 +29,18 @@ For each experiment:
 The controller uses three reusable records:
 - `ProcessRun`: one exactly-once process with a saved `started` record and at most one valid output;
 - `ComparisonRun`: one immutable paired batch that performs `reserve → prepare → run subjects → score → validate`;
-- `Experiment`: one research session, one frozen candidate, one primary `ComparisonRun`, and at most one suspect `ComparisonRun`.
+- `Experiment`: one novel frozen candidate produced by search, one primary `ComparisonRun`, and at most one suspect `ComparisonRun`.
+
+Candidate discovery adds two public records without changing official evaluation:
+- `StrategyRevision`: one fresh high-reasoning analysis of public environment signals, success qualities, uncertainties, and promising directions;
+- `CandidateSearch`: up to six fresh `ResearchAttempt`s, with one strategy refresh after the third miss, that ends with one novel candidate or `SEARCH_STALLED`.
+
+An official `Experiment` begins only after candidate search finds a novel candidate. Empty, out-of-scope, malformed, or exact-duplicate attempts are preserved as public search misses and consume neither an experiment slot nor official seeds.
 
 Primary and suspect comparisons use the same commands, schemas, trial count, validation, storage shape, and crash rules. Their only behavioral difference is that a primary comparison may request a suspect comparison and a suspect comparison may not.
 
 ## 3. Scope
-Included: one trusted local Git repo; one active task and experiment; one approved task file, evaluator commit, and evaluator manifest; fresh Codex sessions; allowed-path checks; public tests and dev probes; controller-made candidate commits; best-effort random-seed paired-trial evaluation; optional one-time trial-count calibration; one optional evaluator-triggered suspect test before promotion; saved experiment files; safe stop, crash recovery, status, inspect, and reports.
+Included: one trusted local Git repo; one active task and experiment; one approved task file, evaluator commit, and evaluator manifest; public strategy revisions and a searchable exploration ledger; fresh Codex sessions; bounded recoverable candidate search; allowed-path checks; public tests and dev probes; controller-made candidate commits; best-effort random-seed paired-trial evaluation; optional one-time trial-count calibration; one optional evaluator-triggered suspect test before promotion; saved experiment files; safe stop, crash recovery, status, history, inspect, and reports.
 Not included: parallel tasks or workers; subagents or resumed sessions; evaluator creation by the model; controller-defined task metrics or statistical methods; adaptive trial extension; search-wide multiple-testing correction or a harness-wide false-positive guarantee; production branch changes; custom containers, VMs, workflow graphs, or plugins; protection from a hostile OS admin or sandbox escape.
 
 ## 4. Trust and control
@@ -82,7 +88,7 @@ The evaluator must use each trial seed to control score-affecting task randomnes
 Research and subject sandboxes must not read the evaluator repo, path, commit, controller master seeds, private trial identities, schedules, answers, scores, or evidence. An evaluator may place a seed in subject-visible input only when that seed is a legitimate task observation; otherwise it materializes the case and keeps the generator seed private.
 
 ## 6. Fresh session rule
-Each experiment starts one new Codex session.
+Each strategy revision and research attempt starts one new Codex session. Sessions are never resumed. Rejected research attempts remain outside official experiments.
 The session may read the public task, rules, allowed paths, a worktree of the champion, public tests, dev probes, the evaluator manifest's approved public statistic and subject-interface description, safe results from completed experiments, and the required experiment JSON format.
 The session may not read evaluator code or location, hidden cases or answers, official seeds or schedules, raw subject output, private evidence, private errors, or earlier Codex chat logs.
 The session ends before candidate freeze and official test choice. It is never resumed.
@@ -110,6 +116,9 @@ public_probe: [python, tools/dev_benchmark.py]
 evaluator:
   repo: /private/arctl-evaluators/demo
   commit: 7a95d61
+strategy:
+  model: gpt-5.6-sol
+  reasoning_effort: high
 trials: auto
 max_experiments: 30
 ```
@@ -194,7 +203,9 @@ With `trials: auto`, calibration happens once after approval and before research
 The evaluator owns and explains how its diagnostic is calculated; `arctl` owns threshold application and count selection. If no rung passes, `arctl` freezes the ceiling and persistently warns that the criterion was unmet. Champion-only calibration measures the approved baseline property and does not guarantee power for unknown future paired candidate effects. Failure blocks research and is never silently retried or given replacement seeds.
 
 ### 10.2 Develop and freeze
-`arctl` creates a clean champion worktree and starts one `RESEARCH` session with the approved public packet. The session may use public probes and must write:
+Before the first search, `arctl` starts a strategy session over the public environment and exploration ledger. It saves environment signals, a success profile, uncertainties, and distinct strategic directions. Strategy defaults to `gpt-5.6-sol` with `high` reasoning and may be overridden in the approved task file.
+
+For candidate discovery, `arctl` creates a clean champion worktree and starts a fresh `RESEARCH` attempt with the current strategy, searchable public ledger, and approved public packet. The session may use public probes and must write:
 ```json
 {
   "schema_version": 1,
@@ -202,10 +213,16 @@ The evaluator owns and explains how its diagnostic is calculated; `arctl` owns t
   "mechanism": "Penalize branches with no safe retreat.",
   "expected_effect": "Complete more procedurally generated maps.",
   "expected_telemetry": {"dead_end_entries": "decrease"},
-  "falsifiers": ["The paired effect is not positive", "Correctness tests fail"]
+  "falsifiers": ["The paired effect is not positive", "Correctness tests fail"],
+  "direction": {
+    "kind": "new",
+    "prior_entry_id": null,
+    "strategy_direction_id": "recoverable-routing",
+    "rationale": "This direction is distinct from the ledger entries."
+  }
 }
 ```
-After the session ends, `arctl` validates this record, changed and blocked paths, and public checks; creates the candidate commit and ref; and rejects blocked, empty, or repeated candidates. No code changes after candidate freeze, and public probes never decide promotion.
+After the session ends, `arctl` validates this record and the changed paths. Empty, out-of-scope, malformed, or exact-duplicate candidates become typed search misses rather than controller errors. It tries three fresh sessions, refreshes strategy once, then tries three more. Six misses return `SEARCH_STALLED`; a later explicit `run` may begin another bounded cycle. Semantic similarity is ledger guidance only, so deliberate refinements remain possible. Once a novel candidate exists, `arctl` creates the official experiment, candidate commit and ref, then runs public checks. No code changes occur after candidate freeze, and public probes never decide promotion.
 
 ### 10.3 Run one comparison
 `ComparisonRun(kind)` is the only official evaluation workflow:
@@ -284,7 +301,7 @@ Every calibration or comparison process is a `ProcessRun`:
 - with valid saved output the controller uses that output;
 - with `started` but no valid output it never runs again.
 Candidate public-test, subject, or hard-rule failure gives `REJECT`. Champion, evaluator, sandbox, controller, or host failure gives `INVALID`. Calibration failure blocks the task before research and never silently redraws calibration seeds.
-Failure before the primary comparison is reserved discards the unfinished experiment. Failure after any comparison reservation publishes the experiment without a replacement seed or retry. A saved valid primary `PROVISIONAL` result may continue only into its one not-yet-started suspect comparison.
+Failure before the primary comparison is reserved discards the unfinished experiment. Recoverable candidate-search misses precede the experiment and remain in the public ledger; infrastructure and saved-state failures remain inspectable engineering failures. Failure after any comparison reservation publishes the experiment without a replacement seed or retry. A saved valid primary `PROVISIONAL` result may continue only into its one not-yet-started suspect comparison.
 Every process starts in its own process group. On exit, timeout, stop, or too much output, `arctl` must stop and clean up all child processes.
 
 ## 13. Install, files, and CLI
@@ -301,6 +318,14 @@ and prints the activation command. The script must be safe to rerun and must not
   evaluator.manifest.json
   trial-count.json
   calibration.private.json
+  strategy/
+    000001.public.json
+  exploration/
+    entries/
+    ledger.public.jsonl
+  searches/000001/
+    attempts/01/
+    stalled.public.json
   lock
   experiments/000001/
     request.public.json
@@ -337,9 +362,10 @@ arctl run TASK_ID [--max-experiments N]
 arctl status TASK_ID
 arctl stop TASK_ID
 arctl report TASK_ID
+arctl history TASK_ID [--query TEXT] [--path GLOB] [--decision VALUE]
 arctl inspect TASK_ID EXPERIMENT_ID
 ```
-`TASK_ID` and `EXPERIMENT_ID` may be omitted when the current repo and context identify exactly one target. `doctor` checks Git, Codex, sandbox rules, and runtime needs. `init` creates task storage and starter YAML with `trials: auto`. `approve` checks and locks the task file, evaluator commit, and manifest, then requires the trust-boundary confirmation from Section 9. `run` first calibrates when required, then runs experiments until stopped, blocked, done, or failed. `status` shows current work. `stop` stops safely. `report` shows progress and aggregate results. `inspect` shows the safe artifact inventory and aggregate record; trusted humans audit private files with normal file tools.
+`TASK_ID` and `EXPERIMENT_ID` may be omitted when the current repo and context identify exactly one target. `doctor` checks Git, Codex, sandbox rules, and runtime needs. `init` creates task storage and starter YAML with `trials: auto`. `approve` checks and locks the task file, evaluator commit, and manifest, then requires the trust-boundary confirmation from Section 9. `run` first calibrates when required, ensures a strategy, then searches for and runs experiments until stopped, stalled, blocked, done, or failed. `status` shows current strategy, search, and experiment work. `history` searches the public exploration ledger. `stop` stops safely. `report` shows progress and aggregate results. `inspect` shows the safe artifact inventory and aggregate record; trusted humans audit private files with normal file tools.
 
 The novice setup path is:
 ```text
@@ -353,7 +379,7 @@ arctl run
 ## 14. Done when
 The MVP is done when one toy repo and one real repo show:
 1. One approved external evaluator commit and manifest stay locked, and research and subject sandboxes cannot read evaluator or private files.
-2. Each experiment uses one fresh session; `arctl` checks allowed paths and public tests, freezes a nonempty candidate commit, and never lets the model test, decide, or promote.
+2. Every strategy and research attempt uses a fresh session; exact duplicates are recoverable search misses, six misses stall without an experiment, and `arctl` freezes only a novel nonempty candidate before official testing.
 3. Best-effort paired trials support exact `trials: 1`, a fixed positive count, and one-time manifest-approved `auto` calibration with disclosed limitations.
 4. Primary and suspect evaluations use the same `ComparisonRun` commands, evidence schema, validation, storage, decision, and recovery path.
 5. Candidates freeze before reservation; calibration and comparison seeds never overlap; each subject runs the identical ordered batch once and returns one result per declared trial.
@@ -363,7 +389,7 @@ The MVP is done when one toy repo and one real repo show:
 9. Only `arctl` decides: positive lower bound accepts, flagged acceptance waits for its suspect result, positive uncertainty archives, and non-positive effect rejects.
 10. Candidate failure gives `REJECT`, system or incoherent-evidence failure gives `INVALID`, and only final `ACCEPT` changes the champion.
 11. Later research sessions see only checked aggregate final results; private per-trial evidence remains auditable from the experiment folder and Git history.
-12. All eight commands infer unambiguous tasks, explain validity in human output, and provide schema-valid sanctioned `--json` output with a next command and without private evidence.
+12. All nine commands infer unambiguous tasks, explain validity in human output, and provide schema-valid sanctioned `--json` output with a next command and without private evidence.
 13. AI-operated approval reports that human permission is required; approval, status, stop, errors, and the novice setup path require no source reading.
 14. A real task runs several experiments without repeated approval, preserves failed ideas, and reports the best-effort and non-search-wide limits.
 15. `install.sh` creates a working local editable installation and exposes `arctl` without PyPI, `sudo`, or system-Python changes.

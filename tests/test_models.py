@@ -22,6 +22,21 @@ class TaskConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "extra=.*metric"):
             TaskConfig.from_mapping(raw)
 
+    def test_strategy_model_defaults_and_strict_override(self) -> None:
+        default = TaskConfig.from_mapping(valid_task())
+        self.assertEqual(default.strategy_model, "gpt-5.6-sol")
+        self.assertEqual(default.strategy_reasoning_effort, "high")
+
+        raw = valid_task()
+        raw["strategy"] = {"model": "custom-model", "reasoning_effort": "xhigh"}
+        configured = TaskConfig.from_mapping(raw)
+        self.assertEqual(configured.strategy_model, "custom-model")
+        self.assertEqual(configured.strategy_reasoning_effort, "xhigh")
+
+        raw["strategy"]["reasoning_effort"] = "extreme"
+        with self.assertRaisesRegex(ValidationError, "reasoning_effort"):
+            TaskConfig.from_mapping(raw)
+
     def test_rejects_shell_command_strings(self) -> None:
         raw = valid_task()
         raw["public_probe"] = "python3 tools/probe.py"
