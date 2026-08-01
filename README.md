@@ -19,6 +19,12 @@ experiment receives a public-only Markdown dossier under the task’s
 `reports/experiments/` directory; `report` and `inspect` print its path.
 Use `--json` for AI orchestration.
 
+Manifest-v3 evaluators describe publishable telemetry by meaning, arm scope,
+role, unit, and direction. After each valid verdict, a fresh read-only session
+uses those aggregates to assess the proposed mechanism and implementation and
+to recommend later research. This reflection is public and advisory; only the
+fixed statistical rule can decide or promote.
+
 Automatic trial sizing is a one-time controller-run champion pilot over an
 approved ladder. The evaluator calculates the task-specific diagnostic; arctl
 selects and freezes the smallest stable passing rung.

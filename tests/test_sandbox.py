@@ -69,6 +69,32 @@ class SandboxCommandTests(unittest.TestCase):
                     "additionalProperties": False,
                 }
             )
+
+    def test_reflection_command_keeps_the_candidate_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "candidate"
+            champion = root / "champion"
+            scratch = root / "scratch"
+            for path in (candidate, champion, scratch):
+                path.mkdir()
+            command = research_command(
+                worktree=candidate,
+                scratch=scratch,
+                output_schema=scratch / "schema.json",
+                prompt="reflect",
+                read_paths=(champion,),
+                writable_worktree=False,
+            )
+            filesystem = next(
+                command[index + 1]
+                for index, item in enumerate(command[:-1])
+                if item == "--config" and "filesystem=" in command[index + 1]
+            )
+            self.assertIn(f'"{candidate.resolve()}"="read"', filesystem)
+            self.assertIn(f'"{champion.resolve()}"="read"', filesystem)
+            self.assertIn(f'"{scratch.resolve()}"="write"', filesystem)
+            self.assertNotIn(f'"{candidate.resolve()}"="write"', filesystem)
         with self.assertRaisesRegex(StateError, "not strict"):
             _validate_codex_output_schema(
                 {

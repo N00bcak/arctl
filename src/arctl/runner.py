@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -19,6 +19,7 @@ from .comparison import ComparisonReservation, load_reservation, reserve_compari
 from .comparison_run import CommandBuilder, ComparisonFailure, run_comparison
 from .errors import ArctlError, ProcessError, ResearchMiss, StateError, StoppedError, ValidationError
 from .experiment import (
+    complete_reflection,
     freeze_candidate,
     load_experiment,
     load_research_request,
@@ -41,6 +42,7 @@ from .git import (
 from .manifest import EvaluatorManifest
 from .models import Evidence
 from .process import run_or_load_once
+from .reflection import ReflectionCommandBuilder, run_reflection, validate_reflection
 from .registry import LocatedTask
 from .results import validate_public_result
 from .sandbox import command_runtime_read_paths, research_command, sanitized_environment
@@ -134,6 +136,7 @@ class RunOutcome:
     results: tuple[dict[str, Any], ...]
     stopped: bool
     stalled: bool = False
+    reflection_failed: bool = False
 
 
 def _default_research_command(
@@ -240,7 +243,10 @@ def _research_prompt(task: LocatedTask, manifest: EvaluatorManifest) -> str:
         "public_probe": list(task.config.public_probe),
         "statistic": manifest.public_statistic,
         "subject_interface": manifest.subject_interface,
-        "telemetry": list(manifest.public_telemetry),
+        "telemetry": {
+            name: asdict(metric)
+            for name, metric in manifest.public_telemetry.items()
+        },
         "completed_results": _public_history(task, manifest),
         "strategy": strategy,
         "exploration_ledger": str(task.directory / "exploration" / "ledger.public.jsonl"),
@@ -469,7 +475,11 @@ def _candidate_search(
     return None
 
 
-def _record_official_result(task: LocatedTask, result: Mapping[str, Any]) -> None:
+def _record_official_result(
+    task: LocatedTask,
+    result: Mapping[str, Any],
+    manifest: EvaluatorManifest,
+) -> None:
     request_path = (
         task.directory
         / "experiments"
@@ -482,9 +492,7 @@ def _record_official_result(task: LocatedTask, result: Mapping[str, Any]) -> Non
         raise StateError(f"published research request is invalid: {request_path}") from error
     if not isinstance(request, dict):
         raise StateError(f"published research request is invalid: {request_path}")
-    add_ledger_entry(
-        task.directory,
-        {
+    entry = {
             "schema_version": 1,
             "source": f"experiment:{int(result['experiment_id']):06d}",
             "kind": "experiment",
@@ -499,8 +507,22 @@ def _record_official_result(task: LocatedTask, result: Mapping[str, Any]) -> Non
                     task.config.repo, result["champion_before"], result["candidate"]
                 )
             ),
-        },
-    )
+        }
+    reflection_path = request_path.parent / "reflection.public.json"
+    if reflection_path.is_file():
+        try:
+            reflection = json.loads(reflection_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise StateError("published reflection is invalid") from error
+        reflection = validate_reflection(
+            reflection, metric_names=tuple(manifest.public_telemetry)
+        )
+        entry["reflection"] = {
+            "status": reflection.get("status"),
+            "warning": reflection.get("warning"),
+            "assessment": reflection.get("assessment"),
+        }
+    add_ledger_entry(task.directory, entry)
 
 
 def _reservation(
@@ -677,6 +699,61 @@ def _remove_experiment_worktrees(
         )
 
 
+def _reflect_final_result(
+    task: LocatedTask,
+    experiment: Path,
+    manifest: EvaluatorManifest,
+    result: dict[str, Any],
+    *,
+    command_builder: ReflectionCommandBuilder | None,
+    stop_path: Path,
+    progress: ProgressCallback | None,
+) -> None:
+    record = load_experiment(experiment)
+    if record.state != "REFLECTING" or record.candidate is None:
+        raise StateError("post-trial reflection requires a final result")
+    try:
+        request = json.loads(
+            (experiment / "request.public.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError) as error:
+        raise StateError("public research request is invalid") from error
+    if not isinstance(request, dict):
+        raise StateError("public research request is invalid")
+    champion_worktree = (
+        task.directory / "worktrees" / f"{record.experiment_id:06d}-champion"
+    )
+    candidate_worktree = (
+        task.directory / "worktrees" / f"{record.experiment_id:06d}-candidate"
+    )
+    _checkout(task.config.repo, champion_worktree, record.champion)
+    _checkout(task.config.repo, candidate_worktree, record.candidate)
+    _notify(progress, "reflection", experiment_id=record.experiment_id)
+    run_reflection(
+        task=task.config,
+        experiment=experiment,
+        manifest=manifest,
+        request=request,
+        result=result,
+        candidate_worktree=candidate_worktree,
+        champion_worktree=champion_worktree,
+        stop_path=stop_path,
+        command_builder=command_builder,
+    )
+    complete_reflection(task.config, experiment, result)
+    _notify(progress, "reflection_complete", experiment_id=record.experiment_id)
+
+
+def _mark_reflection_failed(experiment: Path) -> None:
+    write_json_once(
+        experiment / "reflection.blocked.json",
+        {
+            "schema_version": 1,
+            "message": "Post-trial reflection did not complete; later research is blocked.",
+        },
+    )
+
+
 def _discard_unreserved_experiment(
     task: LocatedTask,
     experiment: Path,
@@ -729,6 +806,7 @@ def run_task(
     public_check_command_builder: PublicCheckCommandBuilder | None = None,
     comparison_command_builder: CommandBuilder | None = None,
     calibration_command_builder: CalibrationCommandBuilder | None = None,
+    reflection_command_builder: ReflectionCommandBuilder | None = None,
     progress: ProgressCallback | None = None,
 ) -> RunOutcome:
     """Run a bounded sequence of fixed-trial experiments for one approved task."""
@@ -743,7 +821,7 @@ def run_task(
         task.directory / "evaluator.manifest.json"
     )
     for published in _public_history(task, manifest):
-        _record_official_result(task, published)
+        _record_official_result(task, published, manifest)
     limit = task.config.max_experiments if max_experiments is None else max_experiments
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
         raise StateError("max experiments must be a positive integer")
@@ -803,6 +881,7 @@ def run_task(
     results: list[dict[str, Any]] = []
     stopped = False
     stalled = False
+    reflection_failed = False
     for _ in range(limit):
         stop = task.directory / "stop.requested"
         active = _active_experiment(task.directory)
@@ -864,6 +943,48 @@ def run_task(
                 stopped = True
                 break
         experiment = active
+        if experiment is not None and load_experiment(experiment).state == "REFLECTING":
+            try:
+                raw_result = json.loads(
+                    (experiment / "result.public.json").read_text(encoding="utf-8")
+                )
+                if not isinstance(raw_result, dict):
+                    raise StateError("saved final result is invalid")
+                result_value = validate_public_result(
+                    raw_result,
+                    allowed_telemetry=manifest.public_telemetry,
+                    allowed_suspect_reasons=manifest.suspect_reason_codes,
+                    expected_statistic=manifest.public_statistic,
+                )
+                _reflect_final_result(
+                    task,
+                    experiment,
+                    manifest,
+                    result_value,
+                    command_builder=reflection_command_builder,
+                    stop_path=stop,
+                    progress=progress,
+                )
+            except StoppedError:
+                stop.unlink(missing_ok=True)
+                stopped = True
+                break
+            except (OSError, json.JSONDecodeError, StateError):
+                _mark_reflection_failed(experiment)
+                reflection_failed = True
+                _notify(
+                    progress,
+                    "reflection_failed",
+                    experiment_id=load_experiment(experiment).experiment_id,
+                )
+                break
+            results.append(result_value)
+            _record_official_result(task, result_value, manifest)
+            _notify(progress, "result", result=result_value)
+            _remove_experiment_worktrees(
+                task, load_experiment(experiment).experiment_id
+            )
+            continue
         if (
             experiment is not None
             and (experiment / "research.failure.json").is_file()
@@ -979,7 +1100,7 @@ def run_task(
 
                     result = publish_candidate_rejection(task.config, experiment, request)
                     results.append(result)
-                    _record_official_result(task, result)
+                    _record_official_result(task, result, manifest)
                     _notify(progress, "result", result=result)
                     _remove_experiment_worktrees(task, record.experiment_id)
                     continue
@@ -1129,7 +1250,31 @@ def run_task(
                     primary,
                 )
         results.append(result)
-        _record_official_result(task, result)
+        if load_experiment(experiment).state == "REFLECTING":
+            try:
+                _reflect_final_result(
+                    task,
+                    experiment,
+                    manifest,
+                    result,
+                    command_builder=reflection_command_builder,
+                    stop_path=stop,
+                    progress=progress,
+                )
+            except StoppedError:
+                stop.unlink(missing_ok=True)
+                stopped = True
+                break
+            except StateError:
+                _mark_reflection_failed(experiment)
+                reflection_failed = True
+                _notify(
+                    progress,
+                    "reflection_failed",
+                    experiment_id=record.experiment_id,
+                )
+                break
+        _record_official_result(task, result, manifest)
         _notify(progress, "result", result=result)
         _remove_experiment_worktrees(task, record.experiment_id)
         if stop.exists():
@@ -1142,4 +1287,4 @@ def run_task(
         experiments=len(results),
         stopped=stopped,
     )
-    return RunOutcome(tuple(results), stopped, stalled)
+    return RunOutcome(tuple(results), stopped, stalled, reflection_failed)

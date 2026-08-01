@@ -24,7 +24,12 @@ from .git import (
 from .manifest import EvaluatorManifest
 from .models import Evidence, ResearchRequest, TaskConfig
 from .process import run_or_load_once
-from .results import build_public_result, public_comparison, resolve_outcome
+from .results import (
+    build_public_result,
+    public_comparison,
+    publish_telemetry,
+    resolve_outcome,
+)
 from .sandbox import (
     command_runtime_read_paths,
     marked_command,
@@ -40,6 +45,7 @@ ExperimentState = Literal[
     "PROVISIONAL",
     "SUSPECT_RESERVED",
     "FINALIZING",
+    "REFLECTING",
     "COMPLETE",
 ]
 _STATES = {
@@ -49,6 +55,7 @@ _STATES = {
     "PROVISIONAL",
     "SUSPECT_RESERVED",
     "FINALIZING",
+    "REFLECTING",
     "COMPLETE",
 }
 _FIELDS = {
@@ -126,12 +133,12 @@ class ExperimentRecord:
         ):
             raise StateError("experiment record values are invalid")
         decision = Decision(decision_value) if decision_value is not None else None
-        if state in ("FINALIZING", "COMPLETE") and decision in (
+        if state in ("FINALIZING", "REFLECTING", "COMPLETE") and decision in (
             None,
             Decision.PROVISIONAL,
         ):
             raise StateError("finalizing experiment must have a final decision")
-        if state not in ("FINALIZING", "COMPLETE") and decision not in (
+        if state not in ("FINALIZING", "REFLECTING", "COMPLETE") and decision not in (
             None,
             Decision.PROVISIONAL,
         ):
@@ -384,12 +391,22 @@ def publish_final_result(
     suspect: Evidence | None = None,
 ) -> dict[str, Any]:
     record = load_experiment(experiment_directory)
+    if record.state == "COMPLETE":
+        try:
+            recovered = json.loads(
+                (experiment_directory / "result.public.json").read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as error:
+            raise StateError("completed experiment result is invalid") from error
+        if not isinstance(recovered, dict):
+            raise StateError("completed experiment result is invalid")
+        return recovered
     if record.candidate is None or record.public_checks_passed is not True:
         raise StateError("final publication requires a checked frozen candidate")
     outcome = resolve_outcome(primary, suspect)
     if not outcome.final:
         raise StateError("provisional outcome cannot be published")
-    if record.state not in ("FINALIZING", "COMPLETE") or record.decision != outcome.decision:
+    if record.state not in ("FINALIZING", "REFLECTING") or record.decision != outcome.decision:
         raise StateError("experiment record does not contain this final outcome")
 
     if outcome.may_promote:
@@ -413,11 +430,24 @@ def publish_final_result(
         tests_pass=True,
     )
     write_json_once(experiment_directory / "result.public.json", public)
-    if record.state != "COMPLETE":
-        save_experiment(experiment_directory, replace(record, state="COMPLETE"))
+    if record.state != "REFLECTING":
+        save_experiment(experiment_directory, replace(record, state="REFLECTING"))
+    return public
+
+
+def complete_reflection(
+    task: TaskConfig,
+    experiment_directory: Path,
+    public: dict[str, Any],
+) -> None:
+    record = load_experiment(experiment_directory)
+    if record.state != "REFLECTING":
+        raise StateError("reflection completion requires a final statistical verdict")
+    if not (experiment_directory / "reflection.public.json").is_file():
+        raise StateError("reflection completion requires a public reflection")
     atomic_write_text(experiment_directory / "published", "")
     _create_public_dossier(task, experiment_directory, public)
-    return public
+    save_experiment(experiment_directory, replace(record, state="COMPLETE"))
 
 
 def publish_candidate_rejection(
@@ -504,7 +534,7 @@ def publish_comparison_failure(
             ),
         },
         "constraints": {"tests": "PASS"},
-        "telemetry": dict(primary.telemetry) if primary is not None else {},
+        "telemetry": publish_telemetry(primary.telemetry) if primary is not None else {},
         "failure": (
             "candidate_execution" if source == "candidate" else "system_execution"
         ),

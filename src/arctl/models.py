@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
 from .errors import ValidationError
+from .manifest import TelemetryMetric
 
 ComparisonKind = Literal["primary", "suspect"]
 
@@ -269,7 +270,7 @@ class Evidence:
         *,
         expected_kind: ComparisonKind,
         expected_trial_count: int,
-        allowed_telemetry: Sequence[str] = (),
+        allowed_telemetry: Mapping[str, TelemetryMetric] | None = None,
         allowed_suspect_reasons: Sequence[str] = (),
     ) -> Evidence:
         _require_exact_fields(value, _EVIDENCE_FIELDS, "evidence")
@@ -312,16 +313,11 @@ class Evidence:
         if not required and reason is not None:
             raise ValidationError("suspect reason must be null when no test is required")
 
-        telemetry = value["telemetry"]
-        if not isinstance(telemetry, Mapping):
-            raise ValidationError("telemetry must be an object")
-        unapproved = set(telemetry) - set(allowed_telemetry)
-        if unapproved:
-            raise ValidationError(f"unapproved telemetry fields: {sorted(unapproved)}")
-        for name, telemetry_value in telemetry.items():
-            if telemetry_value is None or isinstance(telemetry_value, bool):
-                continue
-            _finite_number(telemetry_value, f"telemetry.{name}")
+        telemetry = validate_telemetry(
+            value["telemetry"],
+            metrics=allowed_telemetry or {},
+            suspect=expected_kind == "suspect",
+        )
         if expected_kind == "suspect" and (required or reason is not None or telemetry):
             raise ValidationError("suspect evidence cannot request another test or add telemetry")
 
@@ -335,3 +331,43 @@ class Evidence:
             suspect_reason=reason,
             telemetry=dict(telemetry),
         )
+
+
+def validate_telemetry(
+    value: Any,
+    *,
+    metrics: Mapping[str, TelemetryMetric],
+    suspect: bool = False,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValidationError("telemetry must be an object")
+    expected = set() if suspect else set(metrics)
+    extra = set(value) - expected
+    if extra:
+        raise ValidationError(f"unapproved telemetry fields: {sorted(extra)}")
+    if set(value) != expected:
+        raise ValidationError(
+            "telemetry fields differ: "
+            f"missing={sorted(expected - set(value))}, "
+            f"extra={sorted(set(value) - expected)}"
+        )
+    validated: dict[str, Any] = {}
+    for name, metric in metrics.items():
+        raw = value[name]
+        if not isinstance(raw, Mapping):
+            raise ValidationError(f"telemetry.{name} must be an object")
+        fields = {"champion", "candidate"} if metric.scope == "paired" else {"value"}
+        _require_exact_fields(raw, fields, f"telemetry.{name}")
+        item: dict[str, Any] = {}
+        for field in fields:
+            telemetry_value = raw[field]
+            if metric.value_type == "boolean":
+                if not isinstance(telemetry_value, bool):
+                    raise ValidationError(f"telemetry.{name}.{field} must be boolean")
+                item[field] = telemetry_value
+            else:
+                item[field] = _finite_number(
+                    telemetry_value, f"telemetry.{name}.{field}"
+                )
+        validated[name] = item
+    return validated

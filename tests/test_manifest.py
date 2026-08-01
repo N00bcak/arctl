@@ -10,7 +10,7 @@ from arctl.errors import ValidationError
 from arctl.manifest import EvaluatorManifest
 
 
-def valid_manifest(*, version: int = 2) -> dict:
+def valid_manifest(*, version: int = 3, telemetry: bool = False) -> dict:
     manifest = {
         "schema_version": version,
         "subject_command": ["python3", "subject.py", "{input}", "{output}"],
@@ -35,7 +35,22 @@ def valid_manifest(*, version: int = 2) -> dict:
         "public": {
             "statistic": "expected score",
             "subject_interface": "JSON batch to JSON results",
-            "telemetry": ["errors"],
+            "telemetry": (
+                {
+                    "errors": {
+                        "description": "Mean failed actions per case.",
+                        "unit": "actions per case",
+                        "scope": "paired",
+                        "role": "safety",
+                        "value_type": "number",
+                        "direction": "lower",
+                    }
+                }
+                if version >= 3 and telemetry
+                else {}
+                if version >= 3
+                else []
+            ),
         },
         "trial": {
             "meaning": "one generated map",
@@ -69,7 +84,7 @@ def valid_manifest(*, version: int = 2) -> dict:
                 "maximum": 1.0,
             },
         }
-        if version == 2
+        if version >= 2
         else {
             "supported": True,
             "policy": "smallest ladder count meeting target precision",
@@ -86,6 +101,16 @@ class ManifestTests(unittest.TestCase):
         manifest.validate_trial_setting(1)
         manifest.validate_trial_setting(256)
         self.assertEqual(manifest.suspect_reason_codes, ("timeout_shift",))
+
+    def test_semantic_telemetry_contract(self) -> None:
+        manifest = EvaluatorManifest.from_mapping(valid_manifest(telemetry=True))
+        metric = manifest.public_telemetry["errors"]
+        self.assertEqual((metric.scope, metric.role, metric.direction), ("paired", "safety", "lower"))
+
+        raw = valid_manifest(telemetry=True)
+        raw["public"]["telemetry"]["errors"]["value_type"] = "boolean"
+        with self.assertRaisesRegex(ValidationError, "paired metrics"):
+            EvaluatorManifest.from_mapping(raw)
 
     def test_rejects_partial_unknown_and_duplicate_placeholders(self) -> None:
         for command in (

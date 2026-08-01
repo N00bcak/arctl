@@ -8,8 +8,9 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .decisions import Decision, decide
-from .errors import StateError
-from .models import Evidence
+from .errors import StateError, ValidationError
+from .manifest import TelemetryMetric
+from .models import Evidence, validate_telemetry
 
 
 @dataclass(frozen=True)
@@ -74,8 +75,18 @@ def build_public_result(
             "comparisons": comparisons,
         },
         "constraints": {"tests": "PASS" if tests_pass else "FAIL"},
-        "telemetry": dict(outcome.primary.telemetry),
+        "telemetry": publish_telemetry(outcome.primary.telemetry),
     }
+
+
+def publish_telemetry(telemetry: Mapping[str, Any]) -> dict[str, Any]:
+    published: dict[str, Any] = {}
+    for name, raw in telemetry.items():
+        item = dict(raw)
+        if set(item) == {"champion", "candidate"}:
+            item["delta"] = item["candidate"] - item["champion"]
+        published[name] = item
+    return published
 
 
 def public_comparison(evidence: Evidence) -> dict[str, Any]:
@@ -92,7 +103,7 @@ def public_comparison(evidence: Evidence) -> dict[str, Any]:
 def validate_public_result(
     value: Any,
     *,
-    allowed_telemetry: Sequence[str],
+    allowed_telemetry: Mapping[str, TelemetryMetric],
     allowed_suspect_reasons: Sequence[str],
     expected_statistic: str,
 ) -> dict[str, Any]:
@@ -211,14 +222,39 @@ def validate_public_result(
         raise StateError("public result champion transition is invalid")
 
     telemetry = value["telemetry"]
-    if not isinstance(telemetry, Mapping) or set(telemetry) - set(allowed_telemetry):
+    expected_telemetry = set(allowed_telemetry) if kinds else set()
+    if not isinstance(telemetry, Mapping) or set(telemetry) != expected_telemetry:
         raise StateError("public result telemetry is invalid")
-    for telemetry_value in telemetry.values():
-        if telemetry_value is None or isinstance(telemetry_value, bool):
-            continue
-        if (
-            not isinstance(telemetry_value, (int, float))
-            or not math.isfinite(telemetry_value)
-        ):
+    private_shape: dict[str, Any] = {}
+    for name, metric in allowed_telemetry.items():
+        raw = telemetry[name]
+        if not isinstance(raw, Mapping):
             raise StateError("public result telemetry is invalid")
+        expected = (
+            {"champion", "candidate", "delta"}
+            if metric.scope == "paired"
+            else {"value"}
+        )
+        if set(raw) != expected:
+            raise StateError("public result telemetry is invalid")
+        item = dict(raw)
+        if metric.scope == "paired":
+            delta = item.pop("delta")
+            if (
+                isinstance(delta, bool)
+                or not isinstance(delta, (int, float))
+                or not math.isfinite(delta)
+                or not math.isclose(
+                    float(delta),
+                    float(item["candidate"]) - float(item["champion"]),
+                    rel_tol=1e-12,
+                    abs_tol=1e-12,
+                )
+            ):
+                raise StateError("public result telemetry delta is invalid")
+        private_shape[name] = item
+    try:
+        validate_telemetry(private_shape, metrics=allowed_telemetry)
+    except ValidationError as error:
+        raise StateError("public result telemetry is invalid") from error
     return dict(value)

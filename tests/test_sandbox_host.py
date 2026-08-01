@@ -15,6 +15,77 @@ from arctl.sandbox import sandbox_command, sanitized_environment
     "requires a host that can create a Codex sandbox",
 )
 class HostSandboxTests(unittest.TestCase):
+    def test_reflection_profile_reads_both_arms_without_mutating_them(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "candidate"
+            champion = root / "champion"
+            scratch = root / "scratch"
+            codex_home = root / "codex-home"
+            for directory in (candidate, champion, scratch, codex_home):
+                directory.mkdir()
+            (candidate / "agent.py").write_text("candidate")
+            (champion / "agent.py").write_text("champion")
+            private = root / "evidence.private.json"
+            private.write_text("private")
+            result = scratch / "probe.json"
+            script = """\
+import json
+import sys
+from pathlib import Path
+
+candidate, champion, private, result = map(Path, sys.argv[1:])
+checks = {
+    "candidate_read": (candidate / "agent.py").read_text() == "candidate",
+    "champion_read": (champion / "agent.py").read_text() == "champion",
+}
+for name, path in (
+    ("candidate_write_denied", candidate / "forbidden"),
+    ("champion_write_denied", champion / "forbidden"),
+):
+    try:
+        path.write_text("bad")
+    except OSError:
+        checks[name] = True
+    else:
+        checks[name] = False
+try:
+    private.read_text()
+except OSError:
+    checks["private_read_denied"] = True
+else:
+    checks["private_read_denied"] = False
+result.write_text(json.dumps(checks))
+"""
+            command = sandbox_command(
+                (
+                    "python3",
+                    "-c",
+                    script,
+                    str(candidate),
+                    str(champion),
+                    str(private),
+                    str(result),
+                ),
+                cwd=candidate,
+                read_paths=(candidate, champion),
+                write_paths=(scratch,),
+                profile="arctl-research",
+            )
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                env=sanitized_environment(
+                    codex_home=codex_home,
+                    writable_home=scratch,
+                ),
+                timeout=15,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(all(json.loads(result.read_text()).values()))
+
     def test_subject_profile_enforces_read_write_network_boundaries(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

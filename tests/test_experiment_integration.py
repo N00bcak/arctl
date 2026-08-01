@@ -10,6 +10,7 @@ from unittest import mock
 from arctl.decisions import Decision
 from arctl.errors import StateError
 from arctl.experiment import (
+    complete_reflection,
     freeze_candidate,
     load_experiment,
     mark_comparison_reserved,
@@ -159,6 +160,22 @@ class ExperimentIntegrationTests(unittest.TestCase):
             resolve_commit(self.repo, "refs/arctl/demo/champion"),
             frozen.candidate,
         )
+        (self.experiment_directory / "reflection.public.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "SKIPPED_NO_TELEMETRY",
+                    "warning": "No telemetry.",
+                    "basis": {},
+                    "assessment": None,
+                }
+            )
+        )
+        with mock.patch(
+            "arctl.experiment.ensure_experiment_dossier",
+            side_effect=StateError("derived report unavailable"),
+        ):
+            complete_reflection(self.task, self.experiment_directory, public)
         self.assertEqual(load_experiment(self.experiment_directory).state, "COMPLETE")
         self.assertTrue((self.experiment_directory / "published").exists())
 

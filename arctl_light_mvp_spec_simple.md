@@ -73,7 +73,7 @@ git update-ref refs/arctl/$TASK/champion $CANDIDATE $EXPECTED_CHAMPION
 `arctl` never changes a normal production branch.
 The evaluator must live outside the target repo. A separate private Git repo is the normal setup. The task stores one evaluator commit and its manifest approved by the user. Every calibration and official test uses that exact commit and manifest. Changing either means creating a new task.
 
-The manifest contains the frozen subject, preparation, calibration, and scoring argument-vector commands; their schemas and limits; the public telemetry allowlist; the meaning of one trial and any known dependence between trials; the score statistic; the uncertainty method; the seed-to-case procedure; known uncontrolled score variation and attempted mitigations; the optional suspect-test trigger and its allowed reason codes; and, when supported, the automatic-calibration ladder, scalar diagnostic, maximum acceptable value, and ceiling-fallback policy. The same preparation and scoring commands handle both comparison kinds. The approval screen explains these items in plain language. Evaluator commands are data fixed by the approved manifest; evaluator processes may not return new commands or launch subjects.
+The manifest contains the frozen subject, preparation, calibration, and scoring argument-vector commands; their schemas and limits; semantic public telemetry declarations; the meaning of one trial and any known dependence between trials; the score statistic; the uncertainty method; the seed-to-case procedure; known uncontrolled score variation and attempted mitigations; the optional suspect-test trigger and its allowed reason codes; and, when supported, the automatic-calibration ladder, scalar diagnostic, maximum acceptable value, and ceiling-fallback policy. Each telemetry metric declares its description, unit, paired or comparison scope, outcome/mechanism/safety/implementation/uncertainty role, value type, and favorable direction. The same preparation and scoring commands handle both comparison kinds. The approval screen explains these items in plain language. Evaluator commands are data fixed by the approved manifest; evaluator processes may not return new commands or launch subjects.
 
 Every evaluator comparison must use a direction-normalized effect:
 ```text
@@ -186,7 +186,7 @@ Each completed experiment must have one small folder with all key files. A human
 
 Publication also creates a derived public-only Markdown dossier containing the
 research rationale, exact Git diff, public checks, approved aggregate telemetry,
-comparison aggregates, decision, and promotion outcome. It contains and links
+comparison aggregates, decision, promotion outcome, and post-trial reflection. It contains and links
 no private paths, cases, seeds, schedules, subject output, evaluator output,
 process commands, environments, or private evidence. Missing dossiers for
 completed pre-existing experiments may be created when first reported or
@@ -230,7 +230,7 @@ After the session ends, `arctl` validates this record and the changed paths. Emp
 2. **Prepare:** run the approved evaluator once under `EVALUATOR`. It writes one public batch for both subjects and one private scoring file. The public batch has the reserved number of cases and exposes no hidden answers, private identities, schedules, evaluator details, or illegitimate generator seeds.
 3. **Run subjects:** run champion and candidate once each under `SUBJECT`, in the reserved order, on the identical ordered public batch. Each writes exactly one result per declared trial to a controller-created folder. After its complete process group stops, `arctl` copies, validates, and parses the output. Results are never omitted, replaced, or retried because they are missing, noisy, or unfavorable.
 4. **Score:** run the same approved scoring command once with `kind`, the private scoring file, and both saved subject outputs. It returns the common evidence schema below.
-5. **Validate:** reject evidence as `INVALID` when required values are missing or non-finite, identities or trial count differ from the reservation, unapproved telemetry appears, the lower bound exceeds the estimate, or suspect-test fields violate the approved manifest.
+5. **Validate:** reject evidence as `INVALID` when required values are missing or non-finite, identities or trial count differ from the reservation, telemetry names or arm shapes differ from the approved semantic contract, the lower bound exceeds the estimate, or suspect-test fields violate the approved manifest. Every declared primary telemetry metric is required. An evaluator that intentionally provides no telemetry declares an empty object.
 
 ```json
 {
@@ -246,7 +246,10 @@ After the session ends, `arctl` validates this record and the changed paths. Emp
     "required": false,
     "reason": null
   },
-  "telemetry": {}
+  "telemetry": {
+    "mean_completed_levels": {"champion": 4.8, "candidate": 5.1},
+    "trajectory_divergence_rate": {"value": 0.42}
+  }
 }
 ```
 
@@ -263,7 +266,9 @@ The controller applies the same decision rule to either comparison:
 
 After a primary `ACCEPT` that requests a suspect test, the experiment is internally `PROVISIONAL`: keep the champion unchanged and run exactly one fresh `ComparisonRun(kind="suspect")` with non-overlapping seeds. Its decision becomes final and it cannot request another run. Otherwise the primary decision is final.
 
-Only a final `ACCEPT` may update the champion ref. `arctl` then saves private evidence for every comparison, writes aggregate public feedback, marks the experiment complete, removes temporary worktrees, and gives only the final public result to later sessions. There is no controller-defined metric direction, minimum delta, or unit-specific threshold.
+Only a final `ACCEPT` may update the champion ref. The verdict and promotion are fixed before interpretation and cannot be changed by a model. When the manifest declares telemetry, `arctl` enters `REFLECTING` and launches one fresh, schema-constrained, read-only session over the public result, semantic telemetry, precommitted expectations and falsifiers, public checks, and champion/candidate source. It must assess every metric, distinguish observation from inference, state when causes are not identifiable, assess mechanism and implementation evidence, and recommend a nonbinding next research action. Its separate `reflection.public.json` is advisory and never changes `ACCEPT`, `ARCHIVE`, `REJECT`, or promotion.
+
+If the manifest declares no telemetry, `arctl` skips the model session and publishes a persistent warning that causal reflection is unavailable. If a required reflection process or response fails, the valid verdict and promotion remain saved but the task becomes `REFLECTION_FAILED`; no later candidate search may start. A later explicit `run` makes a fresh reflection attempt before any research. There is no bypass. After reflection succeeds or is intentionally skipped, `arctl` marks the experiment complete, removes temporary worktrees, and gives the result plus reflection to later sessions. There is no controller-defined metric direction, minimum delta, or unit-specific threshold.
 
 ## 11. Public feedback
 Allowed example:
@@ -287,11 +292,13 @@ Allowed example:
     }]
   },
   "constraints": {"tests": "PASS"},
-  "telemetry": {"dead_end_entries": 47}
+  "telemetry": {
+    "dead_end_entries": {"champion": 51, "candidate": 47, "delta": -4}
+  }
 }
 ```
 Public feedback must not include hidden cases, seeds, schedules, evaluator code or paths, raw subject output, per-trial scores, stdout, stderr, error text, private notes, or telemetry not allowlisted by the evaluator manifest.
-Public telemetry may contain only finite numbers, Booleans, or `null`.
+Paired public telemetry contains finite champion, candidate, and controller-derived delta numbers. Comparison telemetry contains exactly one finite number or Boolean. Null and partially populated telemetry are invalid.
 
 When a suspect test ran, `evaluation.comparisons` contains a second item with `kind: suspect` and the same aggregate shape; the primary item identifies the approved reason. Public feedback never exposes either comparison's private identities. Every task report must state that uncertainty is calculated by the approved evaluator for one candidate comparison, that `arctl` validates the protocol and evidence shape rather than the evaluator's mathematics, and that calibration and suspect testing are best-effort mitigations. Because the MVP adaptively evaluates multiple candidates without alpha spending or another task-wide correction, it does not promise nominal coverage or bound the chance of at least one false promotion across the complete research run.
 
@@ -303,6 +310,7 @@ Every calibration or comparison process is a `ProcessRun`:
 Candidate public-test, subject, or hard-rule failure gives `REJECT`. Champion, evaluator, sandbox, controller, or host failure gives `INVALID`. Calibration failure blocks the task before research and never silently redraws calibration seeds.
 Failure before the primary comparison is reserved discards the unfinished experiment. Recoverable candidate-search misses precede the experiment and remain in the public ledger; infrastructure and saved-state failures remain inspectable engineering failures. Failure after any comparison reservation publishes the experiment without a replacement seed or retry. A saved valid primary `PROVISIONAL` result may continue only into its one not-yet-started suspect comparison.
 Every process starts in its own process group. On exit, timeout, stop, or too much output, `arctl` must stop and clean up all child processes.
+Reflection attempts use the same exactly-once process records, but may be retried in a fresh numbered attempt because they neither redraw evidence nor affect the fixed verdict. Failed reflection attempts remain inspectable.
 
 ## 13. Install, files, and CLI
 The MVP is installed from its local source checkout, not PyPI. It ships one `install.sh` that verifies Python 3.11+, creates or reuses `<arctl-source>/.venv`, runs:
@@ -342,6 +350,9 @@ and prints the activation command. The script must be safe to rerun and must not
         process/
         evidence.private.json
     result.public.json
+    reflection.public.json
+    reflection/
+      attempts/0001/process/
     published
   worktrees/
   reports/
@@ -350,6 +361,7 @@ and prints the activation command. The script must be safe to rerun and must not
       change.diff
       research.md
       evaluation.md
+      reflection.md
 ```
 `comparisons/suspect/` is absent unless the primary result required it. `calibration.private.json` is absent when `trials` is an integer. `trial-count.json` records whether the frozen count was automatic or fixed and contains no private seeds. Each comparison uses the same artifact shape. Private reservations and evidence contain complete trial identities; public results contain only aggregates.
 
@@ -388,11 +400,12 @@ The MVP is done when one toy repo and one real repo show:
 8. The common evidence schema supports at least a mean, binary win-rate, and non-mean statistic with disclosed dependence and uncontrolled variation.
 9. Only `arctl` decides: positive lower bound accepts, flagged acceptance waits for its suspect result, positive uncertainty archives, and non-positive effect rejects.
 10. Candidate failure gives `REJECT`, system or incoherent-evidence failure gives `INVALID`, and only final `ACCEPT` changes the champion.
-11. Later research sessions see only checked aggregate final results; private per-trial evidence remains auditable from the experiment folder and Git history.
+11. Later research sessions see only checked aggregate final results and advisory public reflections; private per-trial evidence remains auditable from the experiment folder and Git history.
 12. All nine commands infer unambiguous tasks, explain validity in human output, and provide schema-valid sanctioned `--json` output with a next command and without private evidence.
 13. AI-operated approval reports that human permission is required; approval, status, stop, errors, and the novice setup path require no source reading.
-14. A real task runs several experiments without repeated approval, preserves failed ideas, and reports the best-effort and non-search-wide limits.
-15. `install.sh` creates a working local editable installation and exposes `arctl` without PyPI, `sudo`, or system-Python changes.
+14. Semantic paired telemetry exposes both arms and a derived delta; required reflection cannot alter verdicts, blocks later research on failure, and explicitly reports causal evidence gaps.
+15. A real task runs several experiments without repeated approval, preserves failed ideas, and reports the best-effort and non-search-wide limits.
+16. `install.sh` creates a working local editable installation and exposes `arctl` without PyPI, `sudo`, or system-Python changes.
 
 ## 15. Final rule
 When rules conflict:

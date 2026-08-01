@@ -190,6 +190,8 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
                 "public_checks",
                 "public_checks_complete",
                 "comparison",
+                "reflection",
+                "reflection_complete",
                 "result",
                 "complete",
             ],
@@ -241,6 +243,46 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
             comparison_command_builder=self.unconfined_comparison,
         )
         self.assertEqual(exhausted.results, ())
+
+    def test_reflection_failure_blocks_search_and_next_run_recovers_it(self) -> None:
+        def fail_reflection(**arguments):
+            attempt = arguments["experiment"] / "reflection" / "attempts" / "0001"
+            attempt.mkdir(parents=True)
+            (attempt / "reflection.failure.json").write_text(
+                json.dumps({"schema_version": 1, "message": "backend failed"})
+            )
+            raise StateError("reflection backend failed")
+
+        with mock.patch(
+            "arctl.runner.run_reflection",
+            side_effect=fail_reflection,
+        ):
+            failed = run_task(
+                self.task,
+                max_experiments=1,
+                research_command_builder=self.research_command,
+                public_check_command_builder=self.unconfined_public,
+                comparison_command_builder=self.unconfined_comparison,
+            )
+
+        self.assertTrue(failed.reflection_failed)
+        self.assertEqual(failed.results[0]["decision"], "ACCEPT")
+        self.assertEqual(task_status(self.task)["state"], "REFLECTION_FAILED")
+        experiment = self.task_directory / "experiments" / "000001"
+        self.assertFalse((experiment / "published").exists())
+
+        recovered = run_task(
+            self.task,
+            max_experiments=1,
+            research_command_builder=lambda *_: self.fail(
+                "candidate search ran before reflection recovery"
+            ),
+            public_check_command_builder=self.unconfined_public,
+            comparison_command_builder=self.unconfined_comparison,
+        )
+        self.assertFalse(recovered.reflection_failed)
+        self.assertTrue((experiment / "published").is_file())
+        self.assertEqual(task_status(self.task)["state"], "READY")
 
     def test_exact_duplicates_refresh_strategy_then_stall_without_an_experiment(self) -> None:
         (self.subject / "subject.py").write_text(

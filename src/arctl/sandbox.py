@@ -137,6 +137,7 @@ def research_command(
     output_name: str = "request.public.json",
     model: str | None = None,
     reasoning_effort: str | None = None,
+    writable_worktree: bool = True,
 ) -> tuple[str, ...]:
     profile = "arctl-research"
     overrides: tuple[str, ...] = ()
@@ -168,8 +169,12 @@ def research_command(
         "--config",
         _filesystem_override(
             profile,
-            read_paths=(worktree / ".git", *read_paths),
-            write_paths=(worktree, scratch),
+            read_paths=(
+                (worktree / ".git", *read_paths)
+                if writable_worktree
+                else (worktree, *read_paths)
+            ),
+            write_paths=((worktree, scratch) if writable_worktree else (scratch,)),
             codex=codex,
         ),
         "--config",

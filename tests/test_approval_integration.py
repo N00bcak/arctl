@@ -113,7 +113,7 @@ class ApprovalIntegrationTests(unittest.TestCase):
             "commit": git(self.evaluator, "rev-parse", "HEAD"),
         }
         task = TaskConfig.from_mapping(raw)
-        with self.assertRaisesRegex(ValidationError, "controller-run pilot"):
+        with self.assertRaisesRegex(ValidationError, "manifest-v3"):
             preview_approval(self.task_file, task)
 
     def test_verification_detects_tampering(self) -> None:

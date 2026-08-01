@@ -27,6 +27,14 @@ _FIELDS = {
 _LIMIT_FIELDS = {"timeout_seconds", "max_output_bytes"}
 _SCHEMA_FIELDS = {"public_case", "subject_result"}
 _PUBLIC_FIELDS = {"statistic", "subject_interface", "telemetry"}
+_TELEMETRY_FIELDS = {
+    "description",
+    "unit",
+    "scope",
+    "role",
+    "value_type",
+    "direction",
+}
 _TRIAL_FIELDS = {"meaning", "dependence", "seed_to_case", "subject_visible_seed"}
 _STATISTIC_FIELDS = {"score", "uncertainty", "positive_effect"}
 _VARIATION_FIELDS = {"known", "mitigations"}
@@ -98,6 +106,74 @@ class CalibrationPolicy:
 
 
 @dataclass(frozen=True)
+class TelemetryMetric:
+    description: str
+    unit: str
+    scope: str
+    role: str
+    value_type: str
+    direction: str
+
+
+def _telemetry_metrics(
+    value: Any,
+    *,
+    schema_version: int,
+) -> dict[str, TelemetryMetric]:
+    if schema_version < 3:
+        names = _string_tuple(value, "public.telemetry")
+        if names:
+            raise ValidationError(
+                "manifest-v1/v2 telemetry lacks semantic descriptors; use manifest-v3"
+            )
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValidationError("public.telemetry must be an object")
+    metrics: dict[str, TelemetryMetric] = {}
+    for name, raw in value.items():
+        if not isinstance(name, str) or not name:
+            raise ValidationError("public.telemetry names must be non-empty strings")
+        metric = _object(raw, _TELEMETRY_FIELDS, f"public.telemetry.{name}")
+        scope = metric["scope"]
+        role = metric["role"]
+        value_type = metric["value_type"]
+        direction = metric["direction"]
+        if scope not in {"paired", "comparison"}:
+            raise ValidationError(f"public.telemetry.{name}.scope is invalid")
+        if role not in {
+            "outcome",
+            "mechanism",
+            "safety",
+            "implementation",
+            "uncertainty",
+        }:
+            raise ValidationError(f"public.telemetry.{name}.role is invalid")
+        if value_type not in {"number", "boolean"}:
+            raise ValidationError(f"public.telemetry.{name}.value_type is invalid")
+        if scope == "paired" and value_type != "number":
+            raise ValidationError(
+                f"public.telemetry.{name} paired metrics must be numeric"
+            )
+        if direction not in {"higher", "lower", "contextual"}:
+            raise ValidationError(f"public.telemetry.{name}.direction is invalid")
+        if value_type == "boolean" and direction != "contextual":
+            raise ValidationError(
+                f"public.telemetry.{name} boolean metrics must be contextual"
+            )
+        metrics[name] = TelemetryMetric(
+            description=_text(
+                metric["description"], f"public.telemetry.{name}.description"
+            ),
+            unit=_text(metric["unit"], f"public.telemetry.{name}.unit"),
+            scope=scope,
+            role=role,
+            value_type=value_type,
+            direction=direction,
+        )
+    return metrics
+
+
+@dataclass(frozen=True)
 class EvaluatorManifest:
     schema_version: int
     subject_command: tuple[str, ...]
@@ -109,7 +185,7 @@ class EvaluatorManifest:
     subject_result_schema: Mapping[str, Any]
     public_statistic: str
     subject_interface: str
-    public_telemetry: tuple[str, ...]
+    public_telemetry: Mapping[str, TelemetryMetric]
     trial_meaning: str
     trial_dependence: str
     seed_to_case: str
@@ -127,8 +203,8 @@ class EvaluatorManifest:
     def from_mapping(cls, value: Mapping[str, Any]) -> EvaluatorManifest:
         root = _object(value, _FIELDS, "manifest")
         schema_version = root["schema_version"]
-        if schema_version not in (1, 2):
-            raise ValidationError("manifest.schema_version must equal 1 or 2")
+        if schema_version not in (1, 2, 3):
+            raise ValidationError("manifest.schema_version must equal 1, 2, or 3")
 
         limits = _object(root["limits"], _LIMIT_FIELDS, "limits")
         schemas = _object(root["schemas"], _SCHEMA_FIELDS, "schemas")
@@ -140,9 +216,7 @@ class EvaluatorManifest:
         calibration = _object(
             root["calibration"],
             (
-                _CALIBRATION_V1_FIELDS
-                if schema_version == 1
-                else _CALIBRATION_V2_FIELDS
+                _CALIBRATION_V1_FIELDS if schema_version == 1 else _CALIBRATION_V2_FIELDS
             ),
             "calibration",
         )
@@ -294,7 +368,9 @@ class EvaluatorManifest:
             subject_result_schema=dict(schemas["subject_result"]),
             public_statistic=_text(public["statistic"], "public.statistic"),
             subject_interface=_text(public["subject_interface"], "public.subject_interface"),
-            public_telemetry=_string_tuple(public["telemetry"], "public.telemetry"),
+            public_telemetry=_telemetry_metrics(
+                public["telemetry"], schema_version=schema_version
+            ),
             trial_meaning=_text(trial["meaning"], "trial.meaning"),
             trial_dependence=_text(trial["dependence"], "trial.dependence"),
             seed_to_case=_text(trial["seed_to_case"], "trial.seed_to_case"),
@@ -320,7 +396,7 @@ class EvaluatorManifest:
                 diagnostic_name,
                 diagnostic_units,
                 diagnostic_maximum,
-                schema_version == 2 and calibration_supported,
+                schema_version >= 2 and calibration_supported,
             ),
         )
 

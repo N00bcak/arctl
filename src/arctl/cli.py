@@ -376,6 +376,13 @@ class _ProgressView:
             elif kind == "provisional":
                 self._finish()
                 self._line("  ✓ PROVISIONAL · suspect comparison required")
+            elif kind == "reflection":
+                self._finish()
+                self._start("REFLECTING")
+            elif kind == "reflection_complete":
+                self._finish()
+            elif kind == "reflection_failed":
+                self._finish("failed")
             elif kind == "result":
                 self._finish()
                 self._line("  ✓ FINALIZING")
@@ -578,7 +585,14 @@ def _approve(
                 "Suspect reason codes: "
                 + (", ".join(manifest.suspect_reason_codes) or "none"),
                 "Publishable telemetry: "
-                + (", ".join(manifest.public_telemetry) or "none"),
+                + (
+                    "; ".join(
+                        f"{name} [{metric.scope}/{metric.role}, {metric.unit}, "
+                        f"{metric.direction}]: {metric.description}"
+                        for name, metric in manifest.public_telemetry.items()
+                    )
+                    or "none"
+                ),
                 "This trusts the evaluator's statistical method; arctl validates "
                 "the approved protocol and evidence shape, not its mathematics.",
                 "Calibration and suspect testing do not provide a search-wide "
@@ -644,6 +658,7 @@ def _status(data_root: Path, task_id: str | None) -> dict[str, Any]:
         "RESEARCH_FAILED",
         "STRATEGY_FAILED",
         "PUBLIC_CHECK_FAILED",
+        "REFLECTION_FAILED",
         "SEARCH_STALLED",
     ):
         next_command = f"arctl run {identifier}"
@@ -799,22 +814,28 @@ def _run(
     state = (
         "STOPPED"
         if outcome.stopped
+        else "REFLECTION_FAILED"
+        if outcome.reflection_failed
         else "SEARCH_STALLED"
         if outcome.stalled
         else "RUN_COMPLETE"
     )
     next_command = f"arctl status {identifier}"
     payload = _payload(
-        success=True,
+        success=not outcome.reflection_failed,
         state=state,
         task_id=identifier,
-        action_required=outcome.stalled,
+        action_required=outcome.stalled or outcome.reflection_failed,
         allowed_actions=("status", "history", "report", "inspect", "run"),
         next_command=next_command,
         message=(
             f"Task {identifier} stopped safely after {len(results)} experiments."
             if outcome.stopped
             else (
+                f"Post-trial reflection failed for {identifier}; valid statistical "
+                "evidence was preserved and no further research was started."
+                if outcome.reflection_failed
+                else
                 f"Candidate search for {identifier} stalled after six attempts; "
                 "the exploration history was preserved."
                 if outcome.stalled

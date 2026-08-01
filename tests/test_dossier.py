@@ -84,7 +84,13 @@ class DossierTests(unittest.TestCase):
                     ],
                 },
                 "constraints": {"tests": "PASS"},
-                "telemetry": {"public_metric": 2.0},
+                "telemetry": {
+                    "public_metric": {
+                        "champion": 1.0,
+                        "candidate": 2.0,
+                        "delta": 1.0,
+                    }
+                },
             }
 
             readme = ensure_experiment_dossier(
@@ -96,7 +102,13 @@ class DossierTests(unittest.TestCase):
             files = sorted(readme.parent.iterdir())
             self.assertEqual(
                 [path.name for path in files],
-                ["README.md", "change.diff", "evaluation.md", "research.md"],
+                [
+                    "README.md",
+                    "change.diff",
+                    "evaluation.md",
+                    "reflection.md",
+                    "research.md",
+                ],
             )
             rendered = "\n".join(path.read_text() for path in files)
             self.assertNotIn(secret, rendered)

@@ -15,7 +15,9 @@ from typing import Any
 from .errors import StateError
 from .git import candidate_changed_paths, candidate_diff
 from .models import TaskConfig
+from .reflection import validate_reflection
 from .storage import atomic_write_text
+from .taskio import load_manifest
 from .trials import load_trial_count_record
 
 _CONTROL = re.compile(
@@ -73,6 +75,21 @@ def _comparison_lines(result: dict[str, Any]) -> list[str]:
             )
             + " |"
         )
+    return lines
+
+
+def _telemetry_lines(telemetry: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for name, raw in telemetry.items():
+        if isinstance(raw, dict) and set(raw) == {"champion", "candidate", "delta"}:
+            lines.append(
+                f"- **{safe_text(name)}:** champion {raw['champion']}; "
+                f"candidate {raw['candidate']}; delta {raw['delta']}"
+            )
+        elif isinstance(raw, dict) and set(raw) == {"value"}:
+            lines.append(f"- **{safe_text(name)}:** {raw['value']}")
+        else:
+            lines.append(f"- **{safe_text(name)}:** invalid derived value")
     return lines
 
 
@@ -134,6 +151,7 @@ def _documents(
             "- [Research rationale](research.md)",
             "- [Exact candidate change](change.diff)",
             "- [Checks and official evaluation](evaluation.md)",
+            "- [Post-trial reflection](reflection.md)",
             "",
         )
     )
@@ -167,6 +185,15 @@ def _documents(
         )
     )
     telemetry = result.get("telemetry", {})
+    reflection = None
+    if (experiment / "reflection.public.json").is_file():
+        manifest, _ = load_manifest(task_directory / "evaluator.manifest.json")
+        reflection = validate_reflection(
+            _read_object(
+                experiment / "reflection.public.json", "public reflection"
+            ),
+            metric_names=tuple(manifest.public_telemetry),
+        )
     trial_record = (
         load_trial_count_record(task_directory, task)
         if (task_directory / "trial-count.json").is_file()
@@ -199,7 +226,7 @@ def _documents(
             "## Approved aggregate telemetry",
             "",
             *(
-                [f"- **{safe_text(name)}:** {value}" for name, value in telemetry.items()]
+                _telemetry_lines(telemetry)
                 or ["- None published."]
             ),
             "",
@@ -215,11 +242,72 @@ def _documents(
             "",
         )
     )
+    if reflection is None:
+        reflection_document = "# Post-trial reflection\n\nNot available.\n"
+    elif reflection.get("status") == "SKIPPED_NO_TELEMETRY":
+        reflection_document = "\n".join(
+            (
+                f"# Post-trial reflection — Experiment {identifier}",
+                "",
+                f"**Warning:** {safe_text(reflection.get('warning', ''))}",
+                "",
+            )
+        )
+    else:
+        assessment = reflection.get("assessment", {})
+        metric_lines = [
+            f"- **{safe_text(item.get('metric', ''))} — "
+            f"{safe_text(item.get('finding', ''))}:** "
+            f"{safe_text(item.get('rationale', ''))}"
+            for item in assessment.get("metric_assessments", [])
+        ]
+        mechanism = assessment.get("mechanism", {})
+        implementation = assessment.get("implementation", {})
+        action = assessment.get("next_action", {})
+        reflection_document = "\n".join(
+            (
+                f"# Post-trial reflection — Experiment {identifier}",
+                "",
+                dossier_note,
+                "",
+                f"## Summary\n\n{safe_text(assessment.get('summary', ''))}",
+                "",
+                "## Telemetry assessment",
+                "",
+                *(metric_lines or ["- No metrics assessed."]),
+                "",
+                "## Mechanism",
+                "",
+                f"**{safe_text(mechanism.get('status', 'unknown'))}**",
+                "",
+                *[f"- {safe_text(item)}" for item in mechanism.get("evidence", [])],
+                *[
+                    f"- Missing: {safe_text(item)}"
+                    for item in mechanism.get("missing_evidence", [])
+                ],
+                "",
+                "## Implementation",
+                "",
+                f"**{safe_text(implementation.get('status', 'unknown'))}**",
+                "",
+                *[f"- {safe_text(item)}" for item in implementation.get("evidence", [])],
+                *[f"- Concern: {safe_text(item)}" for item in implementation.get("concerns", [])],
+                "",
+                "## Advisory next action",
+                "",
+                f"**{safe_text(action.get('kind', 'unknown'))}:** "
+                f"{safe_text(action.get('rationale', ''))}",
+                "",
+                f"Suggested test: {safe_text(action.get('test', ''))}",
+                "",
+            )
+        )
     return {
         "README.md": readme,
         "change.diff": candidate_diff(task.repo, champion, candidate) + "\n",
         "research.md": research,
         "evaluation.md": evaluation,
+        "reflection.md": reflection_document,
     }
 
 

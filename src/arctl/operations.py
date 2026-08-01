@@ -108,7 +108,25 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
             default=0,
         )
     )
-    if strategy_failed:
+    reflection_attempts = (
+        sorted((directories[-1] / "reflection" / "attempts").glob("[0-9]" * 4))
+        if directories
+        else []
+    )
+    reflection_failed = bool(
+        latest is not None
+        and latest.state == "REFLECTING"
+        and (
+            (directories[-1] / "reflection.blocked.json").is_file()
+            or (
+                reflection_attempts
+                and (reflection_attempts[-1] / "reflection.failure.json").is_file()
+            )
+        )
+    )
+    if reflection_failed:
+        state = "REFLECTION_FAILED"
+    elif strategy_failed:
         state = "STRATEGY_FAILED"
     elif search_research_failed:
         state = "RESEARCH_FAILED"
@@ -158,7 +176,13 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
         "search_id": int(latest_search.name) if latest_search is not None else None,
         "search_attempt": len(attempts) if attempts else None,
         "log_path": (
-            str(strategy_failures[-1].parent / "process")
+            str(
+                reflection_attempts[-1] / "process"
+                if reflection_attempts
+                else directories[-1] / "reflection"
+            )
+            if reflection_failed
+            else str(strategy_failures[-1].parent / "process")
             if strategy_failed
             else str(attempts[-1] / "process")
             if search_research_failed
@@ -195,6 +219,8 @@ def exploration_history(
 def task_report(task: LocatedTask) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     for directory in _experiment_directories(task):
+        if not (directory / "published").is_file():
+            continue
         result = _public_result(task, directory)
         if result is None:
             continue
@@ -265,7 +291,13 @@ def inspect_experiment(
             "path": str(path.relative_to(directory)),
             "visibility": (
                 "public"
-                if path.name in {"request.public.json", "result.public.json", "published"}
+                if path.name
+                in {
+                    "request.public.json",
+                    "result.public.json",
+                    "reflection.public.json",
+                    "published",
+                }
                 else "private"
             ),
         }

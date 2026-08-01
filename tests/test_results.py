@@ -6,6 +6,7 @@ import unittest
 from arctl.decisions import Decision
 from arctl.errors import StateError
 from arctl.models import Evidence
+from arctl.manifest import TelemetryMetric
 from arctl.results import build_public_result, resolve_outcome, validate_public_result
 
 from .helpers import valid_evidence
@@ -17,7 +18,15 @@ def parse(kind: str = "primary", **changes: object) -> Evidence:
         raw,
         expected_kind=kind,  # type: ignore[arg-type]
         expected_trial_count=128,
-        allowed_telemetry=("errors",),
+        allowed_telemetry=(
+            {
+                "errors": TelemetryMetric(
+                    "Mean errors", "errors per case", "paired", "safety", "number", "lower"
+                )
+            }
+            if "telemetry" in changes
+            else {}
+        ),
         allowed_suspect_reasons=("timeout_shift",),
     )
 
@@ -47,11 +56,16 @@ class ExperimentOutcomeTests(unittest.TestCase):
         self.assertEqual(public["champion_after"], "a" * 40)
 
     def test_only_final_accept_changes_public_champion(self) -> None:
-        outcome = resolve_outcome(parse(telemetry={"errors": 2}))
+        outcome = resolve_outcome(
+            parse(telemetry={"errors": {"champion": 3, "candidate": 2}})
+        )
         self.assertTrue(outcome.may_promote)
         public = self.publish(outcome)
         self.assertEqual(public["champion_after"], "b" * 40)
-        self.assertEqual(public["telemetry"], {"errors": 2})
+        self.assertEqual(
+            public["telemetry"],
+            {"errors": {"champion": 3.0, "candidate": 2.0, "delta": -1.0}},
+        )
 
     def test_rejects_unrequested_or_wrong_kind_suspect_evidence(self) -> None:
         with self.assertRaisesRegex(StateError, "without an approved"):
@@ -64,10 +78,17 @@ class ExperimentOutcomeTests(unittest.TestCase):
             resolve_outcome(primary, parse())
 
     def test_revalidates_public_history_before_research_exposure(self) -> None:
-        public = self.publish(resolve_outcome(parse(telemetry={"errors": 2})))
+        metric = TelemetryMetric(
+            "Mean errors", "errors per case", "paired", "safety", "number", "lower"
+        )
+        public = self.publish(
+            resolve_outcome(
+                parse(telemetry={"errors": {"champion": 3, "candidate": 2}})
+            )
+        )
         validated = validate_public_result(
             public,
-            allowed_telemetry=("errors",),
+            allowed_telemetry={"errors": metric},
             allowed_suspect_reasons=("timeout_shift",),
             expected_statistic="expected score",
         )
@@ -86,7 +107,7 @@ class ExperimentOutcomeTests(unittest.TestCase):
                 with self.assertRaises(StateError):
                     validate_public_result(
                         tampered,
-                        allowed_telemetry=("errors",),
+                        allowed_telemetry={"errors": metric},
                         allowed_suspect_reasons=("timeout_shift",),
                         expected_statistic="expected score",
                     )

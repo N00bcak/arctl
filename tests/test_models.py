@@ -5,6 +5,7 @@ import unittest
 
 from arctl.errors import ValidationError
 from arctl.models import Evidence, ResearchRequest, TaskConfig
+from arctl.manifest import TelemetryMetric
 
 from .helpers import valid_evidence, valid_task
 
@@ -138,23 +139,49 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "reason must be null"):
             self.parse(valid_evidence(suspect_reason="distribution_shift"))
 
-    def test_public_telemetry_is_scalar_and_finite(self) -> None:
+    def test_public_telemetry_is_semantic_complete_and_finite(self) -> None:
+        metrics = {
+            "count": TelemetryMetric(
+                "Mean count", "items", "paired", "outcome", "number", "higher"
+            ),
+            "passed": TelemetryMetric(
+                "Constraint result", "boolean", "comparison", "safety", "boolean", "contextual"
+            ),
+        }
         evidence = Evidence.from_mapping(
-            valid_evidence(telemetry={"count": 2.0, "passed": True, "note": None}),
+            valid_evidence(
+                telemetry={
+                    "count": {"champion": 1.0, "candidate": 2.0},
+                    "passed": {"value": True},
+                }
+            ),
             expected_kind="primary",
             expected_trial_count=128,
-            allowed_telemetry=("count", "passed", "note"),
+            allowed_telemetry=metrics,
         )
-        self.assertEqual(evidence.telemetry["count"], 2.0)
+        self.assertEqual(evidence.telemetry["count"]["candidate"], 2.0)
         for invalid in (math.nan, math.inf, "text", [], {}):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(ValidationError):
                     Evidence.from_mapping(
-                        valid_evidence(telemetry={"count": invalid}),
+                        valid_evidence(
+                            telemetry={
+                                "count": {"champion": 1, "candidate": invalid},
+                                "passed": {"value": True},
+                            }
+                        ),
                         expected_kind="primary",
                         expected_trial_count=128,
-                        allowed_telemetry=("count",),
+                        allowed_telemetry=metrics,
                     )
+
+        with self.assertRaisesRegex(ValidationError, "missing"):
+            Evidence.from_mapping(
+                valid_evidence(telemetry={"count": {"champion": 1, "candidate": 2}}),
+                expected_kind="primary",
+                expected_trial_count=128,
+                allowed_telemetry=metrics,
+            )
 
 
 class ResearchRequestTests(unittest.TestCase):

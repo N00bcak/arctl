@@ -13,7 +13,8 @@ scientifically correct.
 - Subject results match the approved schema and declared trial count.
 - Evidence contains finite, direction-normalized effects and an internally
   coherent one-sided lower bound.
-- Only approved aggregate telemetry is published.
+- Every declared primary telemetry metric is present with its approved semantic
+  role and arm shape; paired deltas are controller-derived.
 - Only controller code decides and promotes.
 
 Passing these checks means the approved protocol was followed. It does not mean
@@ -34,6 +35,14 @@ The author must also explain:
 - known uncontrolled variation and concrete mitigations;
 - why the fixed trial count or calibration criterion is adequate;
 - any suspect trigger, its approved reason codes, and the pathology it targets.
+- each public diagnostic's unit, scope, favorable direction, and whether it
+  measures outcome, mechanism, safety, implementation, or uncertainty.
+
+Manifest v3 requires semantic telemetry descriptors. A paired metric reports
+champion and candidate values; a comparison metric reports one aggregate
+value. Missing declared metrics, nulls, and undeclared aggregates invalidate
+the evidence. An evaluator may deliberately declare no telemetry, but arctl
+then warns that it cannot perform causal post-trial reflection.
 
 For new automatic tasks, arctl runs the frozen champion once at the approved
 ladder ceiling. The evaluator reports one non-negative scalar diagnostic for
@@ -46,6 +55,13 @@ does not know the paired-difference variance of future candidates and therefore
 does not prove candidate power, remove systematic bias, or prove coverage. A
 suspect test can investigate one declared warning sign. It is not a general
 multiple-testing correction.
+
+After a valid verdict, a separate read-only model session interprets declared
+telemetry against the precommitted mechanism and falsifiers. Its reflection is
+advisory: it can recommend retention, refinement, later review, implementation
+audit, or abandonment, but cannot change the verdict or promotion. If that
+required session fails, valid evidence is preserved and later research stops
+until a fresh reflection attempt succeeds.
 
 ## Reference conformance fixtures
 
