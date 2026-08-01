@@ -26,8 +26,9 @@ _TASK_FIELDS = {
     "trials",
     "max_experiments",
 }
-_OPTIONAL_TASK_FIELDS = {"strategy"}
+_OPTIONAL_TASK_FIELDS = {"strategy", "execution"}
 _STRATEGY_FIELDS = {"model", "reasoning_effort"}
+_EXECUTION_FIELDS = {"model", "reasoning_effort"}
 _EVALUATOR_FIELDS = {"repo", "commit"}
 _EVIDENCE_FIELDS = {
     "schema_version",
@@ -122,6 +123,9 @@ class TaskConfig:
     max_experiments: int
     strategy_model: str = "gpt-5.6-sol"
     strategy_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] = "high"
+    execution_model: str = "gpt-5.6-terra"
+    execution_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] = "medium"
+    schema_version: int = 2
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> TaskConfig:
@@ -130,8 +134,14 @@ class TaskConfig:
             missing = sorted(_TASK_FIELDS - actual)
             extra = sorted(actual - _TASK_FIELDS - _OPTIONAL_TASK_FIELDS)
             raise ValidationError(f"task fields differ: missing={missing}, extra={extra}")
-        if value["schema_version"] != 1:
-            raise ValidationError("task.schema_version must equal 1")
+        schema_version = value["schema_version"]
+        if schema_version not in {1, 2}:
+            raise ValidationError("task.schema_version must equal 1 or 2")
+        if schema_version == 2 and not {"strategy", "execution"} <= actual:
+            missing = sorted({"strategy", "execution"} - actual)
+            raise ValidationError(
+                f"task schema v2 requires explicit agent settings: missing={missing}"
+            )
         repo = Path(_string(value["repo"], "repo"))
         if not repo.is_absolute():
             raise ValidationError("repo must be absolute")
@@ -152,6 +162,17 @@ class TaskConfig:
         strategy_effort = strategy.get("reasoning_effort", "high")
         if strategy_effort not in {"minimal", "low", "medium", "high", "xhigh"}:
             raise ValidationError("strategy.reasoning_effort is invalid")
+        execution = value.get("execution", {})
+        if not isinstance(execution, Mapping):
+            raise ValidationError("execution must be an object")
+        if execution:
+            _require_exact_fields(execution, _EXECUTION_FIELDS, "execution")
+        execution_model = _string(
+            execution.get("model", "gpt-5.6-terra"), "execution.model"
+        )
+        execution_effort = execution.get("reasoning_effort", "medium")
+        if execution_effort not in {"minimal", "low", "medium", "high", "xhigh"}:
+            raise ValidationError("execution.reasoning_effort is invalid")
         return cls(
             task_id=validate_task_id(value["task_id"]),
             repo=repo,
@@ -165,6 +186,9 @@ class TaskConfig:
             max_experiments=maximum,
             strategy_model=strategy_model,
             strategy_reasoning_effort=strategy_effort,
+            execution_model=execution_model,
+            execution_reasoning_effort=execution_effort,
+            schema_version=schema_version,
         )
 
 

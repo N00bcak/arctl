@@ -53,7 +53,11 @@ class CliTests(unittest.TestCase):
                 f"arctl --data {root / 'data'} approve subject",
             )
             task = root / "data" / "tasks" / "subject" / "task.yaml"
-            self.assertIn(f'repo: "{repo}"', task.read_text())
+            task_text = task.read_text()
+            self.assertIn(f'repo: "{repo}"', task_text)
+            self.assertIn("schema_version: 2", task_text)
+            self.assertIn("model: gpt-5.6-sol", task_text)
+            self.assertIn("model: gpt-5.6-terra", task_text)
 
             code, output = self.run_cli(
                 [
@@ -94,6 +98,86 @@ class CliTests(unittest.TestCase):
         self.assertIn(code, (0, 1))
         next_lines = [line for line in output.splitlines() if line.startswith("Next: ")]
         self.assertEqual(next_lines, [])
+
+    def test_approval_table_is_compact_ordered_and_actionable(self) -> None:
+        payload = {
+            "schema_version": 1,
+            "success": True,
+            "task_id": "demo",
+            "experiment_id": None,
+            "state": "APPROVAL_REQUIRED",
+            "action_required": True,
+            "allowed_actions": ["approve"],
+            "artifacts": [],
+            "message": "Approval required for task demo.",
+            "evidence_valid": None,
+            "can_continue": True,
+            "log_path": None,
+            "next_command": "arctl approve demo --confirm abc123",
+            "approval": {
+                "task_sha256": "a" * 64,
+                "evaluator_commit": "b" * 40,
+                "manifest_sha256": "c" * 64,
+                "confirmation_token": "abc123",
+            },
+            "approval_summary": {
+                "models": (
+                    "gpt-5.6-sol high (Strategy + reflection); "
+                    "gpt-5.6-terra medium (Execution)"
+                ),
+                "editable_paths": ["src/**", "tests/**"],
+                "trial_seeds": (
+                    "Hidden seeds test both champion and candidate; not reused "
+                    "within this task. Evaluator mapping: seed initializes cases."
+                ),
+                "trial_count": (
+                    "Sweep [8, 16, 32, 64]; first meeting standard error ≤ 3; "
+                    "otherwise 64."
+                ),
+                "success_criterion": (
+                    "Hard rules pass; lower bound > 0 — candidate scores higher."
+                ),
+                "telemetry": {
+                    "higher": [
+                        {"name": "score", "description": "How well the policy plays."}
+                    ],
+                    "lower": [
+                        {"name": "errors", "description": "How often actions fail."}
+                    ],
+                    "contextual": [
+                        {"name": "diverged", "description": "Whether paths differ."}
+                    ],
+                },
+                "variance_risks": "Random pieces. Mitigation: identical paired cases.",
+            },
+        }
+        _rewrite_next_command(payload, "./.venv/bin/arctl")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _emit(payload, as_json=False)
+        rendered = output.getvalue()
+        labels = [
+            "Models",
+            "Editable paths",
+            "Trial seeds",
+            "Trial count",
+            "Success criterion",
+            "Telemetry",
+            "Variance risks",
+            "Approval token",
+            "Approval command",
+        ]
+        positions = [rendered.index(label) for label in labels]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("Higher is better:", rendered)
+        self.assertIn("Lower is better:", rendered)
+        self.assertIn("Diagnostic:", rendered)
+        self.assertIn("./.venv/bin/arctl approve demo --confirm abc123", rendered)
+        self.assertNotIn("Denied paths", rendered)
+        self.assertNotIn("Next:", rendered)
+        self.assertNotIn("actions per case", rendered)
+        self.assertEqual(rendered.count("Note:"), 1)
+        self.assertLessEqual(max(map(len, rendered.splitlines())), 138)
 
     def test_human_success_omits_generic_machine_boilerplate(self) -> None:
         payload = {
@@ -248,6 +332,17 @@ class CliTests(unittest.TestCase):
         self.assertEqual(
             payload["next_command"],
             "./.venv/bin/arctl --data '/tmp/arctl task data' run demo",
+        )
+
+        payload = {"next_command": "arctl approve demo"}
+        _rewrite_next_command(
+            payload,
+            "./.venv/bin/arctl",
+            Path("test_tris/.arctl-data"),
+        )
+        self.assertEqual(
+            payload["next_command"],
+            "./.venv/bin/arctl --data test_tris/.arctl-data approve demo",
         )
 
     def test_init_rejects_non_git_repo_and_unsafe_task_id(self) -> None:

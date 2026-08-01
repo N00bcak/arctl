@@ -7,7 +7,7 @@ name = "arctl"
 version = "0.1.0"
 description = "A faithful, statistically cautious AutoResearch controller"
 requires-python = ">=3.11"
-dependencies = ["jsonschema>=4,<5", "PyYAML>=6,<7"]
+dependencies = ["jsonschema>=4,<5", "PyYAML>=6,<7", "tabulate>=0.9,<1"]
 
 [project.scripts]
 arctl = "arctl.cli:main"

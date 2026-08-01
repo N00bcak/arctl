@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -190,3 +191,13 @@ class GitIntegrationTests(unittest.TestCase):
         self.assertEqual(resolve_commit(worktree, "HEAD"), self.champion)
         remove_worktree(self.repo, worktree)
         self.assertFalse(worktree.exists())
+
+    def test_recreates_missing_but_registered_worktree(self) -> None:
+        worktree = self.repo.parent / "detached"
+        create_detached_worktree(self.repo, worktree, self.champion)
+        shutil.rmtree(worktree)
+
+        create_detached_worktree(self.repo, worktree, self.champion)
+
+        self.assertEqual(resolve_commit(worktree, "HEAD"), self.champion)
+        remove_worktree(self.repo, worktree)

@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from arctl.approval import confirm_approval, preview_approval, verify_approval
+from arctl.cli import _approve
 from arctl.errors import StateError, ValidationError
 from arctl.models import TaskConfig
 
@@ -53,6 +54,7 @@ class ApprovalIntegrationTests(unittest.TestCase):
             "repo": str(self.evaluator),
             "commit": self.evaluator_commit[:12],
         }
+        self.raw_task = raw
         self.task = TaskConfig.from_mapping(raw)
 
     def tearDown(self) -> None:
@@ -85,6 +87,41 @@ class ApprovalIntegrationTests(unittest.TestCase):
                 preview.confirmation_token,
             )
 
+    def test_approval_preview_summarizes_auto_protocol_and_token(self) -> None:
+        import yaml
+
+        self.task_file.write_text(yaml.safe_dump(self.raw_task, sort_keys=False))
+        payload = _approve(
+            data_root=self.root / "data",
+            task_id="demo",
+            confirmation=None,
+        )
+        summary = payload["approval_summary"]
+        self.assertEqual(
+            summary["models"],
+            "gpt-5.6-sol high (Strategy + reflection); "
+            "gpt-5.6-terra medium (Execution)",
+        )
+        self.assertEqual(summary["editable_paths"], ["src/**", "tests/**"])
+        self.assertIn("Sweep [4, 16, 64, 256]", summary["trial_count"])
+        self.assertIn("seed initializes the map generator", summary["trial_seeds"])
+        self.assertEqual(summary["telemetry"], {
+            "higher": [],
+            "lower": [],
+            "contextual": [],
+        })
+        token = payload["approval"]["confirmation_token"]
+        self.assertEqual(payload["next_command"], f"arctl approve demo --confirm {token}")
+
+        self.raw_task["trials"] = 32
+        self.task_file.write_text(yaml.safe_dump(self.raw_task, sort_keys=False))
+        fixed = _approve(
+            data_root=self.root / "data",
+            task_id="demo",
+            confirmation=None,
+        )
+        self.assertEqual(fixed["approval_summary"]["trial_count"], "32 paired trials.")
+
     def test_wrong_token_and_post_preview_change_cannot_approve(self) -> None:
         preview = preview_approval(self.task_file, self.task)
         with self.assertRaisesRegex(StateError, "token"):
@@ -115,6 +152,39 @@ class ApprovalIntegrationTests(unittest.TestCase):
         task = TaskConfig.from_mapping(raw)
         with self.assertRaisesRegex(ValidationError, "manifest-v3"):
             preview_approval(self.task_file, task)
+
+    def test_new_task_rejects_subject_visible_seeds(self) -> None:
+        manifest = valid_manifest()
+        manifest["trial"]["subject_visible_seed"] = True
+        (self.evaluator / "evaluator.manifest.json").write_text(
+            json.dumps(manifest, sort_keys=True)
+        )
+        git(self.evaluator, "add", ".")
+        git(self.evaluator, "commit", "-qm", "visible seeds")
+        raw = valid_task()
+        raw["repo"] = str(self.subject)
+        raw["evaluator"] = {
+            "repo": str(self.evaluator),
+            "commit": git(self.evaluator, "rev-parse", "HEAD"),
+        }
+        with self.assertRaisesRegex(ValidationError, "hidden trial seeds"):
+            preview_approval(self.task_file, TaskConfig.from_mapping(raw))
+
+    def test_legacy_task_cannot_be_approved_or_verified(self) -> None:
+        raw = valid_task()
+        raw["schema_version"] = 1
+        del raw["strategy"]
+        del raw["execution"]
+        raw["repo"] = str(self.subject)
+        raw["evaluator"] = {
+            "repo": str(self.evaluator),
+            "commit": self.evaluator_commit,
+        }
+        legacy = TaskConfig.from_mapping(raw)
+        with self.assertRaisesRegex(ValidationError, "create and approve a new task"):
+            preview_approval(self.task_file, legacy)
+        with self.assertRaisesRegex(StateError, "create and approve a new task"):
+            verify_approval(self.task_directory, legacy)
 
     def test_verification_detects_tampering(self) -> None:
         preview = preview_approval(self.task_file, self.task)

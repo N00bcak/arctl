@@ -5,7 +5,7 @@ from typing import Any
 
 def valid_task() -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "task_id": "demo",
         "repo": "/tmp/subject",
         "objective": "Improve the score.",
@@ -14,6 +14,8 @@ def valid_task() -> dict[str, Any]:
         "public_checks": [["python3", "-m", "unittest"]],
         "public_probe": ["python3", "tools/probe.py"],
         "evaluator": {"repo": "/tmp/evaluator", "commit": "a" * 40},
+        "strategy": {"model": "gpt-5.6-sol", "reasoning_effort": "high"},
+        "execution": {"model": "gpt-5.6-terra", "reasoning_effort": "medium"},
         "trials": "auto",
         "max_experiments": 30,
     }

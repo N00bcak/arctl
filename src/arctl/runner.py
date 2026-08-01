@@ -295,6 +295,8 @@ def _run_research(
                     if not path.is_relative_to(worktree)
                 )
             ),
+            model=task.config.execution_model,
+            reasoning_effort=task.config.execution_reasoning_effort,
         )
         codex_home = Path(
             os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))

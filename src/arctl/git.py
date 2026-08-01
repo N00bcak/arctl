@@ -85,7 +85,10 @@ def create_detached_worktree(repo: Path, path: Path, revision: str) -> None:
     if path.exists():
         raise StateError(f"worktree path already exists: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    _git(repo, ["worktree", "add", "--detach", str(path), resolve_commit(repo, revision)])
+    _git(
+        repo,
+        ["worktree", "add", "--force", "--detach", str(path), resolve_commit(repo, revision)],
+    )
     ensure_clean_worktree(path)
 
 

@@ -30,7 +30,7 @@ method must match the declared dependence, score distribution, and statistic.
 The author must also explain:
 
 - how a controller seed becomes a case and which randomness remains;
-- whether the seed is a legitimate subject observation;
+- how the subject interface keeps the controller seed hidden;
 - the direction-normalized effect and what a positive value means;
 - known uncontrolled variation and concrete mitigations;
 - why the fixed trial count or calibration criterion is adequate;

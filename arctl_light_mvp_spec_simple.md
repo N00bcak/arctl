@@ -105,7 +105,7 @@ The session ends before candidate freeze and official test choice. It is never r
 ## 8. Task file
 Use one small YAML file that a human can read:
 ```yaml
-schema_version: 1
+schema_version: 2
 task_id: demo
 repo: /absolute/path/to/repo
 objective: Improve play across procedurally generated maps without breaking correctness.
@@ -119,10 +119,13 @@ evaluator:
 strategy:
   model: gpt-5.6-sol
   reasoning_effort: high
+execution:
+  model: gpt-5.6-terra
+  reasoning_effort: medium
 trials: auto
 max_experiments: 30
 ```
-`trials` must be exactly `auto` or a positive integer other than a Boolean. `auto` runs one controller-orchestrated champion pilot at the approved ladder ceiling, asks the evaluator for one finite diagnostic at every nested ladder prefix, and has `arctl` freeze the smallest stable passing rung. An integer skips calibration and fixes that count; `1` is the deterministic special case. The fixed or calibrated count must be supported by the evaluator manifest and must not exceed its approved safety ceiling. `arctl init` uses `auto` by default.
+Strategy and reflection default to `gpt-5.6-sol` with `high` reasoning. Candidate execution defaults to `gpt-5.6-terra` with `medium` reasoning. Both assignments are explicit and approval-locked; schema-v1 tasks must be recreated and approved as new tasks. `trials` must be exactly `auto` or a positive integer other than a Boolean. `auto` runs one controller-orchestrated champion pilot at the approved ladder ceiling, asks the evaluator for one finite diagnostic at every nested ladder prefix, and has `arctl` freeze the smallest stable passing rung. An integer skips calibration and fixes that count; `1` is the deterministic special case. The fixed or calibrated count must be supported by the evaluator manifest and must not exceed its approved safety ceiling. `arctl init` uses `auto` by default.
 
 All evaluator-manifest commands must be argument lists, not shell strings.
 Allowed full-argument placeholders:
@@ -143,7 +146,9 @@ These rules are required for release.
 - Users must not need database IDs, internal phase names, or hidden state.
 - There are only two approvals: task file and evaluator commit.
 - No approval is needed for each experiment.
-The evaluator-commit approval includes its manifest. The approval screen must show the exact file or commit, changes from the last version, safety-related paths and commands, the Git hash, the `trials` setting, and the exact approval command. It must summarize the evaluator's statistic, what positive effect means, uncertainty method, known uncontrolled variation and mitigation, calibration policy and ceiling when `trials: auto`, subject-visible seed policy, optional suspect-test trigger and reason codes, and publishable telemetry. It must say plainly that the evaluator owns the statistical method, while `arctl` validates the approved protocol and evidence shape; neither approval nor calibration creates a harness-wide false-positive guarantee. For an integer `trials` value, it must say plainly that calibration will be skipped and the displayed count will be used for every comparison.
+The evaluator-commit approval includes its manifest. The human approval screen is one compact table no wider than 140 characters, ordered from setup through method to action. It shows the strategy/reflection and execution models, only the executor's editable-path whitelist, hidden paired-seed and evaluator-mapping summary, fixed trial count or brief automatic-calibration sweep, success rule, telemetry grouped as higher-is-better, lower-is-better, and diagnostic, known variation with mitigation, confirmation token, and exact approval command. Telemetry meanings omit units and print the manifest descriptions. Machine-readable output retains the exact hashes and approval command. A single note states that approval trusts the evaluator's mathematics, provides no search-wide false-positive guarantee, and requires human confirmation. Generic human `Next:` lines remain suppressed.
+
+New approvals require the manifest to declare subject seeds hidden. The evaluator receives private seeds to generate reproducible cases, but champion and candidate receive only the resulting approved public cases. Seeds are paired within a comparison and not reused within the task.
 
 Approval must also warn that it establishes a trust boundary. An AI operator must present the approval and obtain explicit human permission before confirming it. The MVP does not implement delegated authority.
 
@@ -203,7 +208,7 @@ With `trials: auto`, calibration happens once after approval and before research
 The evaluator owns and explains how its diagnostic is calculated; `arctl` owns threshold application and count selection. If no rung passes, `arctl` freezes the ceiling and persistently warns that the criterion was unmet. Champion-only calibration measures the approved baseline property and does not guarantee power for unknown future paired candidate effects. Failure blocks research and is never silently retried or given replacement seeds.
 
 ### 10.2 Develop and freeze
-Before the first search, `arctl` starts a strategy session over the public environment and exploration ledger. It saves environment signals, a success profile, uncertainties, and distinct strategic directions. Strategy defaults to `gpt-5.6-sol` with `high` reasoning and may be overridden in the approved task file.
+Before the first search, `arctl` starts a strategy session over the public environment and exploration ledger. It saves environment signals, a success profile, uncertainties, and distinct strategic directions. Strategy and reflection use the approved strategy assignment; candidate discovery uses the separately approved execution assignment.
 
 For candidate discovery, `arctl` creates a clean champion worktree and starts a fresh `RESEARCH` attempt with the current strategy, searchable public ledger, and approved public packet. The session may use public probes and must write:
 ```json

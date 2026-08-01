@@ -43,6 +43,10 @@ class ApprovalPreview:
 
 
 def preview_approval(task_file: Path, task: TaskConfig) -> ApprovalPreview:
+    if task.schema_version != 2:
+        raise ValidationError(
+            "task schema v1 lacks a locked execution model; create and approve a new task"
+        )
     target = task.repo.resolve()
     evaluator = task.evaluator.repo.resolve()
     if evaluator == target or target in evaluator.parents or evaluator in target.parents:
@@ -60,6 +64,8 @@ def preview_approval(task_file: Path, task: TaskConfig) -> ApprovalPreview:
     manifest = EvaluatorManifest.from_mapping(value)
     if manifest.schema_version != 3:
         raise ValidationError("new tasks require a manifest-v3 telemetry contract")
+    if manifest.subject_visible_seed:
+        raise ValidationError("new tasks require evaluator-hidden trial seeds")
     manifest.validate_trial_setting(task.trials)
     if task.trials == "auto" and not manifest.calibration.controller_pilot:
         raise ValidationError(
@@ -154,6 +160,10 @@ def confirm_approval(
 
 
 def verify_approval(task_directory: Path, task: TaskConfig) -> dict[str, str]:
+    if task.schema_version != 2:
+        raise StateError(
+            "task schema v1 lacks a locked execution model; create and approve a new task"
+        )
     try:
         approval = json.loads((task_directory / "approval.json").read_text())
         task_hash = hashlib.sha256((task_directory / "task.yaml").read_bytes()).hexdigest()

@@ -23,20 +23,42 @@ class TaskConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "extra=.*metric"):
             TaskConfig.from_mapping(raw)
 
-    def test_strategy_model_defaults_and_strict_override(self) -> None:
-        default = TaskConfig.from_mapping(valid_task())
+    def test_agent_model_defaults_and_strict_override(self) -> None:
+        legacy = valid_task()
+        legacy["schema_version"] = 1
+        del legacy["strategy"]
+        del legacy["execution"]
+        default = TaskConfig.from_mapping(legacy)
         self.assertEqual(default.strategy_model, "gpt-5.6-sol")
         self.assertEqual(default.strategy_reasoning_effort, "high")
+        self.assertEqual(default.execution_model, "gpt-5.6-terra")
+        self.assertEqual(default.execution_reasoning_effort, "medium")
 
         raw = valid_task()
         raw["strategy"] = {"model": "custom-model", "reasoning_effort": "xhigh"}
+        raw["execution"] = {"model": "fast-model", "reasoning_effort": "low"}
         configured = TaskConfig.from_mapping(raw)
         self.assertEqual(configured.strategy_model, "custom-model")
         self.assertEqual(configured.strategy_reasoning_effort, "xhigh")
+        self.assertEqual(configured.execution_model, "fast-model")
+        self.assertEqual(configured.execution_reasoning_effort, "low")
 
         raw["strategy"]["reasoning_effort"] = "extreme"
         with self.assertRaisesRegex(ValidationError, "reasoning_effort"):
             TaskConfig.from_mapping(raw)
+
+        raw["strategy"]["reasoning_effort"] = "high"
+        raw["execution"]["reasoning_effort"] = "extreme"
+        with self.assertRaisesRegex(ValidationError, "execution.reasoning_effort"):
+            TaskConfig.from_mapping(raw)
+
+    def test_schema_v2_requires_explicit_agent_settings(self) -> None:
+        for missing in ("strategy", "execution"):
+            raw = valid_task()
+            del raw[missing]
+            with self.subTest(missing=missing):
+                with self.assertRaisesRegex(ValidationError, "explicit agent settings"):
+                    TaskConfig.from_mapping(raw)
 
     def test_rejects_shell_command_strings(self) -> None:
         raw = valid_task()

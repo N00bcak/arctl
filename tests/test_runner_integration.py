@@ -402,6 +402,8 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
             )
 
         self.assertEqual(captured["read_paths"], (runtime,))
+        self.assertEqual(captured["model"], "gpt-5.6-terra")
+        self.assertEqual(captured["reasoning_effort"], "medium")
 
     def test_resumes_finalizing_experiment_without_research_or_evaluation_reruns(
         self,

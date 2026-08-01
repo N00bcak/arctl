@@ -19,7 +19,7 @@ from .storage import TaskLock, atomic_write_text
 
 _TASK_TEMPLATE = """\
 # arctl task: edit the objective, paths, evaluator, and public commands, then approve.
-schema_version: 1
+schema_version: 2
 task_id: {task_id}
 repo: {repo}
 objective: Describe the improvement you want.
@@ -33,6 +33,9 @@ evaluator:
 strategy:
   model: gpt-5.6-sol
   reasoning_effort: high
+execution:
+  model: gpt-5.6-terra
+  reasoning_effort: medium
 trials: auto
 max_experiments: 30
 """
@@ -102,6 +105,51 @@ def _calibration_warning(summary: dict[str, Any] | None) -> str | None:
         "Warning: calibration did not meet "
         f"{summary['diagnostic']} ≤ {summary['maximum']} {summary['units']}; "
         "the approved ceiling was used."
+    )
+
+
+def _approval_table(payload: dict[str, Any]) -> str:
+    from tabulate import tabulate
+
+    from .dossier import safe_terminal_text
+
+    summary = payload["approval_summary"]
+    telemetry: list[str] = []
+    for label, direction in (
+        ("Higher is better", "higher"),
+        ("Lower is better", "lower"),
+        ("Diagnostic", "contextual"),
+    ):
+        metrics = summary["telemetry"][direction]
+        if metrics:
+            telemetry.append(label + ":")
+            telemetry.extend(
+                f"• {safe_terminal_text(metric['name'])} — "
+                f"{safe_terminal_text(metric['description'])}"
+                for metric in metrics
+            )
+    rows = (
+        ("Models", safe_terminal_text(summary["models"])),
+        (
+            "Editable paths",
+            "\n".join(
+                f"• {safe_terminal_text(path)}" for path in summary["editable_paths"]
+            ),
+        ),
+        ("Trial seeds", safe_terminal_text(summary["trial_seeds"])),
+        ("Trial count", safe_terminal_text(summary["trial_count"])),
+        ("Success criterion", safe_terminal_text(summary["success_criterion"])),
+        ("Telemetry", "\n".join(telemetry) if telemetry else "None declared"),
+        ("Variance risks", safe_terminal_text(summary["variance_risks"])),
+        ("Approval token", safe_terminal_text(payload["approval"]["confirmation_token"])),
+        ("Approval command", safe_terminal_text(payload["next_command"])),
+    )
+    return tabulate(
+        rows,
+        headers=("Approval item", "Value"),
+        tablefmt="simple_grid",
+        disable_numparse=True,
+        maxcolwidths=(18, 115),
     )
 
 
@@ -190,6 +238,11 @@ def _emit_human(
             print(f"Edit: {artifact['path']}")
     elif state == "APPROVAL_REQUIRED":
         print(payload["message"])
+        print(_approval_table(payload))
+        print(
+            "Note: approval trusts the evaluator's mathematics, provides no "
+            "search-wide false-positive guarantee, and requires human confirmation."
+        )
     elif state == "READY" and "status" in payload:
         status = payload["status"]
         print(
@@ -445,7 +498,7 @@ def _rewrite_next_command(
     if isinstance(command, str) and (command == "arctl" or command.startswith("arctl ")):
         prefix = program
         if data_root is not None:
-            prefix += " --data " + shlex.quote(str(data_root.resolve()))
+            prefix += " --data " + shlex.quote(str(data_root))
         payload["next_command"] = prefix + command[5:]
 
 
@@ -536,70 +589,25 @@ def _approve(
             f"--confirm {preview.confirmation_token}"
         )
         manifest = preview.manifest
-        calibration = (
+        trial_count = (
             (
-                f"{manifest.calibration.policy}; ladder "
-                f"{list(manifest.calibration.ladder)}; diagnostic "
+                f"Sweep {list(manifest.calibration.ladder)}; first meeting "
                 f"{manifest.calibration.diagnostic_name} ≤ "
                 f"{manifest.calibration.diagnostic_maximum} "
-                f"{manifest.calibration.diagnostic_units}; use the ceiling with "
-                "a persistent warning if no rung meets the target"
+                f"{manifest.calibration.diagnostic_units}; otherwise "
+                f"{manifest.calibration.ceiling}."
             )
             if located.config.trials == "auto"
-            else (
-                f"skipped; fixed count {located.config.trials} will be used "
-                "for every comparison"
-            )
+            else f"{located.config.trials} paired trials."
         )
-        message = "\n".join(
-            (
-                f"Approval required for task {located.config.task_id}.",
-                f"Task file: {located.directory / 'task.yaml'}",
-                "Changes from prior approval: none (this is a new immutable task).",
-                f"Editable paths: {', '.join(located.config.editable_paths)}",
-                f"Denied paths: {', '.join(located.config.denied_paths)}",
-                "Public checks: "
-                + "; ".join(" ".join(command) for command in located.config.public_checks),
-                f"Public probe: {' '.join(located.config.public_probe)}",
-                f"Evaluator repo: {located.config.evaluator.repo}",
-                f"Evaluator commit: {preview.evaluator_commit}",
-                "Strategy model: "
-                f"{located.config.strategy_model} ({located.config.strategy_reasoning_effort})",
-                f"Manifest SHA-256: {preview.manifest_hash}",
-                f"Trials: {located.config.trials}",
-                f"Trial meaning: {manifest.trial_meaning}",
-                f"Trial dependence: {manifest.trial_dependence}",
-                f"Seed-to-case procedure: {manifest.seed_to_case}",
-                "Subject-visible seeds: "
-                + ("yes" if manifest.subject_visible_seed else "no"),
-                f"Subject command: {' '.join(manifest.subject_command)}",
-                f"Prepare command: {' '.join(manifest.prepare_command)}",
-                f"Score command: {' '.join(manifest.score_command)}",
-                f"Statistic: {manifest.score_statistic}",
-                f"Positive effect: {manifest.positive_effect}",
-                f"Uncertainty: {manifest.uncertainty_method}",
-                f"Known variation: {manifest.known_variation}",
-                f"Mitigations: {', '.join(manifest.variation_mitigations)}",
-                f"Calibration: {calibration}",
-                f"Suspect trigger: {manifest.suspect_trigger or 'none'}",
-                "Suspect reason codes: "
-                + (", ".join(manifest.suspect_reason_codes) or "none"),
-                "Publishable telemetry: "
-                + (
-                    "; ".join(
-                        f"{name} [{metric.scope}/{metric.role}, {metric.unit}, "
-                        f"{metric.direction}]: {metric.description}"
-                        for name, metric in manifest.public_telemetry.items()
-                    )
-                    or "none"
-                ),
-                "This trusts the evaluator's statistical method; arctl validates "
-                "the approved protocol and evidence shape, not its mathematics.",
-                "Calibration and suspect testing do not provide a search-wide "
-                "false-positive guarantee.",
-                "An AI operator must obtain explicit human permission before confirming.",
-            )
-        )
+        telemetry = {
+            direction: [
+                {"name": name, "description": metric.description}
+                for name, metric in sorted(manifest.public_telemetry.items())
+                if metric.direction == direction
+            ]
+            for direction in ("higher", "lower", "contextual")
+        }
         return {
             **_payload(
                 success=True,
@@ -608,13 +616,44 @@ def _approve(
                 action_required=True,
                 allowed_actions=("approve",),
                 next_command=command,
-                message=message,
+                message=f"Approval required for task {located.config.task_id}.",
             ),
             "approval": {
                 "task_sha256": preview.task_hash,
                 "evaluator_commit": preview.evaluator_commit,
                 "manifest_sha256": preview.manifest_hash,
                 "confirmation_token": preview.confirmation_token,
+            },
+            "approval_summary": {
+                "models": (
+                    f"{located.config.strategy_model} "
+                    f"{located.config.strategy_reasoning_effort} (Strategy + reflection); "
+                    f"{located.config.execution_model} "
+                    f"{located.config.execution_reasoning_effort} (Execution)"
+                ),
+                "editable_paths": list(located.config.editable_paths),
+                "trial_seeds": (
+                    "Hidden seeds test both champion and candidate; not reused "
+                    "within this task. Evaluator mapping: "
+                    + manifest.seed_to_case.rstrip(".")
+                    + "."
+                ),
+                "trial_count": trial_count,
+                "success_criterion": (
+                    "Hard rules pass; lower bound > 0 — "
+                    + manifest.positive_effect.rstrip(".")
+                    + "."
+                ),
+                "telemetry": telemetry,
+                "variance_risks": (
+                    manifest.known_variation.rstrip(".")
+                    + ". Mitigation: "
+                    + (
+                        ", ".join(manifest.variation_mitigations).rstrip(".")
+                        or "none declared"
+                    )
+                    + "."
+                ),
             },
         }
     confirm_approval(
