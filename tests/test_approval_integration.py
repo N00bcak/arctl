@@ -36,6 +36,7 @@ class ApprovalIntegrationTests(unittest.TestCase):
             git(repo, "config", "user.name", "arctl tests")
             git(repo, "config", "user.email", "tests@arctl.invalid")
         (self.subject / "model.py").write_text("score = 1\n")
+        (self.subject / "ENVIRONMENT.md").write_text("Public environment rules.\n")
         git(self.subject, "add", ".")
         git(self.subject, "commit", "-qm", "initial subject")
         (self.evaluator / "evaluator.manifest.json").write_text(
@@ -103,6 +104,7 @@ class ApprovalIntegrationTests(unittest.TestCase):
             "gpt-5.6-terra medium (Execution)",
         )
         self.assertEqual(summary["editable_paths"], ["src/**", "tests/**"])
+        self.assertEqual(summary["environment"], "public-environment, environment-probe")
         self.assertIn("Sweep [4, 16, 64, 256]", summary["trial_count"])
         self.assertIn("seed initializes the map generator", summary["trial_seeds"])
         self.assertEqual(summary["telemetry"], {
@@ -170,21 +172,11 @@ class ApprovalIntegrationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "hidden trial seeds"):
             preview_approval(self.task_file, TaskConfig.from_mapping(raw))
 
-    def test_legacy_task_cannot_be_approved_or_verified(self) -> None:
+    def test_legacy_task_contract_is_rejected(self) -> None:
         raw = valid_task()
-        raw["schema_version"] = 1
-        del raw["strategy"]
-        del raw["execution"]
-        raw["repo"] = str(self.subject)
-        raw["evaluator"] = {
-            "repo": str(self.evaluator),
-            "commit": self.evaluator_commit,
-        }
-        legacy = TaskConfig.from_mapping(raw)
-        with self.assertRaisesRegex(ValidationError, "create and approve a new task"):
-            preview_approval(self.task_file, legacy)
-        with self.assertRaisesRegex(StateError, "create and approve a new task"):
-            verify_approval(self.task_directory, legacy)
+        raw["schema_version"] = 2
+        with self.assertRaisesRegex(ValidationError, "must equal 3"):
+            TaskConfig.from_mapping(raw)
 
     def test_verification_detects_tampering(self) -> None:
         preview = preview_approval(self.task_file, self.task)
@@ -198,3 +190,82 @@ class ApprovalIntegrationTests(unittest.TestCase):
         self.task_file.write_text("tampered\n")
         with self.assertRaisesRegex(StateError, "changed"):
             verify_approval(self.task_directory, self.task)
+
+    def test_verification_detects_environment_source_drift(self) -> None:
+        preview = preview_approval(self.task_file, self.task)
+        confirm_approval(
+            self.task_directory,
+            self.task,
+            preview,
+            preview.confirmation_token,
+        )
+        (self.subject / "ENVIRONMENT.md").write_text("Changed environment rules.\n")
+        with self.assertRaisesRegex(StateError, "changed"):
+            verify_approval(self.task_directory, self.task)
+
+    def test_directory_source_hashes_only_declared_matches(self) -> None:
+        package = self.subject / "environment"
+        package.mkdir()
+        (package / "rules.py").write_text("RULE = 1\n")
+        (package / "cache.bin").write_bytes(b"generated")
+        raw = dict(self.raw_task)
+        raw["environment"] = {
+            "sources": [
+                {
+                    "id": "environment-code",
+                    "kind": "implementation",
+                    "description": "Environment implementation.",
+                    "path": "environment",
+                    "include": ["**/*.py"],
+                }
+            ]
+        }
+        task = TaskConfig.from_mapping(raw)
+        first = preview_approval(self.task_file, task).environment_hashes
+        (package / "cache.bin").write_bytes(b"changed generated data")
+        self.assertEqual(
+            preview_approval(self.task_file, task).environment_hashes,
+            first,
+        )
+        (package / "rules.py").write_text("RULE = 2\n")
+        self.assertNotEqual(
+            preview_approval(self.task_file, task).environment_hashes,
+            first,
+        )
+
+    def test_environment_source_rejects_editable_and_private_paths(self) -> None:
+        raw = dict(self.raw_task)
+        raw["editable_paths"] = ["ENVIRONMENT.md"]
+        with self.assertRaisesRegex(ValidationError, "overlaps editable"):
+            preview_approval(self.task_file, TaskConfig.from_mapping(raw))
+
+        raw = dict(self.raw_task)
+        raw["environment"] = {
+            "sources": [
+                {
+                    "id": "private",
+                    "kind": "implementation",
+                    "description": "Invalid private source.",
+                    "path": str(self.evaluator / "evaluator.manifest.json"),
+                }
+            ]
+        }
+        with self.assertRaisesRegex(ValidationError, "evaluator repo"):
+            preview_approval(self.task_file, TaskConfig.from_mapping(raw))
+
+    def test_environment_source_rejects_symlinks(self) -> None:
+        link = self.subject / "linked-environment.md"
+        link.symlink_to(self.subject / "ENVIRONMENT.md")
+        raw = dict(self.raw_task)
+        raw["environment"] = {
+            "sources": [
+                {
+                    "id": "linked",
+                    "kind": "documentation",
+                    "description": "Invalid linked source.",
+                    "path": "linked-environment.md",
+                }
+            ]
+        }
+        with self.assertRaisesRegex(ValidationError, "symlink"):
+            preview_approval(self.task_file, TaskConfig.from_mapping(raw))

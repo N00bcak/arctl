@@ -19,6 +19,20 @@ experiment receives a public-only Markdown dossier under the task’s
 `reports/experiments/` directory; `report` and `inspect` print its path.
 Use `--json` for AI orchestration.
 
+Task-v3 approvals content-lock the public environment implementation,
+interface, documentation, and policy-free probes. A strategy session can read
+only those sources and derives high-level successful-policy behaviors from
+cited environment observations. Fresh executors start from the latest accepted
+champion, turn one behavior into a policy mechanism, and review prior public
+telemetry and reflections before proposing another experiment.
+
+Tasks may also require a pre-trial candidate review contract. Approval-locked
+deterministic checks catch obvious violations, then a fresh read-only execution
+session reviews the candidate diff. One configured repair may run before a
+second review; repeated failure is a research miss and consumes no experiment
+or official trial seeds. This is cooperative methodology enforcement, not
+hostile-code isolation.
+
 Manifest-v3 evaluators describe publishable telemetry by meaning, arm scope,
 role, unit, and direction. After each valid verdict, a fresh read-only session
 uses those aggregates to assess the proposed mechanism and implementation and

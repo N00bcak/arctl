@@ -15,6 +15,8 @@ from jsonschema.exceptions import SchemaError
 
 from .approval import verify_approval
 from .calibration import CalibrationCommandBuilder, calibrate_trial_count
+from .candidate_review import AgentCommandBuilder as ReviewCommandBuilder
+from .candidate_review import review_candidate
 from .comparison import ComparisonReservation, load_reservation, reserve_comparison
 from .comparison_run import CommandBuilder, ComparisonFailure, run_comparison
 from .errors import ArctlError, ProcessError, ResearchMiss, StateError, StoppedError, ValidationError
@@ -40,7 +42,7 @@ from .git import (
     resolve_commit,
 )
 from .manifest import EvaluatorManifest
-from .models import Evidence
+from .models import Evidence, ResearchRequest
 from .process import run_or_load_once
 from .reflection import ReflectionCommandBuilder, run_reflection, validate_reflection
 from .registry import LocatedTask
@@ -55,6 +57,7 @@ from .search import (
     next_search_id,
     record_miss,
     research_schema,
+    validate_research_links,
 )
 from .taskio import load_manifest
 from .trials import load_trial_count, load_trial_count_record
@@ -157,22 +160,39 @@ def _compatibility_strategy_command(
     _worktree: Path,
     scratch: Path,
     _schema: Path,
-    _prompt: str,
+    prompt: str,
 ) -> Sequence[str]:
     """Supply a neutral strategy for legacy injected research backends."""
+    packet = json.loads(prompt.split("\n\n", 1)[1])
+    source_id = next(
+        source["id"]
+        for source in packet["environment_sources"]
+        if source["kind"] != "probe"
+    )
     value = {
-        "schema_version": 1,
-        "environment_signals": ["Inspect the public environment before changing policy."],
-        "success_profile": ["Improve the approved public objective without breaking checks."],
-        "uncertainties": ["The injected research backend owns environment analysis."],
-        "directions": [
+        "schema_version": 2,
+        "environment_observations": [
             {
-                "id": "public-baseline",
-                "title": "Public baseline",
-                "rationale": "Use public observations and prior outcomes to select a focused change.",
-                "mechanism": "Inspect the champion and choose one testable improvement.",
-                "observable_signal": "The approved public statistic improves.",
-                "risks": ["The public signal may be incomplete."],
+                "id": "environment-baseline",
+                "claim": "The injected backend owns environment analysis.",
+                "status": "inferred",
+                "evidence": [
+                    {
+                        "source_id": source_id,
+                        "location": "injected backend",
+                        "finding": "A public environment is available for inspection.",
+                    }
+                ],
+            }
+        ],
+        "environment_uncertainties": [],
+        "successful_policy_behaviors": [
+            {
+                "id": "environment-compatible",
+                "behavior": "Respond effectively to the public environment.",
+                "derived_from": ["environment-baseline"],
+                "rationale": "The policy must act through the declared environment.",
+                "tradeoffs": [],
             }
         ],
     }
@@ -250,13 +270,26 @@ def _research_prompt(task: LocatedTask, manifest: EvaluatorManifest) -> str:
         "completed_results": _public_history(task, manifest),
         "strategy": strategy,
         "exploration_ledger": str(task.directory / "exploration" / "ledger.public.jsonl"),
+        "candidate_review_contract": (
+            task.config.candidate_review.contract
+            if task.config.candidate_review is not None
+            else None
+        ),
     }
     return (
         "Make one focused improvement to the checked-out champion for this public "
-        "research task. Search the exploration ledger first and state whether this "
-        "opens a new direction or refines a named ledger entry. Stay within "
-        "editable_paths and do not commit. Run public "
-        "checks or the public probe when useful. Your final response must be only "
+        "research task. First select one successful-policy behavior from the strategy "
+        "and name its id as strategy_behavior_id. "
+        "Then propose a concrete policy mechanism, reason about its viability, and scan "
+        "the exploration ledger's prior results, telemetry, and reflections for evidence "
+        "that supports, contradicts, or leaves it unresolved. State whether the work is "
+        "new or refines a named ledger entry. Prefer a material mechanism over an "
+        "unsupported one-off constant tweak when the editable implementation permits "
+        "structural work; substantiate numeric-only changes with a deliberate public "
+        "sweep. Treat candidate_review_contract as a hard pre-trial constraint when it "
+        "is present. Stay within editable_paths and do not "
+        "commit. Run public checks or declared probes when useful. Your final response "
+        "must be only "
         "the required research-request JSON object.\n\n"
         + json.dumps(packet, sort_keys=True, separators=(",", ":"))
     )
@@ -364,10 +397,25 @@ def _candidate_search(
     champion: str,
     research_command_builder: ResearchCommandBuilder,
     strategy_command_builder: AgentCommandBuilder | None,
+    review_command_builder: ReviewCommandBuilder | None,
+    repair_command_builder: ReviewCommandBuilder | None,
+    check_command_builder: PublicCheckCommandBuilder | None,
     stop_path: Path,
     progress: ProgressCallback | None,
-) -> tuple[Path, str, dict[str, Any]] | None:
+) -> tuple[Path, str, dict[str, Any], Path] | None:
     """Return one novel controller-created candidate, or a bounded stall."""
+    recovered = _recover_candidate_review(
+        task,
+        manifest,
+        champion=champion,
+        review_command_builder=review_command_builder,
+        repair_command_builder=repair_command_builder,
+        check_command_builder=check_command_builder,
+        stop_path=stop_path,
+        progress=progress,
+    )
+    if recovered is not None:
+        return recovered
     search_id = next_search_id(task.directory)
     search = task.directory / "searches" / f"{search_id:06d}"
     strategy_worktree = task.directory / "worktrees" / f"search-{search_id:06d}-strategy"
@@ -418,21 +466,34 @@ def _candidate_search(
             if not isinstance(request, dict):
                 raise ResearchMiss("invalid_request", "research request is not an object")
             try:
-                from .models import ResearchRequest
-
                 ResearchRequest.from_mapping(
                     request,
                     allowed_telemetry=manifest.public_telemetry,
                 )
-                direction = request["direction"]
-                if direction["kind"] == "refinement":
-                    identifiers = {entry["entry_id"] for entry in load_ledger(task.directory)}
-                    if direction["prior_entry_id"] not in identifiers:
-                        raise ValidationError(
-                            "research refinement names an unknown ledger entry"
-                        )
+                strategy_files = sorted(
+                    (task.directory / "strategy").glob("*.public.json")
+                )
+                strategy = json.loads(strategy_files[-1].read_text(encoding="utf-8"))
+                validate_research_links(
+                    request,
+                    strategy=strategy,
+                    ledger=load_ledger(task.directory),
+                )
             except ValidationError as error:
                 raise ResearchMiss("invalid_request", str(error)) from error
+            review_candidate(
+                task,
+                manifest,
+                worktree=worktree,
+                attempt_directory=attempt_directory,
+                champion=champion,
+                request=request,
+                stop_path=stop_path,
+                review_command_builder=review_command_builder,
+                repair_command_builder=repair_command_builder,
+                check_command_builder=check_command_builder,
+                progress=progress,
+            )
             candidate, changed_paths = create_candidate_commit(
                 worktree,
                 champion=champion,
@@ -469,11 +530,117 @@ def _candidate_search(
                 "changed_paths": list(changed_paths),
             },
         )
-        return worktree, candidate, request
+        return worktree, candidate, request, attempt_directory
     write_json_once(
         search / "stalled.public.json",
         {"schema_version": 1, "search_id": search_id, "attempts": 6},
     )
+    return None
+
+
+def _recover_candidate_review(
+    task: LocatedTask,
+    manifest: EvaluatorManifest,
+    *,
+    champion: str,
+    review_command_builder: ReviewCommandBuilder | None,
+    repair_command_builder: ReviewCommandBuilder | None,
+    check_command_builder: PublicCheckCommandBuilder | None,
+    stop_path: Path,
+    progress: ProgressCallback | None,
+) -> tuple[Path, str, dict[str, Any], Path] | None:
+    """Resume a candidate whose review stopped for operational reasons."""
+    if task.config.candidate_review is None:
+        return None
+    searches = sorted((task.directory / "searches").glob("[0-9]" * 6), reverse=True)
+    for search in searches:
+        if (search / "stalled.public.json").is_file():
+            continue
+        search_id = int(search.name)
+        attempts = sorted((search / "attempts").glob("[0-9][0-9]"), reverse=True)
+        for attempt_directory in attempts:
+            if not (attempt_directory / "candidate-review").is_dir():
+                continue
+            attempt = int(attempt_directory.name)
+            worktree = (
+                task.directory
+                / "worktrees"
+                / f"search-{search_id:06d}-attempt-{attempt:02d}"
+            )
+            if not worktree.is_dir():
+                continue
+            try:
+                request = json.loads(
+                    (attempt_directory / "request.public.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+            except (OSError, json.JSONDecodeError) as error:
+                raise StateError("recoverable candidate review has invalid request") from error
+            if not isinstance(request, dict):
+                raise StateError("recoverable candidate review has invalid request")
+            ResearchRequest.from_mapping(
+                request,
+                allowed_telemetry=manifest.public_telemetry,
+            )
+            strategy_files = sorted(
+                (task.directory / "strategy").glob("*.public.json")
+            )
+            if not strategy_files:
+                raise StateError("recoverable candidate review has no strategy")
+            strategy = json.loads(strategy_files[-1].read_text(encoding="utf-8"))
+            validate_research_links(
+                request,
+                strategy=strategy,
+                ledger=load_ledger(task.directory),
+            )
+            _notify(
+                progress,
+                "search_attempt",
+                search_id=search_id,
+                attempt=attempt,
+                attempts=6,
+            )
+            review_candidate(
+                task,
+                manifest,
+                worktree=worktree,
+                attempt_directory=attempt_directory,
+                champion=champion,
+                request=request,
+                stop_path=stop_path,
+                review_command_builder=review_command_builder,
+                repair_command_builder=repair_command_builder,
+                check_command_builder=check_command_builder,
+                progress=progress,
+            )
+            candidate_path = attempt_directory / "candidate.public.json"
+            if candidate_path.is_file():
+                saved = json.loads(candidate_path.read_text(encoding="utf-8"))
+                if not isinstance(saved, dict) or not isinstance(
+                    saved.get("candidate"), str
+                ):
+                    raise StateError("recoverable candidate record is invalid")
+                return worktree, saved["candidate"], request, attempt_directory
+            candidate, changed_paths = create_candidate_commit(
+                worktree,
+                champion=champion,
+                editable_paths=task.config.editable_paths,
+                denied_paths=task.config.denied_paths,
+                prior_candidate_ref_prefix=(
+                    f"refs/arctl/{task.config.task_id}/candidates/"
+                ),
+                message=f"arctl search {search_id} attempt {attempt}",
+            )
+            write_json_once(
+                candidate_path,
+                {
+                    "schema_version": 1,
+                    "candidate": candidate,
+                    "changed_paths": list(changed_paths),
+                },
+            )
+            return worktree, candidate, request, attempt_directory
     return None
 
 
@@ -501,8 +668,11 @@ def _record_official_result(
             "champion": result["champion_before"],
             "candidate": result["candidate"],
             "claim": result["hypothesis"],
+            "strategy_behavior_id": request.get("strategy_behavior_id"),
             "mechanism": request.get("mechanism"),
-            "direction": request.get("direction"),
+            "viability": request.get("viability"),
+            "evidence_review": request.get("evidence_review"),
+            "lineage": request.get("lineage"),
             "decision": result["decision"],
             "changed_paths": list(
                 candidate_changed_paths(
@@ -805,6 +975,8 @@ def run_task(
     max_experiments: int | None = None,
     research_command_builder: ResearchCommandBuilder = _default_research_command,
     strategy_command_builder: AgentCommandBuilder | None | object = _DEFAULT_STRATEGY,
+    review_command_builder: ReviewCommandBuilder | None = None,
+    repair_command_builder: ReviewCommandBuilder | None = None,
     public_check_command_builder: PublicCheckCommandBuilder | None = None,
     comparison_command_builder: CommandBuilder | None = None,
     calibration_command_builder: CalibrationCommandBuilder | None = None,
@@ -852,10 +1024,14 @@ def run_task(
             task.directory / "worktrees" / "calibration-champion"
         )
         if manifest.calibration.controller_pilot:
-            champion = resolve_commit(
-                task.config.repo,
-                f"refs/arctl/{task.config.task_id}/champion",
-            )
+            champion = approval["approved_champion"]
+            if (
+                calibration_champion.exists()
+                and resolve_commit(calibration_champion, "HEAD")
+                != resolve_commit(task.config.repo, champion)
+            ):
+                ensure_clean_worktree(calibration_champion)
+                remove_worktree(task.config.repo, calibration_champion)
             _checkout(task.config.repo, calibration_champion, champion)
             calibration_arguments["champion_directory"] = calibration_champion
         trial_count = calibrate_trial_count(
@@ -864,6 +1040,7 @@ def run_task(
             manifest,
             manifest_hash=manifest_hash,
             evaluator_commit=approval["evaluator_commit"],
+            approved_champion=approval["approved_champion"],
             evaluator_directory=evaluator_worktree,
             stop_path=task.directory / "stop.requested",
             progress=progress,
@@ -1006,6 +1183,9 @@ def run_task(
                     champion=champion,
                     research_command_builder=research_command_builder,
                     strategy_command_builder=strategy_command_builder,  # type: ignore[arg-type]
+                    review_command_builder=review_command_builder,
+                    repair_command_builder=repair_command_builder,
+                    check_command_builder=public_check_command_builder,
                     stop_path=stop,
                     progress=progress,
                 )
@@ -1016,10 +1196,13 @@ def run_task(
             if found is None:
                 stalled = True
                 break
-            research_worktree, candidate, raw_request = found
+            research_worktree, candidate, raw_request, search_attempt = found
             experiment, record = start_experiment(task.directory, champion)
             write_json_once(experiment / "request.public.json", raw_request)
             atomic_write_text(experiment / "candidate.commit", candidate + "\n")
+            review_directory = search_attempt / "candidate-review"
+            if review_directory.is_dir():
+                shutil.copytree(review_directory, experiment / "candidate-review")
             presearched = True
         else:
             record = load_experiment(experiment)

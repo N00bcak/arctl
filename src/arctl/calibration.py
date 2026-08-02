@@ -255,6 +255,7 @@ def _calibrate_controller_pilot(
     *,
     manifest_hash: str,
     evaluator_commit: str,
+    approved_champion: str,
     evaluator_directory: Path,
     champion_directory: Path,
     stop_path: Path,
@@ -269,10 +270,7 @@ def _calibrate_controller_pilot(
         or calibration.policy is None
     ):
         raise StateError("approved evaluator has no controller-run pilot")
-    champion = resolve_commit(
-        task.repo,
-        f"refs/arctl/{task.task_id}/champion",
-    )
+    champion = resolve_commit(task.repo, approved_champion)
     if resolve_commit(champion_directory, "HEAD") != champion:
         raise StateError("calibration champion differs from the approved champion")
     ensure_clean_worktree(champion_directory)
@@ -559,6 +557,7 @@ def calibrate_trial_count(
     *,
     manifest_hash: str,
     evaluator_commit: str,
+    approved_champion: str,
     evaluator_directory: Path,
     champion_directory: Path | None = None,
     stop_path: Path,
@@ -588,16 +587,14 @@ def calibrate_trial_count(
             manifest,
             manifest_hash=manifest_hash,
             evaluator_commit=evaluator_commit,
+            approved_champion=approved_champion,
             evaluator_directory=evaluator_directory,
             champion_directory=champion_directory,
             stop_path=stop_path,
             command_builder=command_builder,
             progress=progress,
         )
-    champion = resolve_commit(
-        task.repo,
-        f"refs/arctl/{task.task_id}/champion",
-    )
+    champion = resolve_commit(task.repo, approved_champion)
 
     root = task_directory / "calibration"
     output = root / "output"

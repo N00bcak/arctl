@@ -18,6 +18,11 @@ def assessment(metrics: list[str]) -> dict:
     return {
         "schema_version": 1,
         "summary": "The aggregate result is uncertain and the mechanism remains unproven.",
+        "strategy_behavior": {
+            "id": "avoid-errors",
+            "realization": "unclear",
+            "evidence": ["Aggregate telemetry does not identify behavior activation."],
+        },
         "metric_assessments": [
             {
                 "metric": name,
@@ -36,6 +41,13 @@ def assessment(metrics: list[str]) -> dict:
             "evidence": [],
             "concerns": ["Behavioral divergence is not measured."],
         },
+        "policy_observations": [
+            {
+                "finding": "The safe-action branch may not activate consistently.",
+                "evidence": "Behavioral divergence is not measured.",
+                "implication": "A later executor should add an activation diagnostic.",
+            }
+        ],
         "next_action": {
             "kind": "revisit_after_better_evidence",
             "rationale": "The positive estimate is not precise enough to promote.",
@@ -60,8 +72,12 @@ class ReflectionTests(unittest.TestCase):
             valid_manifest(telemetry=True)
         )
         self.request = {
+            "strategy_behavior_id": "avoid-errors",
             "claim": "Reduce errors.",
             "mechanism": "Prefer safe actions.",
+            "viability": "The policy can distinguish safe actions.",
+            "evidence_review": {"summary": "No prior evidence.", "citations": []},
+            "lineage": {"kind": "new", "prior_entry_id": None},
             "expected_effect": "Increase the primary score.",
             "expected_telemetry": {"errors": "decrease"},
             "falsifiers": ["Errors do not decrease."],
@@ -151,6 +167,12 @@ class ReflectionTests(unittest.TestCase):
         self.assertTrue(
             (self.experiment / "reflection" / "attempts" / "0002").is_dir()
         )
+
+    def test_reflection_must_assess_the_selected_strategy_behavior(self) -> None:
+        value = assessment(["errors"])
+        value["strategy_behavior"]["id"] = "different-behavior"
+        with self.assertRaisesRegex(StateError, "post-trial reflection failed"):
+            self.reflect(command_builder=self.builder(value))
 
     def test_empty_telemetry_contract_skips_model_with_warning(self) -> None:
         manifest = EvaluatorManifest.from_mapping(valid_manifest())

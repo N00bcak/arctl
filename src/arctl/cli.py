@@ -19,7 +19,7 @@ from .storage import TaskLock, atomic_write_text
 
 _TASK_TEMPLATE = """\
 # arctl task: edit the objective, paths, evaluator, and public commands, then approve.
-schema_version: 2
+schema_version: 3
 task_id: {task_id}
 repo: {repo}
 objective: Describe the improvement you want.
@@ -27,6 +27,12 @@ editable_paths: [src/**, tests/**]
 denied_paths: [.git/**, pyproject.toml, uv.lock]
 public_checks: [[python, -m, pytest, -q]]
 public_probe: [python, tools/dev_benchmark.py]
+environment:
+  sources:
+    - id: environment-docs
+      kind: documentation
+      description: Public rules and environment behavior.
+      path: ENVIRONMENT.md
 evaluator:
   repo: /absolute/path/to/private/evaluator
   commit: REPLACE_WITH_COMMIT
@@ -128,8 +134,9 @@ def _approval_table(payload: dict[str, Any]) -> str:
                 f"{safe_terminal_text(metric['description'])}"
                 for metric in metrics
             )
-    rows = (
+    rows = [
         ("Models", safe_terminal_text(summary["models"])),
+        ("Environment", safe_terminal_text(summary["environment"])),
         (
             "Editable paths",
             "\n".join(
@@ -143,7 +150,9 @@ def _approval_table(payload: dict[str, Any]) -> str:
         ("Variance risks", safe_terminal_text(summary["variance_risks"])),
         ("Approval token", safe_terminal_text(payload["approval"]["confirmation_token"])),
         ("Approval command", safe_terminal_text(payload["next_command"])),
-    )
+    ]
+    if summary.get("candidate_review"):
+        rows.insert(3, ("Policy guard", safe_terminal_text(summary["candidate_review"])))
     return tabulate(
         rows,
         headers=("Approval item", "Value"),
@@ -393,6 +402,16 @@ class _ProgressView:
                 )
             elif kind == "research":
                 self._start("RESEARCHING")
+            elif kind == "candidate_review":
+                self._finish()
+                self._start(
+                    f"policy review · round {event['round']}/{event['rounds']}"
+                )
+            elif kind == "candidate_repair":
+                self._finish("failed")
+                self._start(
+                    f"policy repair · attempt {event['attempt']}/{event['attempts']}"
+                )
             elif kind == "candidate":
                 self._finish()
                 self._line("  ✓ CANDIDATE_FROZEN")
@@ -622,6 +641,7 @@ def _approve(
                 "task_sha256": preview.task_hash,
                 "evaluator_commit": preview.evaluator_commit,
                 "manifest_sha256": preview.manifest_hash,
+                "environment_sha256": dict(preview.environment_hashes),
                 "confirmation_token": preview.confirmation_token,
             },
             "approval_summary": {
@@ -629,9 +649,19 @@ def _approve(
                     f"{located.config.strategy_model} "
                     f"{located.config.strategy_reasoning_effort} (Strategy + reflection); "
                     f"{located.config.execution_model} "
-                    f"{located.config.execution_reasoning_effort} (Execution)"
+                    f"{located.config.execution_reasoning_effort} (Execution"
+                    + (" + review)" if located.config.candidate_review else ")")
                 ),
                 "editable_paths": list(located.config.editable_paths),
+                "environment": ", ".join(
+                    source.identifier for source in located.config.environment_sources
+                ),
+                "candidate_review": (
+                    f"Reviewer + {len(located.config.candidate_review.checks)} "
+                    f"tripwire(s); {located.config.candidate_review.repair_attempts} repair."
+                    if located.config.candidate_review is not None
+                    else None
+                ),
                 "trial_seeds": (
                     "Hidden seeds test both champion and candidate; not reused "
                     "within this task. Evaluator mapping: "

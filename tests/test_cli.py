@@ -55,7 +55,8 @@ class CliTests(unittest.TestCase):
             task = root / "data" / "tasks" / "subject" / "task.yaml"
             task_text = task.read_text()
             self.assertIn(f'repo: "{repo}"', task_text)
-            self.assertIn("schema_version: 2", task_text)
+            self.assertIn("schema_version: 3", task_text)
+            self.assertIn("kind: documentation", task_text)
             self.assertIn("model: gpt-5.6-sol", task_text)
             self.assertIn("model: gpt-5.6-terra", task_text)
 
@@ -126,6 +127,7 @@ class CliTests(unittest.TestCase):
                     "gpt-5.6-terra medium (Execution)"
                 ),
                 "editable_paths": ["src/**", "tests/**"],
+                "environment": "environment-core, public-probe",
                 "trial_seeds": (
                     "Hidden seeds test both champion and candidate; not reused "
                     "within this task. Evaluator mapping: seed initializes cases."
@@ -158,6 +160,7 @@ class CliTests(unittest.TestCase):
         rendered = output.getvalue()
         labels = [
             "Models",
+            "Environment",
             "Editable paths",
             "Trial seeds",
             "Trial count",

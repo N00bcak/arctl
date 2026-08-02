@@ -52,12 +52,19 @@ class DossierTests(unittest.TestCase):
             (experiment / "request.public.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
+                        "schema_version": 2,
+                        "strategy_behavior_id": "improve-score",
                         "claim": "<img src=https://invalid.example> improve score",
                         "mechanism": "Increase score.",
+                        "viability": "The score path is adjustable.",
+                        "evidence_review": {
+                            "summary": "No prior evidence.",
+                            "citations": [],
+                        },
                         "expected_effect": "Higher score.",
                         "expected_telemetry": {"public_metric": "increase"},
                         "falsifiers": ["Effect is not positive."],
+                        "lineage": {"kind": "new", "prior_entry_id": None},
                     }
                 )
             )

@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -12,7 +13,7 @@ from arctl.approval import confirm_approval, preview_approval
 from arctl.errors import StateError
 from arctl.experiment import start_experiment
 from arctl.git import create_candidate_commit, create_candidate_ref, resolve_commit
-from arctl.models import TaskConfig
+from arctl.models import CandidateReviewConfig, TaskConfig
 from arctl.operations import inspect_experiment, task_report, task_status
 from arctl.registry import LocatedTask
 from arctl.runner import (
@@ -50,6 +51,7 @@ class RunnerIntegrationTests(unittest.TestCase):
             git(repository, "config", "user.name", "arctl tests")
             git(repository, "config", "user.email", "tests@arctl.invalid")
         (self.subject / "subject.py").write_text(_SUBJECT.replace("BIAS", "0"))
+        (self.subject / "ENVIRONMENT.md").write_text("Public environment rules.\n")
         git(self.subject, "add", ".")
         git(self.subject, "commit", "-qm", "champion")
         self.original_champion = resolve_commit(self.subject, "HEAD")
@@ -79,7 +81,6 @@ class RunnerIntegrationTests(unittest.TestCase):
                         "import ast; ast.parse(open('subject.py').read())",
                     ]
                 ],
-                "public_probe": ["python3", "-c", "print('public')"],
                 "evaluator": {
                     "repo": str(self.evaluator),
                     "commit": evaluator_commit,
@@ -120,21 +121,42 @@ worktree, scratch = map(Path, sys.argv[1:])
 subject = worktree / "subject.py"
 subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
 (scratch / "request.public.json").write_text(json.dumps({
-    "schema_version": 1,
+    "schema_version": 2,
+    "strategy_behavior_id": "environment-compatible",
     "claim": "Add one point to each valid result.",
     "mechanism": "Increase the subject score by one.",
+    "viability": "The score expression is directly adjustable.",
+    "evidence_review": {
+        "summary": "No prior experiment bears on the first candidate.",
+        "citations": [],
+    },
     "expected_effect": "The paired score difference is positive.",
     "expected_telemetry": {},
     "falsifiers": ["The paired effect is not positive."],
-    "direction": {
+    "lineage": {
         "kind": "new",
         "prior_entry_id": None,
-        "strategy_direction_id": "public-baseline",
-        "rationale": "This focused score change has not been attempted.",
     },
 }))
 """
         return ("python3", "-c", script, str(worktree), str(scratch))
+
+    @staticmethod
+    def passing_review_command(
+        _worktree: Path, scratch: Path, _schema: Path, _prompt: str
+    ):
+        script = """\
+import json, sys
+from pathlib import Path
+scratch = Path(sys.argv[1])
+(scratch / 'review.public.json').write_text(json.dumps({
+    'schema_version': 1,
+    'verdict': 'pass',
+    'summary': 'The candidate uses only the declared interface.',
+    'findings': [],
+}))
+"""
+        return ("python3", "-c", script, str(scratch))
 
     def test_runs_fresh_research_through_promotion_and_publication(self) -> None:
         prompts: list[str] = []
@@ -173,6 +195,8 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
         self.assertEqual(len(prompts), 1)
         self.assertNotIn(str(self.evaluator), prompts[0])
         self.assertNotIn("master_seed", prompts[0])
+        self.assertIn("strategy_behavior_id", prompts[0])
+        self.assertIn("prior results, telemetry, and reflections", prompts[0])
         self.assertFalse(
             (self.task_directory / "worktrees" / "000001-research").exists()
         )
@@ -196,6 +220,7 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
                 "complete",
             ],
         )
+
         self.assertEqual(
             [
                 (event["stage"], event["status"])
@@ -243,6 +268,145 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
             comparison_command_builder=self.unconfined_comparison,
         )
         self.assertEqual(exhausted.results, ())
+
+    def test_reviewed_candidate_passes_before_experiment_and_is_reported(self) -> None:
+        config = replace(
+            self.config,
+            candidate_review=CandidateReviewConfig(
+                contract="Use only supplied observations.",
+                checks=(("python3", "-c", "raise SystemExit(0)"),),
+                repair_attempts=1,
+            ),
+        )
+        task = LocatedTask(self.task_directory, config)
+        review_prompts: list[str] = []
+        events: list[dict] = []
+
+        def review(_worktree: Path, scratch: Path, _schema: Path, prompt: str):
+            review_prompts.append(prompt)
+            script = """\
+import json, sys
+from pathlib import Path
+scratch = Path(sys.argv[1])
+(scratch / 'review.public.json').write_text(json.dumps({
+    'schema_version': 1,
+    'verdict': 'pass',
+    'summary': 'The candidate uses only the declared interface.',
+    'findings': [],
+}))
+"""
+            return ("python3", "-c", script, str(scratch))
+
+        outcome = run_task(
+            task,
+            max_experiments=1,
+            research_command_builder=self.research_command,
+            review_command_builder=review,
+            public_check_command_builder=self.unconfined_public,
+            comparison_command_builder=self.unconfined_comparison,
+            progress=events.append,
+        )
+
+        self.assertEqual(len(outcome.results), 1)
+        self.assertEqual(len(review_prompts), 1)
+        self.assertNotIn(str(self.evaluator), review_prompts[0])
+        experiment = self.task_directory / "experiments" / "000001"
+        self.assertTrue(
+            (
+                experiment
+                / "candidate-review"
+                / "round-01"
+                / "decision.public.json"
+            ).is_file()
+        )
+        dossier = Path(task_report(task)["results"][0]["dossier_path"])
+        self.assertTrue((dossier.parent / "candidate-review.md").is_file())
+        kinds = [event["event"] for event in events]
+        self.assertLess(kinds.index("candidate_review"), kinds.index("experiment"))
+
+    def test_reviewer_infrastructure_failure_resumes_same_candidate(self) -> None:
+        config = replace(
+            self.config,
+            candidate_review=CandidateReviewConfig(
+                contract="Use only supplied observations.",
+                checks=(("python3", "-c", "raise SystemExit(0)"),),
+                repair_attempts=1,
+            ),
+        )
+        task = LocatedTask(self.task_directory, config)
+
+        def failed_review(_worktree: Path, _scratch: Path, _schema: Path, _prompt: str):
+            return ("python3", "-c", "raise SystemExit(1)")
+
+        with self.assertRaisesRegex(StateError, "review session exited"):
+            run_task(
+                task,
+                max_experiments=1,
+                research_command_builder=self.research_command,
+                review_command_builder=failed_review,
+                public_check_command_builder=self.unconfined_public,
+                comparison_command_builder=self.unconfined_comparison,
+            )
+        self.assertFalse((self.task_directory / "experiments").exists())
+
+        outcome = run_task(
+            task,
+            max_experiments=1,
+            research_command_builder=lambda *_: self.fail(
+                "research reran instead of resuming candidate review"
+            ),
+            review_command_builder=self.passing_review_command,
+            public_check_command_builder=self.unconfined_public,
+            comparison_command_builder=self.unconfined_comparison,
+        )
+
+        self.assertEqual(len(outcome.results), 1)
+        attempts = (
+            self.task_directory
+            / "searches"
+            / "000001"
+            / "attempts"
+            / "01"
+            / "candidate-review"
+            / "round-01"
+            / "semantic"
+            / "attempts"
+        )
+        self.assertEqual([path.name for path in sorted(attempts.iterdir())], ["0001", "0002"])
+
+    def test_later_executor_starts_from_latest_accepted_champion(self) -> None:
+        seen: list[str] = []
+
+        def research(worktree: Path, scratch: Path, schema: Path, prompt: str):
+            current = (worktree / "subject.py").read_text()
+            seen.append(current)
+            command = list(self.research_command(worktree, scratch, schema, prompt))
+            if "+ 1" in current:
+                command[2] = command[2].replace(
+                    'replace("+ 0", "+ 1")',
+                    'replace("+ 1", "+ 2")',
+                )
+            return tuple(command)
+
+        task = LocatedTask(
+            self.task_directory,
+            replace(self.config, max_experiments=2),
+        )
+        outcome = run_task(
+            task,
+            max_experiments=2,
+            research_command_builder=research,
+            public_check_command_builder=self.unconfined_public,
+            comparison_command_builder=self.unconfined_comparison,
+        )
+
+        self.assertEqual(
+            [result["decision"] for result in outcome.results],
+            ["ACCEPT", "ACCEPT"],
+        )
+        self.assertIn("+ 0", seen[0])
+        self.assertIn("+ 1", seen[1])
+        self.assertNotIn("+ 0", seen[1])
 
     def test_reflection_failure_blocks_search_and_next_run_recovers_it(self) -> None:
         def fail_reflection(**arguments):
@@ -320,6 +484,12 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
         self.assertTrue(outcome.stalled)
         self.assertEqual(outcome.results, ())
         self.assertEqual(len(strategy_calls), 2)
+        for prompt in strategy_calls:
+            self.assertIn("environment_sources", prompt)
+            self.assertIn("evaluation_boundary", prompt)
+            self.assertNotIn("exploration_ledger", prompt)
+            self.assertNotIn('"statistic"', prompt)
+            self.assertNotIn('"telemetry"', prompt)
         self.assertFalse((self.task_directory / "experiments").exists())
         misses = search_ledger(
             self.task_directory,
@@ -367,12 +537,19 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
             (scratch / "request.public.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
+                        "schema_version": 2,
+                        "strategy_behavior_id": "environment-compatible",
                         "claim": "Use the approved public runtime.",
                         "mechanism": "Run public development tools.",
+                        "viability": "The approved runtime is readable.",
+                        "evidence_review": {
+                            "summary": "No relevant prior evidence.",
+                            "citations": [],
+                        },
                         "expected_effect": "Improve the score.",
                         "expected_telemetry": {},
                         "falsifiers": ["The effect is not positive."],
+                        "lineage": {"kind": "new", "prior_entry_id": None},
                     }
                 )
             )
@@ -484,7 +661,6 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
                         "import ast; ast.parse(open('subject.py').read())",
                     ]
                 ],
-                "public_probe": ["python3", "-c", "print('public')"],
                 "evaluator": {
                     "repo": str(self.evaluator),
                     "commit": resolve_commit(self.evaluator, "HEAD"),
@@ -534,6 +710,33 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
             )
         )
 
+        promoted = resolve_commit(self.subject, "refs/arctl/auto/champion")
+        stale_calibration_worktree = (
+            auto_directory / "worktrees" / "calibration-champion"
+        )
+        git(
+            self.subject,
+            "worktree",
+            "add",
+            "--force",
+            "--detach",
+            str(stale_calibration_worktree),
+            promoted,
+        )
+        resumed = run_task(
+            task,
+            max_experiments=1,
+            research_command_builder=lambda *_: (_ for _ in ()).throw(
+                AssertionError("completed task started another research session")
+            ),
+            public_check_command_builder=self.unconfined_public,
+            comparison_command_builder=self.unconfined_comparison,
+            calibration_command_builder=lambda *_: (_ for _ in ()).throw(
+                AssertionError("completed calibration was rerun after promotion")
+            ),
+        )
+        self.assertEqual(resumed.results, ())
+
     def test_primary_trigger_runs_exactly_one_fresh_suspect_comparison(self) -> None:
         evaluator_source = _EVALUATOR.replace(
             '"suspect_test": {"required": False, "reason": None},',
@@ -565,7 +768,6 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
                         "import ast; ast.parse(open('subject.py').read())",
                     ]
                 ],
-                "public_probe": ["python3", "-c", "print('public')"],
                 "evaluator": {
                     "repo": str(self.evaluator),
                     "commit": resolve_commit(self.evaluator, "HEAD"),

@@ -46,7 +46,7 @@ class SandboxCommandTests(unittest.TestCase):
 
         self.assertEqual(
             schema["properties"]["schema_version"],
-            {"type": "integer", "const": 1},
+            {"type": "integer", "const": 2},
         )
         telemetry = schema["properties"]["expected_telemetry"]
         self.assertIs(telemetry["additionalProperties"], False)
@@ -179,10 +179,15 @@ class SandboxCommandTests(unittest.TestCase):
                     output_name="strategy.public.json",
                     model="gpt-5.6-sol",
                     reasoning_effort="high",
+                    writable_worktree=False,
+                    read_worktree=False,
                 )
             self.assertIn("gpt-5.6-sol", command)
             self.assertIn('model_reasoning_effort="high"', command)
             self.assertIn(str((scratch / "strategy.public.json").resolve()), command)
+            joined = "\n".join(command)
+            self.assertNotIn(f'"{worktree.resolve()}"="read"', joined)
+            self.assertNotIn(f'"{worktree.resolve()}"="write"', joined)
 
     def test_environment_does_not_inherit_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

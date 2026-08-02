@@ -22,13 +22,23 @@ _TASK_FIELDS = {
     "denied_paths",
     "public_checks",
     "public_probe",
+    "environment",
     "evaluator",
     "trials",
     "max_experiments",
 }
-_OPTIONAL_TASK_FIELDS = {"strategy", "execution"}
 _STRATEGY_FIELDS = {"model", "reasoning_effort"}
 _EXECUTION_FIELDS = {"model", "reasoning_effort"}
+_CANDIDATE_REVIEW_FIELDS = {"contract", "checks", "repair_attempts"}
+_ENVIRONMENT_FIELDS = {"sources"}
+_ENVIRONMENT_FILE_FIELDS = {"id", "kind", "description", "path"}
+_ENVIRONMENT_PROBE_FIELDS = {
+    "id",
+    "kind",
+    "description",
+    "command",
+    "backed_by",
+}
 _EVALUATOR_FIELDS = {"repo", "commit"}
 _EVIDENCE_FIELDS = {
     "schema_version",
@@ -44,18 +54,22 @@ _SUSPECT_FIELDS = {"required", "reason"}
 _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _RESEARCH_FIELDS = {
     "schema_version",
+    "strategy_behavior_id",
     "claim",
     "mechanism",
+    "viability",
+    "evidence_review",
     "expected_effect",
     "expected_telemetry",
     "falsifiers",
+    "lineage",
 }
-_RESEARCH_DIRECTION_FIELDS = {
+_RESEARCH_LINEAGE_FIELDS = {
     "kind",
     "prior_entry_id",
-    "strategy_direction_id",
-    "rationale",
 }
+_EVIDENCE_REVIEW_FIELDS = {"summary", "citations"}
+_EVIDENCE_CITATION_FIELDS = {"entry_id", "bearing", "finding"}
 
 
 def _require_exact_fields(value: Mapping[str, Any], expected: set[str], label: str) -> None:
@@ -110,6 +124,101 @@ class EvaluatorRef:
 
 
 @dataclass(frozen=True)
+class EnvironmentSource:
+    identifier: str
+    kind: Literal["implementation", "interface", "documentation", "probe"]
+    description: str
+    path: Path | None = None
+    include: tuple[str, ...] = ()
+    command: tuple[str, ...] = ()
+    backed_by: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CandidateReviewConfig:
+    contract: str
+    checks: tuple[tuple[str, ...], ...]
+    repair_attempts: Literal[0, 1]
+
+
+def _candidate_review(value: Any) -> CandidateReviewConfig:
+    if not isinstance(value, Mapping):
+        raise ValidationError("candidate_review must be an object")
+    _require_exact_fields(value, _CANDIDATE_REVIEW_FIELDS, "candidate_review")
+    attempts = value["repair_attempts"]
+    if isinstance(attempts, bool) or attempts not in (0, 1):
+        raise ValidationError("candidate_review.repair_attempts must equal 0 or 1")
+    return CandidateReviewConfig(
+        contract=_string(value["contract"], "candidate_review.contract"),
+        checks=_commands(value["checks"], "candidate_review.checks"),
+        repair_attempts=attempts,
+    )
+
+
+def _environment_sources(value: Any, *, repo: Path) -> tuple[EnvironmentSource, ...]:
+    if not isinstance(value, Mapping):
+        raise ValidationError("environment must be an object")
+    _require_exact_fields(value, _ENVIRONMENT_FIELDS, "environment")
+    raw_sources = value["sources"]
+    if not isinstance(raw_sources, list) or not raw_sources:
+        raise ValidationError("environment.sources must be a non-empty list")
+    sources: list[EnvironmentSource] = []
+    identifiers: set[str] = set()
+    for index, raw in enumerate(raw_sources):
+        label = f"environment.sources[{index}]"
+        if not isinstance(raw, Mapping):
+            raise ValidationError(f"{label} must be an object")
+        kind = raw.get("kind")
+        if kind == "probe":
+            _require_exact_fields(raw, _ENVIRONMENT_PROBE_FIELDS, label)
+            source = EnvironmentSource(
+                identifier=_string(raw["id"], f"{label}.id"),
+                kind="probe",
+                description=_string(raw["description"], f"{label}.description"),
+                command=_command(raw["command"], f"{label}.command"),
+                backed_by=_string_list(raw["backed_by"], f"{label}.backed_by"),
+            )
+            if not source.backed_by:
+                raise ValidationError(f"{label}.backed_by must not be empty")
+        elif kind in {"implementation", "interface", "documentation"}:
+            allowed = _ENVIRONMENT_FILE_FIELDS | ({"include"} if "include" in raw else set())
+            _require_exact_fields(raw, allowed, label)
+            declared = Path(_string(raw["path"], f"{label}.path"))
+            include = (
+                _string_list(raw["include"], f"{label}.include")
+                if "include" in raw
+                else ()
+            )
+            if "include" in raw and not include:
+                raise ValidationError(f"{label}.include must not be empty")
+            if any(
+                Path(pattern).is_absolute() or ".." in Path(pattern).parts
+                for pattern in include
+            ):
+                raise ValidationError(f"{label}.include must stay within its source path")
+            source = EnvironmentSource(
+                identifier=_string(raw["id"], f"{label}.id"),
+                kind=kind,
+                description=_string(raw["description"], f"{label}.description"),
+                path=declared if declared.is_absolute() else repo / declared,
+                include=include,
+            )
+        else:
+            raise ValidationError(f"{label}.kind is invalid")
+        if source.identifier in identifiers:
+            raise ValidationError(f"duplicate environment source id: {source.identifier}")
+        identifiers.add(source.identifier)
+        sources.append(source)
+    file_ids = {source.identifier for source in sources if source.kind != "probe"}
+    for source in sources:
+        if source.kind == "probe" and not set(source.backed_by) <= file_ids:
+            raise ValidationError(
+                f"environment probe {source.identifier} names unknown backing sources"
+            )
+    return tuple(sources)
+
+
+@dataclass(frozen=True)
 class TaskConfig:
     task_id: str
     repo: Path
@@ -118,6 +227,7 @@ class TaskConfig:
     denied_paths: tuple[str, ...]
     public_checks: tuple[tuple[str, ...], ...]
     public_probe: tuple[str, ...]
+    environment_sources: tuple[EnvironmentSource, ...]
     evaluator: EvaluatorRef
     trials: Literal["auto"] | int
     max_experiments: int
@@ -125,23 +235,27 @@ class TaskConfig:
     strategy_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] = "high"
     execution_model: str = "gpt-5.6-terra"
     execution_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] = "medium"
-    schema_version: int = 2
+    candidate_review: CandidateReviewConfig | None = None
+    schema_version: int = 3
+
+    @property
+    def environment_probes(self) -> tuple[tuple[str, ...], ...]:
+        return tuple(
+            source.command for source in self.environment_sources if source.kind == "probe"
+        )
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> TaskConfig:
         actual = set(value)
-        if not _TASK_FIELDS <= actual or not actual <= _TASK_FIELDS | _OPTIONAL_TASK_FIELDS:
-            missing = sorted(_TASK_FIELDS - actual)
-            extra = sorted(actual - _TASK_FIELDS - _OPTIONAL_TASK_FIELDS)
+        required = _TASK_FIELDS | {"strategy", "execution"}
+        allowed = required | {"candidate_review"}
+        if not required <= actual or not actual <= allowed:
+            missing = sorted(required - actual)
+            extra = sorted(actual - allowed)
             raise ValidationError(f"task fields differ: missing={missing}, extra={extra}")
         schema_version = value["schema_version"]
-        if schema_version not in {1, 2}:
-            raise ValidationError("task.schema_version must equal 1 or 2")
-        if schema_version == 2 and not {"strategy", "execution"} <= actual:
-            missing = sorted({"strategy", "execution"} - actual)
-            raise ValidationError(
-                f"task schema v2 requires explicit agent settings: missing={missing}"
-            )
+        if schema_version != 3:
+            raise ValidationError("task.schema_version must equal 3")
         repo = Path(_string(value["repo"], "repo"))
         if not repo.is_absolute():
             raise ValidationError("repo must be absolute")
@@ -153,20 +267,18 @@ class TaskConfig:
         maximum = value["max_experiments"]
         if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
             raise ValidationError("max_experiments must be a positive integer")
-        strategy = value.get("strategy", {})
+        strategy = value["strategy"]
         if not isinstance(strategy, Mapping):
             raise ValidationError("strategy must be an object")
-        if strategy:
-            _require_exact_fields(strategy, _STRATEGY_FIELDS, "strategy")
+        _require_exact_fields(strategy, _STRATEGY_FIELDS, "strategy")
         strategy_model = _string(strategy.get("model", "gpt-5.6-sol"), "strategy.model")
         strategy_effort = strategy.get("reasoning_effort", "high")
         if strategy_effort not in {"minimal", "low", "medium", "high", "xhigh"}:
             raise ValidationError("strategy.reasoning_effort is invalid")
-        execution = value.get("execution", {})
+        execution = value["execution"]
         if not isinstance(execution, Mapping):
             raise ValidationError("execution must be an object")
-        if execution:
-            _require_exact_fields(execution, _EXECUTION_FIELDS, "execution")
+        _require_exact_fields(execution, _EXECUTION_FIELDS, "execution")
         execution_model = _string(
             execution.get("model", "gpt-5.6-terra"), "execution.model"
         )
@@ -181,6 +293,7 @@ class TaskConfig:
             denied_paths=_string_list(value["denied_paths"], "denied_paths"),
             public_checks=_commands(value["public_checks"], "public_checks"),
             public_probe=_command(value["public_probe"], "public_probe"),
+            environment_sources=_environment_sources(value["environment"], repo=repo),
             evaluator=EvaluatorRef.from_mapping(value["evaluator"]),
             trials=trials,
             max_experiments=maximum,
@@ -188,6 +301,11 @@ class TaskConfig:
             strategy_reasoning_effort=strategy_effort,
             execution_model=execution_model,
             execution_reasoning_effort=execution_effort,
+            candidate_review=(
+                _candidate_review(value["candidate_review"])
+                if "candidate_review" in value
+                else None
+            ),
             schema_version=schema_version,
         )
 
@@ -203,8 +321,10 @@ def validate_task_id(value: Any) -> str:
 
 @dataclass(frozen=True)
 class ResearchRequest:
+    strategy_behavior_id: str
     claim: str
     mechanism: str
+    viability: str
     expected_effect: str
     expected_telemetry: Mapping[str, str]
     falsifiers: tuple[str, ...]
@@ -217,28 +337,41 @@ class ResearchRequest:
         allowed_telemetry: Sequence[str],
     ) -> ResearchRequest:
         actual = set(value)
-        if actual not in (_RESEARCH_FIELDS, _RESEARCH_FIELDS | {"direction"}):
+        if actual != _RESEARCH_FIELDS:
             missing = sorted(_RESEARCH_FIELDS - actual)
-            extra = sorted(actual - _RESEARCH_FIELDS - {"direction"})
+            extra = sorted(actual - _RESEARCH_FIELDS)
             raise ValidationError(
                 f"research request fields differ: missing={missing}, extra={extra}"
             )
-        if value["schema_version"] != 1:
-            raise ValidationError("research request schema_version must equal 1")
-        direction = value.get("direction")
-        if direction is not None:
-            if not isinstance(direction, Mapping):
-                raise ValidationError("research request direction must be an object")
-            _require_exact_fields(direction, _RESEARCH_DIRECTION_FIELDS, "research direction")
-            if direction["kind"] not in ("new", "refinement"):
-                raise ValidationError("research direction kind is invalid")
-            prior = direction["prior_entry_id"]
-            if prior is not None and (not isinstance(prior, str) or not prior):
-                raise ValidationError("research direction prior_entry_id is invalid")
-            if direction["kind"] == "refinement" and prior is None:
-                raise ValidationError("a refinement must name a prior ledger entry")
-            _string(direction["strategy_direction_id"], "research direction strategy_direction_id")
-            _string(direction["rationale"], "research direction rationale")
+        if value["schema_version"] != 2:
+            raise ValidationError("research request schema_version must equal 2")
+        lineage = value["lineage"]
+        if not isinstance(lineage, Mapping):
+            raise ValidationError("research request lineage must be an object")
+        _require_exact_fields(lineage, _RESEARCH_LINEAGE_FIELDS, "research lineage")
+        if lineage["kind"] not in ("new", "refinement"):
+            raise ValidationError("research lineage kind is invalid")
+        prior = lineage["prior_entry_id"]
+        if prior is not None and (not isinstance(prior, str) or not prior):
+            raise ValidationError("research lineage prior_entry_id is invalid")
+        if lineage["kind"] == "refinement" and prior is None:
+            raise ValidationError("a refinement must name a prior ledger entry")
+        review = value["evidence_review"]
+        if not isinstance(review, Mapping):
+            raise ValidationError("evidence_review must be an object")
+        _require_exact_fields(review, _EVIDENCE_REVIEW_FIELDS, "evidence_review")
+        _string(review["summary"], "evidence_review.summary")
+        citations = review["citations"]
+        if not isinstance(citations, list):
+            raise ValidationError("evidence_review.citations must be a list")
+        for index, citation in enumerate(citations):
+            if not isinstance(citation, Mapping):
+                raise ValidationError(f"evidence citation {index} must be an object")
+            _require_exact_fields(citation, _EVIDENCE_CITATION_FIELDS, "evidence citation")
+            _string(citation["entry_id"], "evidence citation entry_id")
+            if citation["bearing"] not in {"supports", "contradicts", "unresolved"}:
+                raise ValidationError("evidence citation bearing is invalid")
+            _string(citation["finding"], "evidence citation finding")
         telemetry = value["expected_telemetry"]
         if not isinstance(telemetry, Mapping) or any(
             not isinstance(name, str)
@@ -259,8 +392,12 @@ class ResearchRequest:
         if not falsifiers:
             raise ValidationError("falsifiers must not be empty")
         return cls(
+            strategy_behavior_id=_string(
+                value["strategy_behavior_id"], "strategy_behavior_id"
+            ),
             claim=_string(value["claim"], "claim"),
             mechanism=_string(value["mechanism"], "mechanism"),
+            viability=_string(value["viability"], "viability"),
             expected_effect=_string(value["expected_effect"], "expected_effect"),
             expected_telemetry=dict(telemetry),
             falsifiers=falsifiers,

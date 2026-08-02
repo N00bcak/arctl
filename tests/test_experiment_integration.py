@@ -82,12 +82,16 @@ class ExperimentIntegrationTests(unittest.TestCase):
             self.champion,
         )
         self.request = {
-            "schema_version": 1,
+            "schema_version": 2,
+            "strategy_behavior_id": "recoverable-routing",
             "claim": "Prefer recoverable routes.",
             "mechanism": "Penalize branches without retreat.",
+            "viability": "The policy exposes a branch score.",
+            "evidence_review": {"summary": "No prior evidence.", "citations": []},
             "expected_effect": "Complete more maps.",
             "expected_telemetry": {},
             "falsifiers": ["The paired effect is not positive."],
+            "lineage": {"kind": "new", "prior_entry_id": None},
         }
         (self.experiment_directory / "request.public.json").write_text(
             json.dumps(self.request)

@@ -7,8 +7,9 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .errors import StateError, ValidationError
 from .git import ensure_clean_worktree, resolve_commit
@@ -38,15 +39,107 @@ class ApprovalPreview:
     task_hash: str
     evaluator_commit: str
     manifest_hash: str
+    environment_hashes: Mapping[str, str]
     confirmation_token: str
     manifest: EvaluatorManifest
 
 
-def preview_approval(task_file: Path, task: TaskConfig) -> ApprovalPreview:
-    if task.schema_version != 2:
-        raise ValidationError(
-            "task schema v1 lacks a locked execution model; create and approve a new task"
+def _source_files(task: TaskConfig, source_id: str) -> tuple[tuple[str, Path], ...]:
+    source = next(item for item in task.environment_sources if item.identifier == source_id)
+    if source.path is None:
+        return ()
+    root = source.path
+    if root.is_symlink():
+        raise ValidationError(f"environment source is a symlink: {source.identifier}")
+    if root.is_file():
+        if source.include:
+            raise ValidationError(
+                f"file environment source must not declare include patterns: {source.identifier}"
+            )
+        paths = (root,)
+    elif root.is_dir():
+        if not source.include:
+            raise ValidationError(
+                f"directory environment source requires include patterns: {source.identifier}"
+            )
+        paths = tuple(
+            sorted(
+                {
+                    match
+                    for pattern in source.include
+                    for match in root.glob(pattern)
+                    if match.is_file()
+                }
+            )
         )
+    else:
+        raise ValidationError(f"environment source does not exist: {source.identifier}")
+    if not paths:
+        raise ValidationError(f"environment source matched no files: {source.identifier}")
+    for path in paths:
+        if path.is_symlink():
+            raise ValidationError(
+                f"environment source contains a symlink: {source.identifier}"
+            )
+    base = root if root.is_dir() else root.parent
+    return tuple((path.relative_to(base).as_posix(), path) for path in paths)
+
+
+def environment_source_hashes(
+    task: TaskConfig,
+    *,
+    task_directory: Path,
+) -> dict[str, str]:
+    repo = task.repo.resolve()
+    evaluator = task.evaluator.repo.resolve()
+    private = task_directory.resolve()
+    hashes: dict[str, str] = {}
+    for source in task.environment_sources:
+        digest = hashlib.sha256()
+        if source.path is None:
+            digest.update(
+                json.dumps(
+                    {
+                        "command": source.command,
+                        "backed_by": source.backed_by,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            )
+            hashes[source.identifier] = digest.hexdigest()
+            continue
+        resolved = source.path.resolve()
+        if resolved == evaluator or evaluator in resolved.parents:
+            raise ValidationError("environment sources must not read the evaluator repo")
+        if resolved == private or private in resolved.parents:
+            raise ValidationError("environment sources must not read controller task data")
+        for relative, path in _source_files(task, source.identifier):
+            resolved_file = path.resolve()
+            if resolved_file == evaluator or evaluator in resolved_file.parents:
+                raise ValidationError("environment sources must not read the evaluator repo")
+            if resolved_file == private or private in resolved_file.parents:
+                raise ValidationError("environment sources must not read controller task data")
+            try:
+                repo_path = resolved_file.relative_to(repo).as_posix()
+            except ValueError:
+                pass
+            else:
+                if any(fnmatchcase(repo_path, pattern) for pattern in task.editable_paths):
+                    raise ValidationError(
+                        f"environment source overlaps editable path: {repo_path}"
+                    )
+            digest.update(relative.encode())
+            digest.update(b"\0")
+            digest.update(path.read_bytes())
+            digest.update(b"\0")
+        hashes[source.identifier] = digest.hexdigest()
+    return hashes
+
+
+def preview_approval(task_file: Path, task: TaskConfig) -> ApprovalPreview:
+    if task.schema_version != 3:
+        raise ValidationError("task must use schema v3; create and approve a new task")
     target = task.repo.resolve()
     evaluator = task.evaluator.repo.resolve()
     if evaluator == target or target in evaluator.parents or evaluator in target.parents:
@@ -73,13 +166,20 @@ def preview_approval(task_file: Path, task: TaskConfig) -> ApprovalPreview:
         )
     task_hash = hashlib.sha256(task_file.read_bytes()).hexdigest()
     manifest_hash = hashlib.sha256(raw_manifest).hexdigest()
+    try:
+        environment_hashes = environment_source_hashes(
+            task, task_directory=task_file.parent
+        )
+    except OSError as error:
+        raise ValidationError("environment source cannot be read") from error
     token = hashlib.sha256(
         b"\0".join(
             (
-                b"arctl-approval-v1",
+                b"arctl-approval-v2",
                 task_hash.encode(),
                 commit.encode(),
                 manifest_hash.encode(),
+                json.dumps(environment_hashes, sort_keys=True).encode(),
             )
         )
     ).hexdigest()[:16]
@@ -88,6 +188,7 @@ def preview_approval(task_file: Path, task: TaskConfig) -> ApprovalPreview:
         task_hash=task_hash,
         evaluator_commit=commit,
         manifest_hash=manifest_hash,
+        environment_hashes=environment_hashes,
         confirmation_token=token,
         manifest=manifest,
     )
@@ -149,21 +250,20 @@ def confirm_approval(
     atomic_write_json(
         approval_path,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "task_sha256": preview.task_hash,
             "evaluator_commit": preview.evaluator_commit,
             "manifest_sha256": preview.manifest_hash,
             "champion": champion,
+            "environment_sha256": dict(preview.environment_hashes),
         },
     )
     os.chmod(task_directory / "task.yaml", 0o444)
 
 
 def verify_approval(task_directory: Path, task: TaskConfig) -> dict[str, str]:
-    if task.schema_version != 2:
-        raise StateError(
-            "task schema v1 lacks a locked execution model; create and approve a new task"
-        )
+    if task.schema_version != 3:
+        raise StateError("task must use schema v3; create and approve a new task")
     try:
         approval = json.loads((task_directory / "approval.json").read_text())
         task_hash = hashlib.sha256((task_directory / "task.yaml").read_bytes()).hexdigest()
@@ -179,15 +279,24 @@ def verify_approval(task_directory: Path, task: TaskConfig) -> dict[str, str]:
         "evaluator_commit",
         "manifest_sha256",
         "champion",
+        "environment_sha256",
     }
     if not isinstance(approval, dict) or set(approval) != expected_fields:
         raise StateError("task approval record is invalid")
+    try:
+        environment_hashes = environment_source_hashes(
+            task, task_directory=task_directory
+        )
+    except (OSError, ValidationError) as error:
+        raise StateError("approved environment sources are invalid") from error
     if (
-        approval["schema_version"] != 1
+        approval["schema_version"] != 2
         or approval["task_sha256"] != task_hash
         or approval["manifest_sha256"] != manifest_hash
         or approval["evaluator_commit"] != evaluator_commit
         or evaluator_commit != resolve_commit(task.evaluator.repo, task.evaluator.commit)
+        or approval["environment_sha256"]
+        != environment_hashes
     ):
         raise StateError("approved task or evaluator artifacts changed")
     champion_ref = f"refs/arctl/{task.task_id}/champion"
@@ -200,5 +309,6 @@ def verify_approval(task_directory: Path, task: TaskConfig) -> dict[str, str]:
         "task_sha256": task_hash,
         "manifest_sha256": manifest_hash,
         "evaluator_commit": evaluator_commit,
+        "approved_champion": approval["champion"],
         "champion": resolve_commit(task.repo, champion_ref),
     }

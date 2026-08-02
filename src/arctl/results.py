@@ -226,7 +226,8 @@ def validate_public_result(
     if not isinstance(telemetry, Mapping) or set(telemetry) != expected_telemetry:
         raise StateError("public result telemetry is invalid")
     private_shape: dict[str, Any] = {}
-    for name, metric in allowed_telemetry.items():
+    metrics = allowed_telemetry if kinds else {}
+    for name, metric in metrics.items():
         raw = telemetry[name]
         if not isinstance(raw, Mapping):
             raise StateError("public result telemetry is invalid")
@@ -254,7 +255,7 @@ def validate_public_result(
                 raise StateError("public result telemetry delta is invalid")
         private_shape[name] = item
     try:
-        validate_telemetry(private_shape, metrics=allowed_telemetry)
+        validate_telemetry(private_shape, metrics=metrics)
     except ValidationError as error:
         raise StateError("public result telemetry is invalid") from error
     return dict(value)

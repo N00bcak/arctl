@@ -132,6 +132,14 @@ def _documents(
         "> Derived human-readable view. Git commits and arctl JSON records remain "
         "authoritative.\n"
     )
+    review_files = sorted(
+        (experiment / "candidate-review").glob("round-*/decision.public.json")
+    )
+    review = (
+        _read_object(review_files[-1], "public candidate review")
+        if review_files
+        else None
+    )
     readme = "\n".join(
         (
             f"# Experiment {identifier}",
@@ -149,6 +157,11 @@ def _documents(
             f"**Decision:** **{decision}**",
             "",
             "- [Research rationale](research.md)",
+            *(
+                ["- [Pre-trial policy review](candidate-review.md)"]
+                if review
+                else []
+            ),
             "- [Exact candidate change](change.diff)",
             "- [Checks and official evaluation](evaluation.md)",
             "- [Post-trial reflection](reflection.md)",
@@ -162,9 +175,27 @@ def _documents(
             "",
             dossier_note,
             "",
+            f"**Strategic behavior:** `{safe_text(request.get('strategy_behavior_id', ''))}`",
+            "",
             f"## Claim\n\n{safe_text(request.get('claim', ''))}",
             "",
             f"## Mechanism\n\n{safe_text(request.get('mechanism', ''))}",
+            "",
+            f"## Viability\n\n{safe_text(request.get('viability', ''))}",
+            "",
+            "## Prior evidence review",
+            "",
+            safe_text(request.get("evidence_review", {}).get("summary", "")),
+            "",
+            *(
+                [
+                    f"- `{safe_text(item.get('entry_id', ''))}` "
+                    f"**{safe_text(item.get('bearing', ''))}:** "
+                    f"{safe_text(item.get('finding', ''))}"
+                    for item in request.get("evidence_review", {}).get("citations", [])
+                ]
+                or ["- No relevant prior entry cited."]
+            ),
             "",
             f"## Expected effect\n\n{safe_text(request.get('expected_effect', ''))}",
             "",
@@ -263,6 +294,8 @@ def _documents(
         ]
         mechanism = assessment.get("mechanism", {})
         implementation = assessment.get("implementation", {})
+        behavior = assessment.get("strategy_behavior", {})
+        policy_observations = assessment.get("policy_observations", [])
         action = assessment.get("next_action", {})
         reflection_document = "\n".join(
             (
@@ -271,6 +304,13 @@ def _documents(
                 dossier_note,
                 "",
                 f"## Summary\n\n{safe_text(assessment.get('summary', ''))}",
+                "",
+                "## Strategic behavior",
+                "",
+                f"`{safe_text(behavior.get('id', ''))}` — "
+                f"**{safe_text(behavior.get('realization', 'unknown'))}**",
+                "",
+                *[f"- {safe_text(item)}" for item in behavior.get("evidence", [])],
                 "",
                 "## Telemetry assessment",
                 "",
@@ -293,6 +333,18 @@ def _documents(
                 *[f"- {safe_text(item)}" for item in implementation.get("evidence", [])],
                 *[f"- Concern: {safe_text(item)}" for item in implementation.get("concerns", [])],
                 "",
+                "## Policy observations",
+                "",
+                *(
+                    [
+                        f"- **{safe_text(item.get('finding', ''))}:** "
+                        f"{safe_text(item.get('evidence', ''))} "
+                        f"Implication: {safe_text(item.get('implication', ''))}"
+                        for item in policy_observations
+                    ]
+                    or ["- None recorded."]
+                ),
+                "",
                 "## Advisory next action",
                 "",
                 f"**{safe_text(action.get('kind', 'unknown'))}:** "
@@ -302,13 +354,39 @@ def _documents(
                 "",
             )
         )
-    return {
+    documents = {
         "README.md": readme,
         "change.diff": candidate_diff(task.repo, champion, candidate) + "\n",
         "research.md": research,
         "evaluation.md": evaluation,
         "reflection.md": reflection_document,
     }
+    if review is not None:
+        documents["candidate-review.md"] = "\n".join(
+            (
+                f"# Candidate review — Experiment {identifier}",
+                "",
+                dossier_note,
+                "",
+                f"**Verdict:** **{safe_text(review.get('verdict', 'unknown')).upper()}**",
+                "",
+                safe_text(review.get("summary", "")),
+                "",
+                "## Findings",
+                "",
+                *(
+                    [
+                        f"- **{safe_text(item.get('rule', ''))}:** "
+                        f"{safe_text(item.get('evidence', ''))} "
+                        f"Remediation: {safe_text(item.get('remediation', ''))}"
+                        for item in review.get("findings", [])
+                    ]
+                    or ["- None."]
+                ),
+                "",
+            )
+        )
+    return documents
 
 
 def ensure_experiment_dossier(

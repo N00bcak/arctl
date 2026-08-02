@@ -32,7 +32,7 @@ The controller uses three reusable records:
 - `Experiment`: one novel frozen candidate produced by search, one primary `ComparisonRun`, and at most one suspect `ComparisonRun`.
 
 Candidate discovery adds two public records without changing official evaluation:
-- `StrategyRevision`: one fresh high-reasoning analysis of public environment signals, success qualities, uncertainties, and promising directions;
+- `StrategyRevision`: one fresh high-reasoning analysis of approval-locked environment observations, uncertainties, and derived successful-policy behaviors;
 - `CandidateSearch`: up to six fresh `ResearchAttempt`s, with one strategy refresh after the third miss, that ends with one novel candidate or `SEARCH_STALLED`.
 
 An official `Experiment` begins only after candidate search finds a novel candidate. Empty, out-of-scope, malformed, or exact-duplicate attempts are preserved as public search misses and consume neither an experiment slot nor official seeds.
@@ -88,7 +88,7 @@ The evaluator must use each trial seed to control score-affecting task randomnes
 Research and subject sandboxes must not read the evaluator repo, path, commit, controller master seeds, private trial identities, schedules, answers, scores, or evidence. An evaluator may place a seed in subject-visible input only when that seed is a legitimate task observation; otherwise it materializes the case and keeps the generator seed private.
 
 ## 6. Fresh session rule
-Each strategy revision and research attempt starts one new Codex session. Sessions are never resumed. Rejected research attempts remain outside official experiments.
+Each strategy revision and research attempt starts one new Codex session. Sessions are never resumed. Rejected research attempts remain outside official experiments. When `candidate_review` is configured, each semantic review and its one allowed repair also uses a separate fresh execution session.
 The session may read the public task, rules, allowed paths, a worktree of the champion, public tests, dev probes, the evaluator manifest's approved public statistic and subject-interface description, safe results from completed experiments, and the required experiment JSON format.
 The session may not read evaluator code or location, hidden cases or answers, official seeds or schedules, raw subject output, private evidence, private errors, or earlier Codex chat logs.
 The session ends before candidate freeze and official test choice. It is never resumed.
@@ -97,7 +97,8 @@ The session ends before candidate freeze and official test choice. It is never r
 `arctl` uses the sandbox already provided by Codex.
 | Profile | Can use | Must not read | Network |
 |---|---|---|---|
-| `RESEARCH` | candidate worktree, public task data, scratch, read-only runtimes named by approved public checks and probe | evaluator, task data, private results, other experiments | none |
+| `STRATEGY` | declared environment sources and environment-probe runtime, scratch | champion policy, experiment ledger, evaluator, statistics, telemetry | none |
+| `RESEARCH` | candidate worktree, public task data, scratch, read-only runtimes named by approved public checks and policy probe | evaluator, task data, private results, other experiments | none |
 | `SUBJECT` | frozen code, runtime, public input, fresh output | evaluator, controller files, history | none |
 | `EVALUATOR` | evaluator commit, private case data, saved subject output | writable target repo, Git refs | none |
 `arctl doctor` must test file reads, file writes, network access, timeouts, and child-process cleanup before a task runs.
@@ -105,7 +106,7 @@ The session ends before candidate freeze and official test choice. It is never r
 ## 8. Task file
 Use one small YAML file that a human can read:
 ```yaml
-schema_version: 2
+schema_version: 3
 task_id: demo
 repo: /absolute/path/to/repo
 objective: Improve play across procedurally generated maps without breaking correctness.
@@ -113,6 +114,18 @@ editable_paths: [src/**, tests/**]
 denied_paths: [.git/**, pyproject.toml, uv.lock]
 public_checks: [[python, -m, pytest, -q]]
 public_probe: [python, tools/dev_benchmark.py]
+environment:
+  sources:
+    - id: environment-core
+      kind: implementation
+      description: Transition, observation, action, and termination rules.
+      path: /absolute/path/to/environment
+      include: ["**/*.py"]
+    - id: environment-probe
+      kind: probe
+      description: Policy-free inspection of environment behavior.
+      command: [python, tools/environment_probe.py]
+      backed_by: [environment-core]
 evaluator:
   repo: /private/arctl-evaluators/demo
   commit: 7a95d61
@@ -122,10 +135,14 @@ strategy:
 execution:
   model: gpt-5.6-terra
   reasoning_effort: medium
+candidate_review:
+  contract: Use only supplied observations; do not access privileged inputs or side channels.
+  checks: [[python, tools/policy_guard.py]]
+  repair_attempts: 1
 trials: auto
 max_experiments: 30
 ```
-Strategy and reflection default to `gpt-5.6-sol` with `high` reasoning. Candidate execution defaults to `gpt-5.6-terra` with `medium` reasoning. Both assignments are explicit and approval-locked; schema-v1 tasks must be recreated and approved as new tasks. `trials` must be exactly `auto` or a positive integer other than a Boolean. `auto` runs one controller-orchestrated champion pilot at the approved ladder ceiling, asks the evaluator for one finite diagnostic at every nested ladder prefix, and has `arctl` freeze the smallest stable passing rung. An integer skips calibration and fixes that count; `1` is the deterministic special case. The fixed or calibrated count must be supported by the evaluator manifest and must not exceed its approved safety ceiling. `arctl init` uses `auto` by default.
+Strategy and reflection default to `gpt-5.6-sol` with `high` reasoning. Candidate execution defaults to `gpt-5.6-terra` with `medium` reasoning. Both assignments and every environment source are explicit and approval-locked; older task schemas must be recreated and approved as new tasks. File and directory sources are content-hashed, directory include patterns must match at least one regular non-symlink file, and source drift or overlap with editable, evaluator, or controller-private paths blocks execution. Probe commands are task-locked and name the locked sources that implement them. The policy-oriented `public_probe` remains executor-only. Optional `candidate_review` contains one natural-language contract, zero or more deterministic argument-vector checks, and `repair_attempts: 0 | 1`. Checks run before a fresh read-only semantic reviewer. A failure may receive the configured fresh repair, after which checks and review run again. Repeated violations become public research misses before candidate commit, experiment allocation, or seed reservation. Reviewer and repair use the execution model. This gate controls cooperative research agents and does not claim hostile-code isolation. `trials` must be exactly `auto` or a positive integer other than a Boolean. `auto` runs one controller-orchestrated champion pilot at the approved ladder ceiling, asks the evaluator for one finite diagnostic at every nested ladder prefix, and has `arctl` freeze the smallest stable passing rung. An integer skips calibration and fixes that count; `1` is the deterministic special case. The fixed or calibrated count must be supported by the evaluator manifest and must not exceed its approved safety ceiling. `arctl init` uses `auto` by default.
 
 All evaluator-manifest commands must be argument lists, not shell strings.
 Allowed full-argument placeholders:
@@ -146,7 +163,7 @@ These rules are required for release.
 - Users must not need database IDs, internal phase names, or hidden state.
 - There are only two approvals: task file and evaluator commit.
 - No approval is needed for each experiment.
-The evaluator-commit approval includes its manifest. The human approval screen is one compact table no wider than 140 characters, ordered from setup through method to action. It shows the strategy/reflection and execution models, only the executor's editable-path whitelist, hidden paired-seed and evaluator-mapping summary, fixed trial count or brief automatic-calibration sweep, success rule, telemetry grouped as higher-is-better, lower-is-better, and diagnostic, known variation with mitigation, confirmation token, and exact approval command. Telemetry meanings omit units and print the manifest descriptions. Machine-readable output retains the exact hashes and approval command. A single note states that approval trusts the evaluator's mathematics, provides no search-wide false-positive guarantee, and requires human confirmation. Generic human `Next:` lines remain suppressed.
+The evaluator-commit approval includes its manifest. The human approval screen is one compact table no wider than 140 characters, ordered from setup through method to action. It shows the strategy/reflection and execution/review models, concise environment source IDs, only the executor's editable-path whitelist, optional reviewer/tripwire/repair summary, hidden paired-seed and evaluator-mapping summary, fixed trial count or brief automatic-calibration sweep, success rule, telemetry grouped as higher-is-better, lower-is-better, and diagnostic, known variation with mitigation, confirmation token, and exact approval command. Telemetry meanings omit units and print the manifest descriptions. Machine-readable output retains the exact task, environment, and manifest hashes plus the approval command. A single note states that approval trusts the evaluator's mathematics, provides no search-wide false-positive guarantee, and requires human confirmation. Generic human `Next:` lines remain suppressed.
 
 New approvals require the manifest to declare subject seeds hidden. The evaluator receives private seeds to generate reproducible cases, but champion and candidate receive only the resulting approved public cases. Seeds are paired within a comparison and not reused within the task.
 
@@ -208,26 +225,30 @@ With `trials: auto`, calibration happens once after approval and before research
 The evaluator owns and explains how its diagnostic is calculated; `arctl` owns threshold application and count selection. If no rung passes, `arctl` freezes the ceiling and persistently warns that the criterion was unmet. Champion-only calibration measures the approved baseline property and does not guarantee power for unknown future paired candidate effects. Failure blocks research and is never silently retried or given replacement seeds.
 
 ### 10.2 Develop and freeze
-Before the first search, `arctl` starts a strategy session over the public environment and exploration ledger. It saves environment signals, a success profile, uncertainties, and distinct strategic directions. Strategy and reflection use the approved strategy assignment; candidate discovery uses the separately approved execution assignment.
+Before the first search, `arctl` starts a read-only strategy session with only the objective boundary, approval-locked environment sources and policy-free probes, the prior environment strategy, and a refresh reason. It cannot read the champion policy or exploration ledger and receives no statistic or telemetry packet. It saves cited direct/inferred environment observations, explicit uncertainties, and high-level successful-policy behaviors derived from observation IDs. It must not propose algorithms, weights, code changes, telemetry targets, evaluator criteria, or baseline-policy diagnoses. Strategy and reflection use the approved strategy assignment; candidate discovery uses the separately approved execution assignment.
 
 For candidate discovery, `arctl` creates a clean champion worktree and starts a fresh `RESEARCH` attempt with the current strategy, searchable public ledger, and approved public packet. The session may use public probes and must write:
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "strategy_behavior_id": "preserve-recoverability",
   "claim": "Prefer routes with recoverable resources.",
   "mechanism": "Penalize branches with no safe retreat.",
+  "viability": "The policy already scores successor branches and can represent retreat availability.",
+  "evidence_review": {
+    "summary": "Prior telemetry does not contradict this mechanism.",
+    "citations": [{"entry_id": "entry-000004", "bearing": "supports", "finding": "Dead-end entries tracked the rejected mechanism."}]
+  },
   "expected_effect": "Complete more procedurally generated maps.",
   "expected_telemetry": {"dead_end_entries": "decrease"},
   "falsifiers": ["The paired effect is not positive", "Correctness tests fail"],
-  "direction": {
+  "lineage": {
     "kind": "new",
-    "prior_entry_id": null,
-    "strategy_direction_id": "recoverable-routing",
-    "rationale": "This direction is distinct from the ledger entries."
+    "prior_entry_id": null
   }
 }
 ```
-After the session ends, `arctl` validates this record and the changed paths. Empty, out-of-scope, malformed, or exact-duplicate candidates become typed search misses rather than controller errors. It tries three fresh sessions, refreshes strategy once, then tries three more. Six misses return `SEARCH_STALLED`; a later explicit `run` may begin another bounded cycle. Semantic similarity is ledger guidance only, so deliberate refinements remain possible. Once a novel candidate exists, `arctl` creates the official experiment, candidate commit and ref, then runs public checks. No code changes occur after candidate freeze, and public probes never decide promotion.
+Before editing, the executor selects one real strategy behavior, proposes a concrete policy mechanism, reasons about viability, and scans prior public results, telemetry, and reflections. `arctl` validates the behavior ID, every cited ledger ID, lineage, request, and changed paths. Empty, out-of-scope, malformed, or exact-duplicate candidates become typed search misses rather than controller errors. It tries three fresh sessions, refreshes strategy once, then tries three more. Six misses return `SEARCH_STALLED`; a later explicit `run` may begin another bounded cycle. Semantic similarity is ledger guidance only, so deliberate refinements remain possible. Once a novel candidate exists, `arctl` creates the official experiment, candidate commit and ref, then runs public checks. No code changes occur after candidate freeze, and public probes never decide promotion. Every executor starts from the latest accepted champion; rejected candidates remain evidence but do not replace it.
 
 ### 10.3 Run one comparison
 `ComparisonRun(kind)` is the only official evaluation workflow:
@@ -271,7 +292,7 @@ The controller applies the same decision rule to either comparison:
 
 After a primary `ACCEPT` that requests a suspect test, the experiment is internally `PROVISIONAL`: keep the champion unchanged and run exactly one fresh `ComparisonRun(kind="suspect")` with non-overlapping seeds. Its decision becomes final and it cannot request another run. Otherwise the primary decision is final.
 
-Only a final `ACCEPT` may update the champion ref. The verdict and promotion are fixed before interpretation and cannot be changed by a model. When the manifest declares telemetry, `arctl` enters `REFLECTING` and launches one fresh, schema-constrained, read-only session over the public result, semantic telemetry, precommitted expectations and falsifiers, public checks, and champion/candidate source. It must assess every metric, distinguish observation from inference, state when causes are not identifiable, assess mechanism and implementation evidence, and recommend a nonbinding next research action. Its separate `reflection.public.json` is advisory and never changes `ACCEPT`, `ARCHIVE`, `REJECT`, or promotion.
+Only a final `ACCEPT` may update the champion ref. The verdict and promotion are fixed before interpretation and cannot be changed by a model. When the manifest declares telemetry, `arctl` enters `REFLECTING` and launches one fresh, schema-constrained, read-only session over the public result, semantic telemetry, selected strategy behavior, viability and prior-evidence review, precommitted expectations and falsifiers, public checks, and champion/candidate source. It must assess every metric, distinguish observation from inference, state when causes are not identifiable, judge whether the candidate expressed the selected behavior, criticize or reinterpret the policy mechanism, record policy-specific findings for later executors, assess implementation evidence, and recommend a nonbinding next research action. Its separate `reflection.public.json` is advisory and never changes `ACCEPT`, `ARCHIVE`, `REJECT`, or promotion.
 
 If the manifest declares no telemetry, `arctl` skips the model session and publishes a persistent warning that causal reflection is unavailable. If a required reflection process or response fails, the valid verdict and promotion remain saved but the task becomes `REFLECTION_FAILED`; no later candidate search may start. A later explicit `run` makes a fresh reflection attempt before any research. There is no bypass. After reflection succeeds or is intentionally skipped, `arctl` marks the experiment complete, removes temporary worktrees, and gives the result plus reflection to later sessions. There is no controller-defined metric direction, minimum delta, or unit-specific threshold.
 
@@ -409,6 +430,7 @@ The MVP is done when one toy repo and one real repo show:
 12. All nine commands infer unambiguous tasks, explain validity in human output, and provide schema-valid sanctioned `--json` output with a next command and without private evidence.
 13. AI-operated approval reports that human permission is required; approval, status, stop, errors, and the novice setup path require no source reading.
 14. Semantic paired telemetry exposes both arms and a derived delta; required reflection cannot alter verdicts, blocks later research on failure, and explicitly reports causal evidence gaps.
+15. Strategy observations cite approval-locked environment sources, derive behavior IDs from observation IDs, and cannot read the champion or policy ledger; executors and reflections own policy-specific mechanisms and evidence.
 15. A real task runs several experiments without repeated approval, preserves failed ideas, and reports the best-effort and non-search-wide limits.
 16. `install.sh` creates a working local editable installation and exposes `arctl` without PyPI, `sudo`, or system-Python changes.
 

@@ -1,0 +1,380 @@
+"""Pre-trial deterministic checks and independent candidate review."""
+
+from __future__ import annotations
+
+import json
+import os
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError as JsonSchemaError
+
+from .errors import ProcessError, ResearchMiss, StateError, StoppedError
+from .manifest import EvaluatorManifest
+from .process import run_or_load_once
+from .registry import LocatedTask
+from .sandbox import (
+    command_runtime_read_paths,
+    marked_command,
+    research_command,
+    sandbox_command,
+    sanitized_environment,
+)
+from .storage import write_json_once
+
+AgentCommandBuilder = Callable[[Path, Path, Path, str], Sequence[str]]
+CheckCommandBuilder = Callable[[Sequence[str], Path, Path], Sequence[str]]
+ProgressCallback = Callable[[dict[str, Any]], None]
+
+
+def review_schema() -> dict[str, Any]:
+    text = {"type": "string", "minLength": 1}
+    finding = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["rule", "evidence", "remediation"],
+        "properties": {
+            "rule": text,
+            "evidence": text,
+            "remediation": text,
+        },
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["schema_version", "verdict", "summary", "findings"],
+        "properties": {
+            "schema_version": {"type": "integer", "const": 1},
+            "verdict": {"type": "string", "enum": ["pass", "fail"]},
+            "summary": text,
+            "findings": {"type": "array", "items": finding},
+        },
+    }
+
+
+def repair_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["schema_version", "summary"],
+        "properties": {
+            "schema_version": {"type": "integer", "const": 1},
+            "summary": {"type": "string", "minLength": 1},
+        },
+    }
+
+
+def _validate_review(value: Any) -> dict[str, Any]:
+    try:
+        Draft202012Validator(review_schema()).validate(value)
+    except JsonSchemaError as error:
+        raise StateError("candidate reviewer did not write valid review JSON") from error
+    assert isinstance(value, dict)
+    if value["verdict"] == "pass" and value["findings"]:
+        raise StateError("passing candidate review must not contain findings")
+    if value["verdict"] == "fail" and not value["findings"]:
+        raise StateError("failing candidate review must contain findings")
+    return value
+
+
+def _load_json(path: Path, *, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise StateError(f"{label} did not write valid JSON") from error
+    if not isinstance(value, dict):
+        raise StateError(f"{label} did not write one JSON object")
+    return value
+
+
+def _agent_command(
+    task: LocatedTask,
+    *,
+    worktree: Path,
+    scratch: Path,
+    schema: Path,
+    prompt: str,
+    output_name: str,
+    writable: bool,
+) -> Sequence[str]:
+    return research_command(
+        worktree=worktree,
+        scratch=scratch,
+        output_schema=schema,
+        prompt=prompt,
+        output_name=output_name,
+        model=task.config.execution_model,
+        reasoning_effort=task.config.execution_reasoning_effort,
+        writable_worktree=writable,
+    )
+
+
+def _run_agent(
+    task: LocatedTask,
+    *,
+    worktree: Path,
+    scratch: Path,
+    schema_value: Mapping[str, Any],
+    prompt: str,
+    output_name: str,
+    command_builder: AgentCommandBuilder | None,
+    writable: bool,
+    stop_path: Path,
+) -> dict[str, Any]:
+    agent_root = scratch
+    attempts = agent_root / "attempts"
+    existing = sorted(attempts.glob("[0-9][0-9][0-9][0-9]"))
+    legacy_started = (agent_root / "process" / "started.json").is_file()
+    attempt_number = len(existing) + 1 + int(legacy_started)
+    scratch = attempts / f"{attempt_number:04d}"
+    scratch.mkdir(parents=True, exist_ok=True)
+    schema = scratch / "output.schema.json"
+    write_json_once(schema, schema_value)
+    command = (
+        command_builder(worktree, scratch, schema, prompt)
+        if command_builder is not None
+        else _agent_command(
+            task,
+            worktree=worktree,
+            scratch=scratch,
+            schema=schema,
+            prompt=prompt,
+            output_name=output_name,
+            writable=writable,
+        )
+    )
+    result = run_or_load_once(
+        scratch / "process",
+        command,
+        timeout_seconds=600,
+        max_output_bytes=1_000_000,
+        cwd=worktree,
+        env=(
+            None
+            if command_builder is not None
+            else sanitized_environment(
+                codex_home=Path(
+                    os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
+                ),
+                writable_home=scratch,
+            )
+        ),
+        stop_path=stop_path,
+    )
+    if result["return_code"] != 0:
+        raise StateError(f"fresh candidate {output_name.removesuffix('.public.json')} session exited unsuccessfully")
+    return _load_json(scratch / output_name, label="candidate agent")
+
+
+def _check_failure(
+    task: LocatedTask,
+    worktree: Path,
+    root: Path,
+    manifest: EvaluatorManifest,
+    *,
+    command_builder: CheckCommandBuilder | None,
+    stop_path: Path,
+) -> dict[str, Any] | None:
+    assert task.config.candidate_review is not None
+    for index, command in enumerate(task.config.candidate_review.checks, start=1):
+        scratch = root / "checks" / f"{index:04d}"
+        scratch.mkdir(parents=True, exist_ok=True)
+        marker = scratch / "execution.started"
+        if command_builder is None:
+            managed = sandbox_command(
+                marked_command(command, marker),
+                cwd=worktree,
+                read_paths=command_runtime_read_paths(command),
+                write_paths=(worktree, scratch),
+                profile="arctl-research",
+            )
+            home = scratch / "home"
+            codex_home = scratch / "codex-home"
+            home.mkdir(exist_ok=True)
+            codex_home.mkdir(exist_ok=True)
+            environment = sanitized_environment(
+                codex_home=codex_home, writable_home=home
+            )
+        else:
+            managed = command_builder(command, worktree, scratch)
+            environment = None
+        try:
+            result = run_or_load_once(
+                scratch / "process",
+                managed,
+                timeout_seconds=manifest.limits.timeout_seconds,
+                max_output_bytes=manifest.limits.max_output_bytes,
+                cwd=worktree,
+                env=environment,
+                stop_path=stop_path,
+            )
+        except StoppedError:
+            raise
+        except (ProcessError, StateError) as error:
+            if command_builder is None and not marker.is_file():
+                raise StateError("candidate-check sandbox did not start its command") from error
+            result = {"return_code": 1}
+        if result["return_code"] == 0:
+            continue
+        output = ""
+        for name in ("stdout.bin", "stderr.bin"):
+            path = scratch / "process" / name
+            if path.is_file():
+                output += path.read_text(encoding="utf-8", errors="replace")
+        detail = output.strip()[:4000] or f"candidate check {index} failed"
+        return {
+            "schema_version": 1,
+            "verdict": "fail",
+            "summary": f"Deterministic candidate check {index} failed.",
+            "findings": [
+                {
+                    "rule": f"candidate_check_{index}",
+                    "evidence": detail,
+                    "remediation": "Remove the prohibited capability or repair the policy interface.",
+                }
+            ],
+        }
+    return None
+
+
+def _review_prompt(
+    task: LocatedTask,
+    *,
+    subject_interface: str,
+    champion: str,
+    request: Mapping[str, Any],
+) -> str:
+    assert task.config.candidate_review is not None
+    packet = {
+        "objective": task.config.objective,
+        "champion": champion,
+        "editable_paths": list(task.config.editable_paths),
+        "denied_paths": list(task.config.denied_paths),
+        "contract": task.config.candidate_review.contract,
+        "subject_interface": subject_interface,
+        "research_request": request,
+    }
+    return (
+        "Independently review the uncommitted champion-to-candidate diff before any "
+        "trial runs. Inspect the changed implementation and its trusted public interface. "
+        "Pass only when the candidate obeys the contract, uses no privileged information "
+        "or side channel, remains deterministic for the same observable history, and "
+        "implements the declared research mechanism. Do not edit anything. Cite concrete "
+        "paths and constructs in each finding. The findings array is exclusively for "
+        "contract violations that require remediation: a pass must have no findings, "
+        "while a fail must have at least one. Put evidence supporting a pass in the "
+        "summary, never in findings. Return only the required review JSON.\n\n"
+        + json.dumps(packet, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def _repair_prompt(
+    task: LocatedTask,
+    *,
+    request: Mapping[str, Any],
+    review: Mapping[str, Any],
+) -> str:
+    assert task.config.candidate_review is not None
+    packet = {
+        "contract": task.config.candidate_review.contract,
+        "research_request": request,
+        "review": review,
+    }
+    return (
+        "Repair only the cited candidate-review violations in the current worktree. "
+        "Preserve the research claim and mechanism; do not broaden scope, commit, or touch "
+        "denied paths. Run relevant public checks when useful. Return only the required "
+        "repair JSON after editing.\n\n"
+        + json.dumps(packet, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def review_candidate(
+    task: LocatedTask,
+    manifest: EvaluatorManifest,
+    *,
+    worktree: Path,
+    attempt_directory: Path,
+    champion: str,
+    request: Mapping[str, Any],
+    stop_path: Path,
+    review_command_builder: AgentCommandBuilder | None = None,
+    repair_command_builder: AgentCommandBuilder | None = None,
+    check_command_builder: CheckCommandBuilder | None = None,
+    progress: ProgressCallback | None = None,
+) -> dict[str, Any] | None:
+    """Require a clean final review, allowing the configured bounded repair."""
+    config = task.config.candidate_review
+    if config is None:
+        return None
+    rounds = config.repair_attempts + 1
+    for round_number in range(1, rounds + 1):
+        root = attempt_directory / "candidate-review" / f"round-{round_number:02d}"
+        if progress is not None:
+            progress({"event": "candidate_review", "round": round_number, "rounds": rounds})
+        review = _check_failure(
+            task,
+            worktree,
+            root,
+            manifest,
+            command_builder=check_command_builder,
+            stop_path=stop_path,
+        )
+        if review is None:
+            prompt = _review_prompt(
+                task,
+                subject_interface=manifest.subject_interface,
+                champion=champion,
+                request=request,
+            )
+            for output_attempt in range(2):
+                raw = _run_agent(
+                    task,
+                    worktree=worktree,
+                    scratch=root / "semantic",
+                    schema_value=review_schema(),
+                    prompt=prompt,
+                    output_name="review.public.json",
+                    command_builder=review_command_builder,
+                    writable=False,
+                    stop_path=stop_path,
+                )
+                try:
+                    review = _validate_review(raw)
+                except StateError:
+                    if output_attempt == 1:
+                        raise
+                    prompt += (
+                        "\n\nYour previous review contradicted the output contract. "
+                        "Return verdict pass with findings [] when there are no violations; "
+                        "otherwise return verdict fail with only actionable violations in "
+                        "findings."
+                    )
+                else:
+                    break
+            assert review is not None
+        write_json_once(root / "decision.public.json", review)
+        if review["verdict"] == "pass":
+            return review
+        if round_number == rounds:
+            raise ResearchMiss("policy_review_failed", review["summary"])
+        if progress is not None:
+            progress({"event": "candidate_repair", "attempt": round_number, "attempts": config.repair_attempts})
+        repair = _run_agent(
+            task,
+            worktree=worktree,
+            scratch=root / "repair",
+            schema_value=repair_schema(),
+            prompt=_repair_prompt(task, request=request, review=review),
+            output_name="repair.public.json",
+            command_builder=repair_command_builder,
+            writable=True,
+            stop_path=stop_path,
+        )
+        try:
+            Draft202012Validator(repair_schema()).validate(repair)
+        except JsonSchemaError as error:
+            raise StateError("candidate repair did not write valid repair JSON") from error
+    raise AssertionError("candidate review loop did not terminate")

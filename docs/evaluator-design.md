@@ -21,6 +21,20 @@ Passing these checks means the approved protocol was followed. It does not mean
 the uncertainty method has nominal coverage or that uncontrolled variation is
 absent.
 
+## Optional candidate methodology review
+
+A task may impose a candidate-review contract before an experiment or official
+seed reservation exists. Approval-locked deterministic commands catch obvious
+capability or interface violations, then a fresh read-only execution session
+reviews the uncommitted candidate diff. One configured fresh repair may address
+cited findings before checks and semantic review repeat. A repeated violation
+is recorded as a research miss and never reaches the evaluator.
+
+This gate is deliberately outside the evaluator's mathematics. It helps govern
+cooperative research agents and provides auditable admission reasoning, but
+static and model review do not make arbitrary executable policy code safe
+against an adversarial submitter.
+
 ## What the evaluator author must justify
 
 The manifest must describe the real independent unit. Rows are not independent
@@ -57,7 +71,10 @@ suspect test can investigate one declared warning sign. It is not a general
 multiple-testing correction.
 
 After a valid verdict, a separate read-only model session interprets declared
-telemetry against the precommitted mechanism and falsifiers. Its reflection is
+telemetry against the selected environment-derived behavior, precommitted
+policy mechanism, viability argument, prior-evidence review, and falsifiers.
+It also records whether the implementation expressed the behavior and any
+policy-specific findings that later executors should consider. Its reflection is
 advisory: it can recommend retention, refinement, later review, implementation
 audit, or abandonment, but cannot change the verdict or promotion. If that
 required session fails, valid evidence is preserved and later research stops

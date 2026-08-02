@@ -291,8 +291,8 @@ def inspect_experiment(
             "path": str(path.relative_to(directory)),
             "visibility": (
                 "public"
-                if path.name
-                in {
+                if path.name.endswith(".public.json")
+                or path.name in {
                     "request.public.json",
                     "result.public.json",
                     "reflection.public.json",

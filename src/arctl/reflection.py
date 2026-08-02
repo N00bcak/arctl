@@ -38,6 +38,16 @@ def reflection_schema() -> dict[str, Any]:
         {
             "schema_version": {"type": "integer", "const": 1},
             "summary": text,
+            "strategy_behavior": strict(
+                {
+                    "id": text,
+                    "realization": {
+                        "type": "string",
+                        "enum": ["expressed", "not_expressed", "unclear"],
+                    },
+                    "evidence": {"type": "array", "items": text},
+                }
+            ),
             "metric_assessments": {
                 "type": "array",
                 "items": strict(
@@ -76,6 +86,16 @@ def reflection_schema() -> dict[str, Any]:
                     "concerns": {"type": "array", "items": text},
                 }
             ),
+            "policy_observations": {
+                "type": "array",
+                "items": strict(
+                    {
+                        "finding": text,
+                        "evidence": text,
+                        "implication": text,
+                    }
+                ),
+            },
             "next_action": strict(
                 {
                     "kind": {
@@ -120,7 +140,11 @@ def _basis(
         "known_variation": manifest.known_variation,
         "variation_mitigations": list(manifest.variation_mitigations),
         "claim": request["claim"],
+        "strategy_behavior_id": request["strategy_behavior_id"],
         "mechanism": request["mechanism"],
+        "viability": request["viability"],
+        "evidence_review": request["evidence_review"],
+        "lineage": request["lineage"],
         "expected_effect": request["expected_effect"],
         "expected_telemetry": request["expected_telemetry"],
         "falsifiers": request["falsifiers"],
@@ -189,6 +213,11 @@ def validate_reflection(
         names = [item["metric"] for item in value["assessment"]["metric_assessments"]]
         if len(names) != len(set(names)) or set(names) != set(metric_names):
             raise StateError("reflection must assess every telemetry metric exactly once")
+        if (
+            value["assessment"]["strategy_behavior"]["id"]
+            != value["basis"]["strategy_behavior_id"]
+        ):
+            raise StateError("reflection strategy behavior does not match the request")
     else:
         raise StateError("saved reflection status is invalid")
     return dict(value)
@@ -250,7 +279,10 @@ def run_reflection(
         "Inspect the candidate and champion implementation when useful. Separate direct "
         "observations from inference, do not invent causes that the aggregate evidence "
         "cannot identify, and treat implementation incompetence as a hypothesis requiring "
-        "specific evidence. Assess every declared telemetry metric exactly once. Return "
+        "specific evidence. Assess whether the candidate actually expressed the selected "
+        "strategic behavior, and record policy-specific observations about the proposed "
+        "mechanism or implementation for later executors. Assess every declared telemetry "
+        "metric exactly once. Return "
         "only the required reflection JSON. The candidate is the current working "
         f"directory; the champion is readable at {champion_worktree}.\n\n"
         + json.dumps(
@@ -297,6 +329,8 @@ def run_reflection(
         names = [item["metric"] for item in assessment["metric_assessments"]]
         if len(names) != len(set(names)) or set(names) != set(manifest.public_telemetry):
             raise StateError("reflection must assess every telemetry metric exactly once")
+        if assessment["strategy_behavior"]["id"] != request["strategy_behavior_id"]:
+            raise StateError("reflection strategy behavior does not match the request")
     except StoppedError:
         raise
     except (OSError, json.JSONDecodeError, JsonSchemaError, ProcessError, StateError) as error:

@@ -12,9 +12,8 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as JsonSchemaError
 
-from .errors import ProcessError, ResearchMiss, StateError, StoppedError
+from .errors import ProcessError, ResearchMiss, StateError, StoppedError, ValidationError
 from .manifest import EvaluatorManifest
-from .models import ResearchRequest
 from .process import run_or_load_once
 from .registry import LocatedTask
 from .sandbox import command_runtime_read_paths, research_command, sanitized_environment
@@ -34,23 +33,52 @@ def _strict_schema(properties: Mapping[str, Any]) -> dict[str, Any]:
 
 def strategy_schema() -> dict[str, Any]:
     text = {"type": "string", "minLength": 1}
-    direction = _strict_schema(
+    evidence = _strict_schema(
+        {
+            "source_id": text,
+            "location": text,
+            "finding": text,
+        }
+    )
+    observation = _strict_schema(
         {
             "id": text,
-            "title": text,
+            "claim": text,
+            "status": {"type": "string", "enum": ["observed", "inferred"]},
+            "evidence": {"type": "array", "minItems": 1, "items": evidence},
+        }
+    )
+    uncertainty = _strict_schema(
+        {
+            "id": text,
+            "question": text,
+            "why_it_matters": text,
+            "resolution": text,
+        }
+    )
+    behavior = _strict_schema(
+        {
+            "id": text,
+            "behavior": text,
+            "derived_from": {"type": "array", "minItems": 1, "items": text},
             "rationale": text,
-            "mechanism": text,
-            "observable_signal": text,
-            "risks": {"type": "array", "items": text},
+            "tradeoffs": {"type": "array", "items": text},
         }
     )
     schema = _strict_schema(
         {
-            "schema_version": {"type": "integer", "const": 1},
-            "environment_signals": {"type": "array", "minItems": 1, "items": text},
-            "success_profile": {"type": "array", "minItems": 1, "items": text},
-            "uncertainties": {"type": "array", "items": text},
-            "directions": {"type": "array", "minItems": 1, "items": direction},
+            "schema_version": {"type": "integer", "const": 2},
+            "environment_observations": {
+                "type": "array",
+                "minItems": 1,
+                "items": observation,
+            },
+            "environment_uncertainties": {"type": "array", "items": uncertainty},
+            "successful_policy_behaviors": {
+                "type": "array",
+                "minItems": 1,
+                "items": behavior,
+            },
         }
     )
     Draft202012Validator.check_schema(schema)
@@ -65,18 +93,36 @@ def research_schema(manifest: EvaluatorManifest) -> dict[str, Any]:
     }
     return _strict_schema(
         {
-            "schema_version": {"type": "integer", "const": 1},
+            "schema_version": {"type": "integer", "const": 2},
+            "strategy_behavior_id": text,
             "claim": text,
             "mechanism": text,
+            "viability": text,
+            "evidence_review": _strict_schema(
+                {
+                    "summary": text,
+                    "citations": {
+                        "type": "array",
+                        "items": _strict_schema(
+                            {
+                                "entry_id": text,
+                                "bearing": {
+                                    "type": "string",
+                                    "enum": ["supports", "contradicts", "unresolved"],
+                                },
+                                "finding": text,
+                            }
+                        ),
+                    },
+                }
+            ),
             "expected_effect": text,
             "expected_telemetry": _strict_schema(telemetry),
             "falsifiers": {"type": "array", "minItems": 1, "items": text},
-            "direction": _strict_schema(
+            "lineage": _strict_schema(
                 {
                     "kind": {"type": "string", "enum": ["new", "refinement"]},
                     "prior_entry_id": {"type": ["string", "null"]},
-                    "strategy_direction_id": text,
-                    "rationale": text,
                 }
             ),
         }
@@ -179,9 +225,71 @@ def _latest_strategy(task_directory: Path) -> tuple[int, dict[str, Any]] | None:
 
 def _runtime_paths(task: LocatedTask) -> tuple[Path, ...]:
     paths: list[Path] = []
-    for command in (*task.config.public_checks, task.config.public_probe):
+    for command in task.config.environment_probes:
         paths.extend(command_runtime_read_paths(command))
     return tuple(dict.fromkeys(paths))
+
+
+def _environment_packet(task: LocatedTask) -> list[dict[str, Any]]:
+    packet = []
+    for source in task.config.environment_sources:
+        item: dict[str, Any] = {
+            "id": source.identifier,
+            "kind": source.kind,
+            "description": source.description,
+        }
+        if source.path is not None:
+            item["path"] = str(source.path)
+            item["include"] = list(source.include)
+        else:
+            item["command"] = list(source.command)
+            item["backed_by"] = list(source.backed_by)
+        packet.append(item)
+    return packet
+
+
+def validate_strategy_links(value: Mapping[str, Any], *, source_ids: set[str]) -> None:
+    observations = value["environment_observations"]
+    observation_ids = [item["id"] for item in observations]
+    if len(observation_ids) != len(set(observation_ids)):
+        raise StateError("strategy environment observation ids must be unique")
+    for observation in observations:
+        for evidence in observation["evidence"]:
+            if evidence["source_id"] not in source_ids:
+                raise StateError("strategy cites an unknown environment source")
+    behavior_ids = [item["id"] for item in value["successful_policy_behaviors"]]
+    if len(behavior_ids) != len(set(behavior_ids)):
+        raise StateError("strategy behavior ids must be unique")
+    known_observations = set(observation_ids)
+    for behavior in value["successful_policy_behaviors"]:
+        if not set(behavior["derived_from"]) <= known_observations:
+            raise StateError("strategy behavior cites an unknown observation")
+    uncertainty_ids = [item["id"] for item in value["environment_uncertainties"]]
+    if len(uncertainty_ids) != len(set(uncertainty_ids)):
+        raise StateError("strategy uncertainty ids must be unique")
+
+
+def validate_research_links(
+    request: Mapping[str, Any],
+    *,
+    strategy: Mapping[str, Any],
+    ledger: Sequence[Mapping[str, Any]],
+) -> None:
+    behaviors = {item["id"] for item in strategy["successful_policy_behaviors"]}
+    if request["strategy_behavior_id"] not in behaviors:
+        raise ValidationError("research request names an unknown strategy behavior")
+    identifiers = {entry["entry_id"] for entry in ledger}
+    lineage = request["lineage"]
+    if (
+        lineage["kind"] == "refinement"
+        and lineage["prior_entry_id"] not in identifiers
+    ):
+        raise ValidationError("research refinement names an unknown ledger entry")
+    if any(
+        citation["entry_id"] not in identifiers
+        for citation in request["evidence_review"]["citations"]
+    ):
+        raise ValidationError("research evidence review names an unknown ledger entry")
 
 
 def ensure_strategy(
@@ -208,23 +316,22 @@ def ensure_strategy(
     scratch.mkdir(parents=True, exist_ok=True)
     schema = scratch / "strategy.schema.json"
     write_json_once(schema, strategy_schema())
-    ledger = task.directory / "exploration" / "ledger.public.jsonl"
     prompt = (
-        "Analyze this public research environment before any candidate is selected. "
-        "Do not implement or commit a candidate. Use public checks or the public probe "
-        "only when useful. Identify the qualities of a successful policy, the signals "
-        "the environment exposes, uncertainties, and several distinct strategic "
-        "directions. Search the exploration ledger before recommending repeated work. "
-        "Return only the required strategy JSON.\n\n"
+        "Build an environment-grounded strategy before any candidate is selected. "
+        "Analyze only the declared environment implementation, interface, documentation, "
+        "and probes. Treat the objective as a goal boundary, not as evidence about how "
+        "the environment works. Separate observed facts from inference, cite every "
+        "environment observation to a declared source and location, and derive high-level "
+        "behaviors a successful policy should exhibit from those observations. Do not "
+        "inspect or diagnose the current policy, propose algorithms or code changes, name "
+        "weights or telemetry targets, restate evaluator criteria as behaviors, implement "
+        "anything, or commit. Return only the required strategy JSON.\n\n"
         + json.dumps(
             {
-                "objective": task.config.objective,
-                "public_checks": [list(command) for command in task.config.public_checks],
-                "public_probe": list(task.config.public_probe),
-                "statistic": manifest.public_statistic,
-                "subject_interface": manifest.subject_interface,
+                "evaluation_boundary": {"objective": task.config.objective},
+                "environment_sources": _environment_packet(task),
                 "prior_strategy": latest[1] if latest else None,
-                "ledger_path": str(ledger) if ledger.is_file() else None,
+                "refresh_reason": "candidate search misses" if refresh else "initial analysis",
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -237,9 +344,18 @@ def ensure_strategy(
             output_schema=schema,
             prompt=prompt,
             output_name="strategy.public.json",
-            read_paths=(*_runtime_paths(task), *((ledger,) if ledger.is_file() else ())),
+            read_paths=(
+                *_runtime_paths(task),
+                *(
+                    source.path
+                    for source in task.config.environment_sources
+                    if source.path is not None
+                ),
+            ),
             model=task.config.strategy_model,
             reasoning_effort=task.config.strategy_reasoning_effort,
+            writable_worktree=False,
+            read_worktree=False,
         )
         environment = sanitized_environment(
             codex_home=Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))),
@@ -272,7 +388,11 @@ def ensure_strategy(
     try:
         value = json.loads(output.read_text(encoding="utf-8"))
         Draft202012Validator(strategy_schema()).validate(value)
-    except (OSError, json.JSONDecodeError, JsonSchemaError) as error:
+        validate_strategy_links(
+            value,
+            source_ids={source.identifier for source in task.config.environment_sources},
+        )
+    except (OSError, json.JSONDecodeError, JsonSchemaError, StateError) as error:
         failure = StateError("fresh strategy session did not write valid strategy JSON")
         write_json_once(
             root / "strategy.failure.json",
@@ -290,7 +410,7 @@ def ensure_strategy(
             "strategy_revision": revision,
             "model": task.config.strategy_model,
             "reasoning_effort": task.config.strategy_reasoning_effort,
-            "directions": value["directions"],
+            "successful_policy_behaviors": value["successful_policy_behaviors"],
         },
     )
     return revision, value
@@ -322,7 +442,11 @@ def record_miss(
             "champion": champion,
             "claim": request.get("claim") if request else None,
             "mechanism": request.get("mechanism") if request else None,
-            "direction": request.get("direction") if request else None,
+            "strategy_behavior_id": (
+                request.get("strategy_behavior_id") if request else None
+            ),
+            "evidence_review": request.get("evidence_review") if request else None,
+            "lineage": request.get("lineage") if request else None,
             "changed_paths": list(changed_paths),
             "rejection_code": miss.code,
             "message": str(miss),

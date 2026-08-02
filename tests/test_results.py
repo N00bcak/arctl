@@ -112,6 +112,32 @@ class ExperimentOutcomeTests(unittest.TestCase):
                         expected_statistic="expected score",
                     )
 
+    def test_precomparison_rejection_requires_no_declared_telemetry(self) -> None:
+        metric = TelemetryMetric(
+            "Mean errors", "errors per case", "paired", "safety", "number", "lower"
+        )
+        public = {
+            "experiment_id": 7,
+            "hypothesis": "Improve routing.",
+            "champion_before": "a" * 40,
+            "candidate": "b" * 40,
+            "champion_after": "a" * 40,
+            "decision": "REJECT",
+            "evaluation": {"statistic": None, "comparisons": []},
+            "constraints": {"tests": "FAIL"},
+            "telemetry": {},
+        }
+
+        self.assertEqual(
+            validate_public_result(
+                public,
+                allowed_telemetry={"errors": metric},
+                allowed_suspect_reasons=(),
+                expected_statistic="expected score",
+            ),
+            public,
+        )
+
     def publish(self, outcome):
         return build_public_result(
             experiment_id=7,

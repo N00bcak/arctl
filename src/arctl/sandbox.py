@@ -138,6 +138,7 @@ def research_command(
     model: str | None = None,
     reasoning_effort: str | None = None,
     writable_worktree: bool = True,
+    read_worktree: bool = True,
 ) -> tuple[str, ...]:
     profile = "arctl-research"
     overrides: tuple[str, ...] = ()
@@ -172,7 +173,7 @@ def research_command(
             read_paths=(
                 (worktree / ".git", *read_paths)
                 if writable_worktree
-                else (worktree, *read_paths)
+                else ((worktree, *read_paths) if read_worktree else tuple(read_paths))
             ),
             write_paths=((worktree, scratch) if writable_worktree else (scratch,)),
             codex=codex,
