@@ -312,7 +312,9 @@ commands, and environments are never linked into it.
 
 Humans normally use `run`, `status`, `stop`, `report`, `history`, and
 `inspect`. AI operators use the same commands with `--json`; research agents
-never receive operator authority. See the exact [command
+never receive operator authority. Human `status` and `report` output uses
+bounded-width tables; champion displays identify the promoting experiment and
+hypothesis, while machine JSON retains exact evidence values. See the exact [command
 reference](cli-reference.md), which is mechanically mirrored from `arctl -h`
 and every `arctl COMMAND -h` screen.
 

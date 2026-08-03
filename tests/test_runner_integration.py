@@ -110,6 +110,15 @@ class RunnerIntegrationTests(unittest.TestCase):
     def unconfined_comparison(command, _cwd, _reads, _writes, _profile):
         return command
 
+    def test_status_attributes_the_approved_baseline(self) -> None:
+        status = task_status(self.task)
+
+        self.assertEqual(status["champion"], self.original_champion)
+        self.assertEqual(
+            status["champion_provenance"],
+            {"kind": "initial", "experiment_id": None, "hypothesis": None},
+        )
+
     @staticmethod
     def research_command(worktree: Path, scratch: Path, _schema: Path, _prompt: str):
         script = """\
@@ -184,6 +193,20 @@ scratch = Path(sys.argv[1])
             candidate,
         )
         self.assertNotEqual(candidate, self.original_champion)
+        status = task_status(self.task)
+        self.assertEqual(
+            status["champion_provenance"],
+            {
+                "kind": "experiment",
+                "experiment_id": 1,
+                "hypothesis": outcome.results[0]["hypothesis"],
+            },
+        )
+        inspected = inspect_experiment(self.task, 1)
+        self.assertEqual(
+            inspected["champion_after_provenance"],
+            status["champion_provenance"],
+        )
         experiment = self.task_directory / "experiments" / "000001"
         self.assertTrue((experiment / "published").is_file())
         self.assertTrue(

@@ -185,8 +185,126 @@ class CliTests(unittest.TestCase):
         with contextlib.redirect_stdout(output):
             _emit(payload, as_json=False)
 
-        self.assertIn("Task demo · LIMIT_REACHED", output.getvalue())
-        self.assertIn("Experiment limit: 10/10 reached.", output.getvalue())
+        self.assertIn("│ State            │ LIMIT_REACHED", output.getvalue())
+        self.assertIn("│ Experiment limit │ 10/10 · reached", output.getvalue())
+
+    def test_status_table_names_promoting_experiment_and_stays_compact(self) -> None:
+        payload = {
+            "schema_version": 1,
+            "success": True,
+            "task_id": "demo",
+            "state": "READY",
+            "message": "Ready.",
+            "log_path": "/tmp/demo",
+            "status": {
+                "state": "READY",
+                "trial_count": 64,
+                "champion": "b" * 40,
+                "champion_provenance": {
+                    "kind": "experiment",
+                    "experiment_id": 2,
+                    "hypothesis": "Use a structural lookahead policy.\nIgnore noise.",
+                },
+                "last_result": None,
+                "provisional": False,
+                "stop_requested": False,
+            },
+        }
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _emit(payload, as_json=False)
+
+        rendered = output.getvalue()
+        self.assertIn("bbbbbbbbbbbb (Expt #2)", rendered)
+        self.assertIn("Use a structural lookahead policy. Ignore noise.", rendered)
+        self.assertLessEqual(max(map(len, rendered.splitlines())), 140)
+
+    def test_status_table_explains_automatic_trial_count(self) -> None:
+        payload = {
+            "schema_version": 1,
+            "success": True,
+            "task_id": "demo",
+            "state": "READY",
+            "message": "Ready.",
+            "log_path": "/tmp/demo",
+            "status": {
+                "state": "READY",
+                "calibration": "complete",
+                "trial_count": 64,
+                "champion": None,
+                "last_result": None,
+                "provisional": False,
+                "stop_requested": False,
+            },
+        }
+        calibrated = io.StringIO()
+        with contextlib.redirect_stdout(calibrated):
+            _emit(payload, as_json=False)
+        self.assertIn("64 paired trials (autocalibrated)", calibrated.getvalue())
+
+        payload["state"] = "CALIBRATION_REQUIRED"
+        payload["status"]["state"] = "CALIBRATION_REQUIRED"
+        payload["status"]["calibration"] = "not_started"
+        payload["status"]["trial_count"] = None
+        pending = io.StringIO()
+        with contextlib.redirect_stdout(pending):
+            _emit(payload, as_json=False)
+        self.assertIn("Unfrozen (to be autocalibrated)", pending.getvalue())
+
+    def test_report_table_prints_dossier_root_once_and_preserves_exact_json(self) -> None:
+        root = "/tmp/" + "long-root/" * 10 + "reports/experiments"
+        result = {
+            "experiment_id": 12,
+            "decision": "ARCHIVE",
+            "hypothesis": "A broad algorithmic change " + "improves play " * 12,
+            "evaluation": {
+                "comparisons": [
+                    {
+                        "effect_estimate": 0.03123456789,
+                        "one_sided_lower_bound": -6.391185814799755,
+                    }
+                ]
+            },
+            "dossier_path": root + "/000012/README.md",
+        }
+        payload = {
+            "schema_version": 1,
+            "success": True,
+            "task_id": "demo",
+            "state": "REPORT",
+            "message": "Report.",
+            "report": {
+                "completed_experiments": 1,
+                "results": [result],
+                "dossier_root": root,
+                "calibration_summary": None,
+            },
+        }
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _emit(payload, as_json=False)
+
+        rendered = output.getvalue()
+        self.assertEqual(rendered.count(root), 1)
+        self.assertIn("0.031235", rendered)
+        self.assertIn("LB -6.3912", rendered)
+        self.assertIn("000012", rendered)
+        self.assertLessEqual(max(map(len, rendered.splitlines())), 140)
+        self.assertEqual(
+            payload["report"]["results"][0]["evaluation"]["comparisons"][0][
+                "effect_estimate"
+            ],
+            0.03123456789,
+        )
+        machine = io.StringIO()
+        with contextlib.redirect_stdout(machine):
+            _emit(payload, as_json=True)
+        self.assertEqual(
+            json.loads(machine.getvalue())["report"]["results"][0]["evaluation"][
+                "comparisons"
+            ][0]["effect_estimate"],
+            0.03123456789,
+        )
 
     def test_run_retries_one_transient_failure_without_expanding_budget(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

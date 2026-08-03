@@ -14,10 +14,10 @@ arctl doctor
 
 Normal operation uses `run`, `status`, `stop`, `report`, and `inspect`.
 Interactive `run` shows the experiment FSM, comparison substages, and live
-stage timing. Every published
-experiment receives a public-only Markdown dossier under the task’s
-`reports/experiments/` directory; `report` and `inspect` print its path.
-Use `--json` for AI orchestration.
+stage timing. `status` names the experiment that promoted the current champion;
+`report` presents compact evidence and dossier IDs under one printed dossier
+root. Every published experiment receives a public-only Markdown dossier under
+the task’s `reports/experiments/` directory. Use `--json` for AI orchestration.
 
 Task-v3 approvals content-lock the public environment implementation,
 interface, documentation, and policy-free probes. A strategy session can read

@@ -47,6 +47,40 @@ def _public_result(task: LocatedTask, directory: Path) -> dict[str, Any] | None:
         raise StateError(f"public result is invalid: {path}") from error
 
 
+def _champion_provenance(
+    task: LocatedTask,
+    commit: str | None,
+) -> dict[str, Any] | None:
+    if commit is None:
+        return None
+    # A commit may be promoted again after a later rollback. Attribute the current
+    # champion to the most recent promotion, not merely its first appearance.
+    for directory in reversed(_experiment_directories(task)):
+        if not (directory / "published").is_file():
+            continue
+        result = _public_result(task, directory)
+        if (
+            result is not None
+            and result["decision"] == "ACCEPT"
+            and result["candidate"] == commit
+            and result["champion_after"] == commit
+        ):
+            return {
+                "kind": "experiment",
+                "experiment_id": result["experiment_id"],
+                "hypothesis": result["hypothesis"],
+            }
+    try:
+        approval = json.loads(
+            (task.directory / "approval.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        approval = None
+    if isinstance(approval, dict) and approval.get("champion") == commit:
+        return {"kind": "initial", "experiment_id": None, "hypothesis": None}
+    return {"kind": "unknown", "experiment_id": None, "hypothesis": None}
+
+
 def task_status(task: LocatedTask) -> dict[str, Any]:
     approved = (task.directory / "approval.json").is_file()
     trial_count: int | None = None
@@ -175,6 +209,7 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
         "calibration_summary": calibration_summary,
         "experiment_id": latest.experiment_id if latest is not None else None,
         "champion": champion,
+        "champion_provenance": _champion_provenance(task, champion),
         "provisional": latest is not None and latest.state in (
             "PROVISIONAL",
             "SUSPECT_RESERVED",
@@ -249,6 +284,7 @@ def task_report(task: LocatedTask) -> dict[str, Any]:
         "task_id": task.config.task_id,
         "completed_experiments": len(results),
         "results": results,
+        "dossier_root": str(task.directory / "reports" / "experiments"),
         "calibration_summary": calibration_summary,
         "limitations": (
             "Uncertainty is calculated by the approved evaluator for each candidate "
@@ -316,6 +352,10 @@ def inspect_experiment(
     return {
         "experiment": record.to_json(),
         "result": result,
+        "champion_after_provenance": _champion_provenance(
+            task,
+            result["champion_after"] if result is not None else None,
+        ),
         "dossier_path": str(dossier) if dossier is not None else None,
         "artifacts": artifacts,
         "calibration_summary": (

@@ -8,6 +8,7 @@ import math
 import os
 import shlex
 import sys
+import textwrap
 import threading
 import time
 from pathlib import Path
@@ -115,6 +116,140 @@ def _calibration_warning(summary: dict[str, Any] | None) -> str | None:
     )
 
 
+def _short_number(value: Any) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "—"
+    return f"{value:.5g}"
+
+
+def _champion_display(commit: Any, provenance: Any) -> str:
+    from .dossier import safe_terminal_text
+
+    if not isinstance(commit, str) or not commit:
+        return "None"
+    first = commit[:12]
+    if isinstance(provenance, dict) and provenance.get("kind") == "experiment":
+        first += f" (Expt #{provenance.get('experiment_id')})"
+        hypothesis = provenance.get("hypothesis")
+        if isinstance(hypothesis, str) and hypothesis:
+            return first + "\n" + safe_terminal_text(hypothesis, limit=180)
+        return first
+    if isinstance(provenance, dict) and provenance.get("kind") == "initial":
+        return first + " (Initial champion)"
+    return first + " (Origin unknown)"
+
+
+def _status_table(payload: dict[str, Any]) -> str:
+    from tabulate import tabulate
+
+    from .dossier import safe_terminal_text
+
+    status = payload["status"]
+    count = status.get("trial_count")
+    calibration = status.get("calibration")
+    if count is not None:
+        qualifier = {
+            "complete": " (autocalibrated)",
+            "fixed": " (fixed)",
+        }.get(calibration, "")
+        trials = f"{count} paired trials{qualifier}"
+    elif calibration in ("not_started", None):
+        trials = "Unfrozen (to be autocalibrated)"
+    else:
+        trials = "Unfrozen (autocalibration failed)"
+    rows: list[tuple[str, str]] = [
+        ("Task", safe_terminal_text(payload["task_id"])),
+        ("State", safe_terminal_text(status["state"])),
+        ("Trials / Expt", trials),
+        (
+            "Champion",
+            _champion_display(
+                status.get("champion"), status.get("champion_provenance")
+            ),
+        ),
+    ]
+    if status.get("strategy_revision"):
+        rows.append(("Strategy", f"Revision {status['strategy_revision']}"))
+    if status.get("search_id") is not None:
+        rows.append(
+            (
+                "Candidate search",
+                f"Search {status['search_id']} · attempt "
+                f"{status.get('search_attempt') or 0}/6",
+            )
+        )
+    if status.get("experiment_id") is not None:
+        rows.append(("Latest experiment", f"Expt #{status['experiment_id']}"))
+    latest = status.get("last_result")
+    if isinstance(latest, dict):
+        comparisons = latest.get("evaluation", {}).get("comparisons", [])
+        final = comparisons[-1] if comparisons else None
+        evidence = (
+            f" · effect {_short_number(final.get('effect_estimate'))}"
+            f" · lower {_short_number(final.get('one_sided_lower_bound'))}"
+            if isinstance(final, dict)
+            else ""
+        )
+        rows.append(
+            (
+                "Latest result",
+                f"Expt #{latest['experiment_id']} · {latest['decision']}{evidence}\n"
+                + safe_terminal_text(latest["hypothesis"], limit=180),
+            )
+        )
+    completed = status.get("completed_experiments", 0)
+    maximum = status.get("max_experiments")
+    if maximum is not None:
+        suffix = " · reached" if status["state"] == "LIMIT_REACHED" else ""
+        rows.append(("Experiment limit", f"{completed}/{maximum}{suffix}"))
+    if status.get("provisional"):
+        rows.append(("Suspect test", "Pending for the provisional candidate"))
+    if status.get("stop_requested"):
+        rows.append(("Stop", "Safe stop requested"))
+    log_path = status.get("log_path") or payload.get("log_path") or "—"
+    rows.append(("Logs", safe_terminal_text(log_path)))
+    return tabulate(
+        rows,
+        headers=("Status", "Value"),
+        tablefmt="simple_grid",
+        disable_numparse=True,
+        maxcolwidths=(18, 115),
+    )
+
+
+def _report_table(report: dict[str, Any]) -> str:
+    from tabulate import tabulate
+
+    from .dossier import safe_terminal_text
+
+    rows = []
+    for result in report["results"]:
+        comparisons = result.get("evaluation", {}).get("comparisons", [])
+        final = comparisons[-1] if comparisons else None
+        evidence = (
+            f"{_short_number(final.get('effect_estimate'))}\n"
+            f"LB {_short_number(final.get('one_sided_lower_bound'))}"
+            if isinstance(final, dict)
+            else "—"
+        )
+        rows.append(
+            (
+                f"#{result['experiment_id']}",
+                result["decision"],
+                evidence,
+                safe_terminal_text(result["hypothesis"]),
+                f"{result['experiment_id']:06d}",
+            )
+        )
+    return tabulate(
+        rows,
+        headers=("Expt", "Decision", "Evidence", "Hypothesis", "Dossier"),
+        tablefmt="simple_grid",
+        disable_numparse=True,
+        maxcolwidths=(4, 8, 15, 89, 8),
+    )
+
+
 def _approval_table(payload: dict[str, Any]) -> str:
     from tabulate import tabulate
 
@@ -193,15 +328,29 @@ def _emit_human(
             )
         if payload["log_path"] is not None:
             print(f"Details: {payload['log_path']}", file=sys.stderr)
+    elif "status" in payload:
+        status = payload["status"]
+        print(_status_table(payload))
+        warning = _calibration_warning(status.get("calibration_summary"))
+        if warning is not None:
+            print("\n" + warning)
     elif state == "REPORT":
         report = payload["report"]
         print(
             f"Task {payload['task_id']} · "
             f"{report['completed_experiments']} completed experiment(s)"
         )
-        for result in report["results"]:
-            print(_result_line(result))
-            print(f"     Dossier: {result['dossier_path']}")
+        print(
+            textwrap.fill(
+                "Dossier root: " + report["dossier_root"],
+                width=140,
+                subsequent_indent="  ",
+            )
+        )
+        if report["results"]:
+            print(_report_table(report))
+        else:
+            print("No completed experiments.")
         if report["results"]:
             print(
                 "\nNote: uncertainty is evaluator-owned; adaptive search has no "
@@ -226,7 +375,13 @@ def _emit_human(
                     f"{comparison['one_sided_lower_bound']}"
                 )
             print(f"Candidate: {result['candidate'][:12]}")
-            print(f"Champion after: {result['champion_after'][:12]}")
+            print(
+                "Champion after: "
+                + _champion_display(
+                    result["champion_after"],
+                    payload.get("champion_after_provenance"),
+                ).replace("\n", "\n  ")
+            )
             print(f"Dossier: {payload['dossier_path']}")
         if show_artifacts:
             print("\nSafe artifact inventory:")
@@ -273,32 +428,6 @@ def _emit_human(
             "Note: approval trusts the evaluator's mathematics, provides no "
             "search-wide false-positive guarantee, and requires human confirmation."
         )
-    elif state in ("READY", "LIMIT_REACHED") and "status" in payload:
-        status = payload["status"]
-        print(
-            f"Task {payload['task_id']} · {status['state']} · "
-            f"{status['trial_count'] or 'unfrozen'} trial(s)"
-        )
-        print(f"Champion: {(status['champion'] or 'none')[:12]}")
-        if status.get("strategy_revision"):
-            print(f"Strategy: revision {status['strategy_revision']}")
-        if status.get("search_id") is not None:
-            attempt = status.get("search_attempt") or 0
-            print(f"Candidate search: {status['search_id']} · {attempt}/6 attempt(s)")
-        if status["last_result"] is not None:
-            print("Latest: " + _result_line(status["last_result"]).lstrip())
-        if status["provisional"]:
-            print("A candidate is provisional; its suspect test is pending.")
-        if status["stop_requested"]:
-            print("A safe stop has been requested.")
-        if state == "LIMIT_REACHED":
-            print(
-                "Experiment limit: "
-                f"{status['completed_experiments']}/{status['max_experiments']} reached."
-            )
-        warning = _calibration_warning(status.get("calibration_summary"))
-        if warning is not None:
-            print(warning)
     else:
         print(payload["message"])
 
@@ -866,6 +995,9 @@ def _inspect(
     )
     payload["experiment_id"] = selected
     payload["result"] = inspection["result"]
+    payload["champion_after_provenance"] = inspection[
+        "champion_after_provenance"
+    ]
     payload["dossier_path"] = inspection["dossier_path"]
     return payload
 
