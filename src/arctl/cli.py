@@ -1078,33 +1078,256 @@ def _history(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="arctl")
-    parser.add_argument("--debug", action="store_true")
+    formatter = lambda prog: argparse.RawDescriptionHelpFormatter(  # noqa: E731
+        prog, max_help_position=30, width=100
+    )
+    parser = argparse.ArgumentParser(
+        prog="arctl",
+        formatter_class=formatter,
+        description=(
+            "Run faithful, statistically cautious AutoResearch loops against local Git repositories.\n"
+            "\n"
+            "arctl separates untrusted research from an approval-locked evaluator, preserves every\n"
+            "official comparison, and promotes candidates only through the evaluator's fixed rule."
+        ),
+        epilog=(
+            "Typical workflow:\n"
+            "  arctl doctor\n"
+            "  arctl init --repo /path/to/subject\n"
+            "  # edit the generated task.yaml\n"
+            "  arctl approve TASK\n"
+            "  arctl approve TASK --confirm TOKEN\n"
+            "  arctl run TASK --max-experiments 3\n"
+            "  arctl status TASK\n"
+            "\n"
+            "Complete command forms:\n"
+            "  arctl doctor [--json]\n"
+            "  arctl init --repo PATH [--task-id TASK] [--json]\n"
+            "  arctl approve [TASK] [--confirm TOKEN] [--json]\n"
+            "  arctl run [TASK] [--max-experiments N] [--retries N]\n"
+            "                    [--retry-delay SECONDS] [--json]\n"
+            "  arctl status [TASK] [--json]\n"
+            "  arctl stop [TASK] [--json]\n"
+            "  arctl report [TASK] [--json]\n"
+            "  arctl history [TASK] [--query TEXT] [--path GLOB]\n"
+            "                        [--decision VALUE] [--json]\n"
+            "  arctl inspect [TASK] [EXPERIMENT] [--artifacts] [--json]\n"
+            "\n"
+            "Task IDs may be omitted when the current directory identifies exactly one task.\n"
+            "Use --json on any command for the stable AI-orchestration response. Use --debug to\n"
+            "show controller tracebacks. Run `arctl COMMAND -h` for command-specific details."
+        ),
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="show controller tracebacks instead of concise failure reports",
+    )
     parser.add_argument("--data", type=Path, help=argparse.SUPPRESS)
-    subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ("doctor", "approve", "run", "status", "stop", "report", "inspect", "history"):
-        command = subparsers.add_parser(name)
-        command.add_argument("--json", action="store_true")
-        if name not in ("doctor",):
-            command.add_argument("task_id", nargs="?")
-        if name == "run":
-            command.add_argument("--max-experiments", type=int)
-            command.add_argument("--retries", type=int, default=0)
-            command.add_argument("--retry-delay", type=float, default=60.0)
-        if name == "approve":
-            command.add_argument("--confirm")
-        if name == "inspect":
-            command.add_argument("experiment_id", nargs="?", type=int)
-            command.add_argument("--artifacts", action="store_true")
-        if name == "history":
-            command.add_argument("--query")
-            command.add_argument("--path")
-            command.add_argument("--decision")
-    init = subparsers.add_parser("init")
-    init.add_argument("--json", action="store_true")
-    init.add_argument("--repo", type=Path, required=True)
-    init.add_argument("--task-id")
+    subparsers = parser.add_subparsers(
+        dest="command", required=True, title="commands", metavar="COMMAND"
+    )
+
+    def command(name: str, summary: str, description: str, epilog: str | None = None):
+        return subparsers.add_parser(
+            name,
+            help=summary,
+            description=description,
+            epilog=epilog,
+            formatter_class=formatter,
+        )
+
+    def json_option(child) -> None:
+        child.add_argument(
+            "--json",
+            action="store_true",
+            help="emit one stable machine-readable JSON object",
+        )
+
+    def task_argument(child) -> None:
+        child.add_argument(
+            "task_id",
+            nargs="?",
+            metavar="TASK",
+            help="task ID; omit when the current repository identifies exactly one task",
+        )
+
+    doctor = command(
+        "doctor",
+        "check Git, Codex, sandbox, runtime, network, and cleanup support",
+        "Run non-destructive installation and sandbox capability checks required by arctl.",
+        "Run this after installation or when a sandbox/runtime preflight fails.",
+    )
+    json_option(doctor)
+
+    init = command(
+        "init",
+        "create an editable task draft for a subject repository",
+        "Create TASK storage and a starter task.yaml. This does not approve or run research.",
+        "Example:\n  arctl init --repo . --task-id routing-policy",
+    )
+    json_option(init)
+    init.add_argument(
+        "--repo",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="local Git worktree containing the policy to improve",
+    )
+    init.add_argument(
+        "--task-id",
+        metavar="TASK",
+        help="task ID; defaults to the repository directory name",
+    )
+
+    approve = command(
+        "approve",
+        "preview or confirm the task, evaluator, environment, and champion lock",
+        "Without --confirm, validate the draft and print the human approval table and token.\n"
+        "With --confirm, lock the exact task, evaluator commit, environment sources, and initial champion.",
+        "Approval is a human trust boundary. An AI operator must not confirm without explicit permission.",
+    )
+    json_option(approve)
+    task_argument(approve)
+    approve.add_argument(
+        "--confirm",
+        metavar="TOKEN",
+        help="confirmation token printed by the approval preview",
+    )
+
+    run = command(
+        "run",
+        "calibrate if needed, search for candidates, and run official experiments",
+        "Resume TASK safely and run a bounded number of new experiments. Existing process records,\n"
+        "comparisons, reflections, and failed candidate reviews are recovered before new work starts.",
+        "Retries apply only to recognized transient Codex and pre-trial public-process failures.\n"
+        "Started calibration and official comparison commands are never retried.\n"
+        "\n"
+        "Example:\n  arctl run TASK --max-experiments 3 --retries 2 --retry-delay 60",
+    )
+    json_option(run)
+    task_argument(run)
+    run.add_argument(
+        "--max-experiments",
+        type=int,
+        metavar="N",
+        help="maximum experiments for this invocation; cannot exceed the approved task limit",
+    )
+    run.add_argument(
+        "--retries",
+        type=int,
+        default=0,
+        metavar="N",
+        help="additional consecutive transient attempts (default: 0)",
+    )
+    run.add_argument(
+        "--retry-delay",
+        type=float,
+        default=60.0,
+        metavar="SECONDS",
+        help="fixed interruptible delay between transient retries (default: 60)",
+    )
+
+    status = command(
+        "status",
+        "show the task's current controller state and resumability",
+        "Show approval, calibration, frozen trial count, champion, active work, latest result,\n"
+        "search progress, stop state, experiment-limit state, and the relevant log path.",
+    )
+    json_option(status)
+    task_argument(status)
+
+    stop = command(
+        "stop",
+        "request a safe idempotent stop",
+        "Create TASK's persistent stop request. The active managed process is terminated at a safe\n"
+        "boundary; reserved evidence is preserved and never silently redrawn.",
+        "Calling stop repeatedly is safe. Ctrl-C during `arctl run` requests the same stop.",
+    )
+    json_option(stop)
+    task_argument(stop)
+
+    report = command(
+        "report",
+        "list completed experiments and public dossier paths",
+        "Show the completed experiment history, decisions, aggregate effects, and immutable public\n"
+        "Markdown dossier paths. Private cases, seeds, and raw outputs are not disclosed.",
+    )
+    json_option(report)
+    task_argument(report)
+
+    history = command(
+        "history",
+        "search the public strategy and experiment exploration ledger",
+        "Search immutable public exploration entries used by later candidate executors.",
+        "Filters combine with AND. Text matching is case-insensitive; --path accepts shell-style globs.\n"
+        "Example:\n  arctl history TASK --query lookahead --decision REJECT",
+    )
+    json_option(history)
+    task_argument(history)
+    history.add_argument(
+        "--query",
+        metavar="TEXT",
+        help="require all words in the entry's searchable public text",
+    )
+    history.add_argument(
+        "--path",
+        metavar="GLOB",
+        help="match at least one candidate changed path",
+    )
+    history.add_argument(
+        "--decision",
+        metavar="VALUE",
+        help="match an exact decision such as ACCEPT, REJECT, ARCHIVE, or INVALID",
+    )
+
+    inspect = command(
+        "inspect",
+        "inspect one experiment and its safe artifacts",
+        "Show one experiment's hypothesis, decision, aggregate comparisons, commits, and public dossier.\n"
+        "When TASK is inferable, a lone numeric positional argument is treated as EXPERIMENT.",
+        "Examples:\n  arctl inspect TASK 4\n  arctl inspect 4 --artifacts",
+    )
+    json_option(inspect)
+    task_argument(inspect)
+    inspect.add_argument(
+        "experiment_id",
+        nargs="?",
+        type=int,
+        metavar="EXPERIMENT",
+        help="positive experiment number; defaults to the latest experiment",
+    )
+    inspect.add_argument(
+        "--artifacts",
+        action="store_true",
+        help="include the safe public/private artifact inventory",
+    )
     return parser
+
+
+def render_cli_reference() -> str:
+    """Render the checked-in Markdown mirror of every public help screen."""
+    parser = build_parser()
+    subparsers = next(
+        action
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    sections = [
+        "# arctl command reference\n\n"
+        "This file mirrors the built-in CLI help. Regenerate it with "
+        "`.venv/bin/python tools/generate_cli_reference.py`.\n\n"
+        "## `arctl -h`\n\n```text\n"
+        + parser.format_help().rstrip()
+        + "\n```\n"
+    ]
+    for name, child in subparsers.choices.items():
+        sections.append(
+            f"\n## `arctl {name} -h`\n\n```text\n"
+            + child.format_help().rstrip()
+            + "\n```\n"
+        )
+    return "".join(sections)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

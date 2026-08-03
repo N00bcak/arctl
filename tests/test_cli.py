@@ -17,7 +17,9 @@ from arctl.cli import (
     _progress,
     _rewrite_next_command,
     _run,
+    build_parser,
     main,
+    render_cli_reference,
 )
 from arctl.errors import TransientDownstreamError
 from arctl.runner import RunOutcome
@@ -103,6 +105,26 @@ class CliTests(unittest.TestCase):
         self.assertIn(code, (0, 1))
         next_lines = [line for line in output.splitlines() if line.startswith("Next: ")]
         self.assertEqual(next_lines, [])
+
+    def test_root_help_is_exhaustive_and_cli_reference_is_in_sync(self) -> None:
+        help_text = build_parser().format_help()
+        for command in (
+            "doctor",
+            "init",
+            "approve",
+            "run",
+            "status",
+            "stop",
+            "report",
+            "history",
+            "inspect",
+        ):
+            self.assertIn(command, help_text)
+        self.assertIn("Typical workflow:", help_text)
+        self.assertIn("approval-locked evaluator", help_text)
+        self.assertIn("AI-orchestration", help_text)
+        reference = Path("docs/cli-reference.md").read_text(encoding="utf-8")
+        self.assertEqual(reference, render_cli_reference())
 
     def test_human_run_output_reports_exhaustion_instead_of_zero_work(self) -> None:
         payload = {

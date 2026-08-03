@@ -46,8 +46,13 @@ selects and freezes the smallest stable passing rung.
 Research sessions are offline. They may read the runtimes named by approved
 public checks and probes, but cannot read evaluator or task-private artifacts.
 
-See [the evaluator design boundary](docs/evaluator-design.md) and
-[empirical validation protocols](docs/empirical-validation.md).
+Documentation:
+
+- [Current design and workflow diagrams](docs/design.md)
+- [Complete CLI command reference](docs/cli-reference.md)
+- [Evaluator design boundary](docs/evaluator-design.md)
+- [Empirical validation protocols](docs/empirical-validation.md)
+- [Normative MVP specification](arctl_light_mvp_spec_simple.md)
 
 ## Development
 
