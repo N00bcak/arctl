@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from arctl.decisions import Decision
-from arctl.errors import StateError
+from arctl.errors import StateError, TransientDownstreamError
 from arctl.experiment import (
     complete_reflection,
     freeze_candidate,
@@ -100,6 +100,47 @@ class ExperimentIntegrationTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_transient_public_check_preserves_failure_and_uses_fresh_retry(self) -> None:
+        calls = 0
+
+        def command_builder(_command, _worktree, _output):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return (
+                    "python3",
+                    "-c",
+                    "import sys; print('urllib.error.HTTPError: HTTP Error 503: Service Unavailable', file=sys.stderr); raise SystemExit(1)",
+                )
+            return ("true",)
+
+        self.freeze()
+        with self.assertRaises(TransientDownstreamError):
+            run_public_checks(
+                self.task_directory,
+                self.experiment_directory,
+                self.task,
+                command_builder=command_builder,
+            )
+        first = self.experiment_directory / "process" / "public-check-0001"
+        self.assertTrue((first / "stderr.bin").is_file())
+
+        self.assertTrue(
+            run_public_checks(
+                self.task_directory,
+                self.experiment_directory,
+                self.task,
+                command_builder=command_builder,
+            )
+        )
+        retry = (
+            self.experiment_directory
+            / "process"
+            / "public-check-0001-retry-0001"
+        )
+        self.assertTrue((retry / "result.json").is_file())
+        self.assertTrue((first / "stderr.bin").is_file())
 
     def freeze(self):
         return freeze_candidate(

@@ -11,6 +11,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as JsonSchemaError
 
+from .downstream import transient_process_error
 from .errors import ProcessError, ResearchMiss, StateError, StoppedError
 from .manifest import EvaluatorManifest
 from .process import run_or_load_once
@@ -145,25 +146,52 @@ def _run_agent(
             writable=writable,
         )
     )
-    result = run_or_load_once(
-        scratch / "process",
-        command,
-        timeout_seconds=600,
-        max_output_bytes=1_000_000,
-        cwd=worktree,
-        env=(
-            None
-            if command_builder is not None
-            else sanitized_environment(
-                codex_home=Path(
-                    os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
-                ),
-                writable_home=scratch,
-            )
-        ),
-        stop_path=stop_path,
-    )
+    process_directory = scratch / "process"
+    try:
+        result = run_or_load_once(
+            process_directory,
+            command,
+            timeout_seconds=600,
+            max_output_bytes=1_000_000,
+            cwd=worktree,
+            env=(
+                None
+                if command_builder is not None
+                else sanitized_environment(
+                    codex_home=Path(
+                        os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
+                    ),
+                    writable_home=scratch,
+                )
+            ),
+            stop_path=stop_path,
+        )
+    except ProcessError as error:
+        transient = transient_process_error(
+            process_directory,
+            stage=(
+                "policy repair"
+                if output_name == "repair.public.json"
+                else "policy review"
+            ),
+            codex=command_builder is None,
+            fallback=str(error),
+        )
+        if transient is not None:
+            raise transient from error
+        raise
     if result["return_code"] != 0:
+        transient = transient_process_error(
+            process_directory,
+            stage=(
+                "policy repair"
+                if output_name == "repair.public.json"
+                else "policy review"
+            ),
+            codex=command_builder is None,
+        )
+        if transient is not None:
+            raise transient
         raise StateError(f"fresh candidate {output_name.removesuffix('.public.json')} session exited unsuccessfully")
     return _load_json(scratch / output_name, label="candidate agent")
 
@@ -179,7 +207,15 @@ def _check_failure(
 ) -> dict[str, Any] | None:
     assert task.config.candidate_review is not None
     for index, command in enumerate(task.config.candidate_review.checks, start=1):
-        scratch = root / "checks" / f"{index:04d}"
+        checks = root / "checks"
+        scratch = checks / f"{index:04d}"
+        if transient_process_error(
+            scratch / "process",
+            stage=f"policy check {index}",
+            codex=False,
+        ) is not None:
+            retries = sorted(checks.glob(f"{index:04d}-retry-*"))
+            scratch = checks / f"{index:04d}-retry-{len(retries) + 1:04d}"
         scratch.mkdir(parents=True, exist_ok=True)
         marker = scratch / "execution.started"
         if command_builder is None:
@@ -215,9 +251,24 @@ def _check_failure(
         except (ProcessError, StateError) as error:
             if command_builder is None and not marker.is_file():
                 raise StateError("candidate-check sandbox did not start its command") from error
+            transient = transient_process_error(
+                scratch / "process",
+                stage=f"policy check {index}",
+                codex=False,
+                fallback=str(error),
+            )
+            if transient is not None:
+                raise transient from error
             result = {"return_code": 1}
         if result["return_code"] == 0:
             continue
+        transient = transient_process_error(
+            scratch / "process",
+            stage=f"policy check {index}",
+            codex=False,
+        )
+        if transient is not None:
+            raise transient
         output = ""
         for name in ("stdout.bin", "stderr.bin"):
             path = scratch / "process" / name

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shlex
 import sys
@@ -12,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, TextIO, Sequence
 
-from .errors import ArctlError, StateError
+from .errors import ArctlError, StateError, TransientDownstreamError
 from .models import validate_task_id
 from .registry import locate_task
 from .storage import TaskLock, atomic_write_text
@@ -172,6 +173,18 @@ def _emit_human(
     state = payload["state"]
     if not payload["success"]:
         print(payload["message"], file=sys.stderr)
+        failure = payload.get("failure")
+        if isinstance(failure, dict) and failure.get("retryable"):
+            used = failure["retries_used"]
+            maximum = failure["max_retries"]
+            if maximum:
+                print(f"Retries exhausted: {used}/{maximum}.", file=sys.stderr)
+            else:
+                print(
+                    "Retryable: use arctl run --retries N "
+                    "[--retry-delay SECONDS].",
+                    file=sys.stderr,
+                )
         if payload["evidence_valid"] is not None:
             print(
                 "Saved evidence: "
@@ -222,13 +235,21 @@ def _emit_human(
         warning = _calibration_warning(payload.get("calibration_summary"))
         if warning is not None:
             print(warning)
-    elif state == "RUN_COMPLETE":
+    elif state == "RUN_COMPLETE" or (
+        state == "LIMIT_REACHED" and "status" not in payload
+    ):
         results = payload.get("results", [])
         accepted = sum(result["decision"] == "ACCEPT" for result in results)
-        print(
-            f"Done: {len(results)} tested · {accepted} promoted · "
-            f"{len(results) - accepted} not promoted"
-        )
+        if results:
+            print(
+                f"Done: {len(results)} tested · {accepted} promoted · "
+                f"{len(results) - accepted} not promoted"
+            )
+        if state == "LIMIT_REACHED":
+            limit = payload["experiment_limit"]
+            print(
+                f"Experiment limit reached: {limit['completed']}/{limit['maximum']}."
+            )
     elif state == "STOPPED":
         print(payload["message"])
     elif state == "SEARCH_STALLED":
@@ -252,7 +273,7 @@ def _emit_human(
             "Note: approval trusts the evaluator's mathematics, provides no "
             "search-wide false-positive guarantee, and requires human confirmation."
         )
-    elif state == "READY" and "status" in payload:
+    elif state in ("READY", "LIMIT_REACHED") and "status" in payload:
         status = payload["status"]
         print(
             f"Task {payload['task_id']} · {status['state']} · "
@@ -270,6 +291,11 @@ def _emit_human(
             print("A candidate is provisional; its suspect test is pending.")
         if status["stop_requested"]:
             print("A safe stop has been requested.")
+        if state == "LIMIT_REACHED":
+            print(
+                "Experiment limit: "
+                f"{status['completed_experiments']}/{status['max_experiments']} reached."
+            )
         warning = _calibration_warning(status.get("calibration_summary"))
         if warning is not None:
             print(warning)
@@ -393,6 +419,13 @@ class _ProgressView:
             elif kind == "search_attempt":
                 self._start(
                     f"candidate search · attempt {event['attempt']}/{event['attempts']}"
+                )
+            elif kind == "retry":
+                self._finish("failed")
+                delay = self._duration(event["delay_seconds"])
+                self._line(
+                    f"  ↻ {event['stage']} · {event['category']} · retry "
+                    f"{event['attempt']}/{event['attempts']} in {delay}"
                 )
             elif kind == "search_miss":
                 self._finish("failed")
@@ -735,6 +768,9 @@ def _status(data_root: Path, task_id: str | None) -> dict[str, Any]:
     elif status["state"] in ("READY", "CALIBRATION_REQUIRED"):
         next_command = f"arctl run {identifier}"
         action_required = False
+    elif status["state"] == "LIMIT_REACHED":
+        next_command = f"arctl report {identifier}"
+        action_required = False
     else:
         next_command = f"arctl status {identifier}"
         action_required = False
@@ -759,7 +795,11 @@ def _status(data_root: Path, task_id: str | None) -> dict[str, Any]:
             else (
                 ("status", "report")
                 if status["state"] == "CALIBRATION_FAILED"
-                else ("run", "status", "stop", "report", "history")
+                else (
+                    ("status", "report", "history")
+                    if status["state"] == "LIMIT_REACHED"
+                    else ("run", "status", "stop", "report", "history")
+                )
             )
         ),
         next_command=next_command,
@@ -857,12 +897,30 @@ def _run(
     task_id: str | None,
     max_experiments: int | None,
     *,
+    retries: int = 0,
+    retry_delay: float = 60.0,
     preflight: bool = True,
     progress=None,
 ) -> dict[str, Any]:
+    from .downstream import RetryPolicy
     from .doctor import run_doctor
-    from .runner import run_task
+    from .runner import RunOutcome, run_task
 
+    if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+        raise StateError("retries must be a non-negative integer")
+    if max_experiments is not None and (
+        isinstance(max_experiments, bool)
+        or not isinstance(max_experiments, int)
+        or max_experiments <= 0
+    ):
+        raise StateError("max experiments must be a positive integer")
+    if (
+        isinstance(retry_delay, bool)
+        or not isinstance(retry_delay, (int, float))
+        or not math.isfinite(retry_delay)
+        or retry_delay < 0
+    ):
+        raise StateError("retry delay must be non-negative")
     task = _located(data_root, task_id)
     if preflight:
         checks = run_doctor()
@@ -871,13 +929,74 @@ def _run(
             raise StateError(
                 "runtime or sandbox preflight failed: " + ", ".join(failed)
             )
+    initial_results = sorted(
+        (task.directory / "experiments").glob("[0-9]" * 6)
+    ) if (task.directory / "experiments").is_dir() else []
+    initial_completed = sum(
+        (directory / "published").is_file() for directory in initial_results
+    )
+    initial_ids = {int(directory.name) for directory in initial_results}
+    policy = RetryPolicy(
+        retries,
+        retry_delay,
+        progress=progress,
+        stop_path=task.directory / "stop.requested",
+    )
+
+    def tracked_progress(event: dict[str, Any]) -> None:
+        if event["event"] in {
+            "strategy",
+            "candidate_review",
+            "candidate",
+            "public_checks_complete",
+            "reflection_complete",
+        }:
+            policy.succeeded()
+        if progress is not None:
+            progress(event)
+
     with TaskLock(task.directory / "lock"):
-        outcome = run_task(
-            task,
-            max_experiments=max_experiments,
-            progress=progress,
-        )
-    results = outcome.results
+        while True:
+            completed = sum(
+                (directory / "published").is_file()
+                for directory in (task.directory / "experiments").glob("[0-9]" * 6)
+            )
+            if completed >= task.config.max_experiments:
+                outcome = RunOutcome((), False, limit_reached=True)
+                remaining = 0
+                break
+            remaining = (
+                None
+                if max_experiments is None
+                else max(max_experiments - (completed - initial_completed), 0)
+            )
+            if remaining == 0:
+                break
+            try:
+                outcome = run_task(
+                    task,
+                    max_experiments=remaining,
+                    progress=tracked_progress,
+                )
+            except TransientDownstreamError as error:
+                policy.wait(error)
+                continue
+            break
+    completed_results: dict[int, dict[str, Any]] = {}
+    for directory in sorted((task.directory / "experiments").glob("[0-9]" * 6)):
+        if int(directory.name) in initial_ids:
+            continue
+        result_path = directory / "result.public.json"
+        if (directory / "published").is_file() and result_path.is_file():
+            value = json.loads(result_path.read_text(encoding="utf-8"))
+            if isinstance(value, dict):
+                completed_results[value["experiment_id"]] = value
+    if remaining != 0:
+        for value in outcome.results:
+            completed_results[value["experiment_id"]] = value
+    results = tuple(completed_results[key] for key in sorted(completed_results))
+    if remaining == 0 and not outcome.limit_reached:
+        outcome = RunOutcome(results, False)
     identifier = task.config.task_id
     last = results[-1] if results else None
     state = (
@@ -887,6 +1006,8 @@ def _run(
         if outcome.reflection_failed
         else "SEARCH_STALLED"
         if outcome.stalled
+        else "LIMIT_REACHED"
+        if outcome.limit_reached
         else "RUN_COMPLETE"
     )
     next_command = f"arctl status {identifier}"
@@ -908,6 +1029,10 @@ def _run(
                 f"Candidate search for {identifier} stalled after six attempts; "
                 "the exploration history was preserved."
                 if outcome.stalled
+                else
+                f"Task {identifier} reached its approved experiment limit "
+                f"({task.config.max_experiments}/{task.config.max_experiments})."
+                if outcome.limit_reached
                 else f"Task {identifier} completed {len(results)} experiments."
             )
         ),
@@ -917,6 +1042,11 @@ def _run(
     if last is not None:
         payload["experiment_id"] = last["experiment_id"]
     payload["results"] = results
+    if outcome.limit_reached:
+        payload["experiment_limit"] = {
+            "completed": task.config.max_experiments,
+            "maximum": task.config.max_experiments,
+        }
     return payload
 
 
@@ -959,6 +1089,8 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("task_id", nargs="?")
         if name == "run":
             command.add_argument("--max-experiments", type=int)
+            command.add_argument("--retries", type=int, default=0)
+            command.add_argument("--retry-delay", type=float, default=60.0)
         if name == "approve":
             command.add_argument("--confirm")
         if name == "inspect":
@@ -1032,6 +1164,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _data_root(arguments.data),
                 arguments.task_id,
                 arguments.max_experiments,
+                retries=arguments.retries,
+                retry_delay=arguments.retry_delay,
                 progress=progress_view,
             )
         else:
@@ -1048,6 +1182,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             data_root,
             arguments.task_id,
             arguments.max_experiments,
+            retries=arguments.retries,
+            retry_delay=arguments.retry_delay,
             preflight=False,
             progress=progress_view,
         )
@@ -1070,20 +1206,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             next_command = (
                 f"arctl status {identifier}" if identifier else "arctl status"
             )
+        transient = (
+            error if isinstance(error, TransientDownstreamError) else None
+        )
         payload = _payload(
             success=False,
             state="ERROR",
             task_id=identifier,
             action_required=True,
-            allowed_actions=("status",),
-            next_command=next_command,
+            allowed_actions=("status", "run") if transient else ("status",),
+            next_command=(
+                f"arctl run {identifier} --max-experiments 1"
+                if transient and identifier
+                else next_command
+            ),
             message=(
-                f"Failed: {error}."
+                f"Failed: {transient.stage} · {transient.detail}."
+                if transient
+                else f"Failed: {error}."
             ),
             evidence_valid=True,
-            can_continue=False,
-            log_path=log_path,
+            can_continue=transient is not None,
+            log_path=transient.artifact_path if transient else log_path,
         )
+        if transient is not None:
+            payload["failure"] = {
+                "stage": transient.stage,
+                "category": transient.category,
+                "detail": transient.detail,
+                "retryable": True,
+                "retries_used": transient.retries_used,
+                "max_retries": transient.max_retries,
+                "artifact_path": transient.artifact_path,
+            }
     if progress_view is not None:
         progress_view.close(failed=not payload["success"])
     _rewrite_next_command(payload, program, arguments.data)

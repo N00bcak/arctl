@@ -334,7 +334,7 @@ Every calibration or comparison process is a `ProcessRun`:
 - with valid saved output the controller uses that output;
 - with `started` but no valid output it never runs again.
 Candidate public-test, subject, or hard-rule failure gives `REJECT`. Champion, evaluator, sandbox, controller, or host failure gives `INVALID`. Calibration failure blocks the task before research and never silently redraws calibration seeds.
-Failure before the primary comparison is reserved discards the unfinished experiment. Recoverable candidate-search misses precede the experiment and remain in the public ledger; infrastructure and saved-state failures remain inspectable engineering failures. Failure after any comparison reservation publishes the experiment without a replacement seed or retry. A saved valid primary `PROVISIONAL` result may continue only into its one not-yet-started suspect comparison.
+Failure before the primary comparison is reserved discards the unfinished experiment. Recoverable candidate-search misses precede the experiment and remain in the public ledger; infrastructure and saved-state failures remain inspectable engineering failures. `run` may opt into bounded, delayed retries for recognized transient Codex failures and pre-trial public-command network failures; each retry receives a fresh process record and preserves the failed artifact. The consecutive retry count resets after a successful downstream stage. Failure after any calibration or comparison command starts never receives a controller retry, even for a network error. A saved valid primary `PROVISIONAL` result may continue only into its one not-yet-started suspect comparison.
 Every process starts in its own process group. On exit, timeout, stop, or too much output, `arctl` must stop and clean up all child processes.
 Reflection attempts use the same exactly-once process records, but may be retried in a fresh numbered attempt because they neither redraw evidence nor affect the fixed verdict. Failed reflection attempts remain inspectable.
 
@@ -396,7 +396,7 @@ Write files through a temporary file and rename so half-written files are not us
 arctl doctor
 arctl init --repo PATH
 arctl approve TASK_ID
-arctl run TASK_ID [--max-experiments N]
+arctl run TASK_ID [--max-experiments N] [--retries N] [--retry-delay SECONDS]
 arctl status TASK_ID
 arctl stop TASK_ID
 arctl report TASK_ID

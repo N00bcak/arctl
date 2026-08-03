@@ -19,7 +19,16 @@ from .candidate_review import AgentCommandBuilder as ReviewCommandBuilder
 from .candidate_review import review_candidate
 from .comparison import ComparisonReservation, load_reservation, reserve_comparison
 from .comparison_run import CommandBuilder, ComparisonFailure, run_comparison
-from .errors import ArctlError, ProcessError, ResearchMiss, StateError, StoppedError, ValidationError
+from .downstream import transient_process_error
+from .errors import (
+    ArctlError,
+    ProcessError,
+    ResearchMiss,
+    StateError,
+    StoppedError,
+    TransientDownstreamError,
+    ValidationError,
+)
 from .experiment import (
     complete_reflection,
     freeze_candidate,
@@ -140,6 +149,7 @@ class RunOutcome:
     stopped: bool
     stalled: bool = False
     reflection_failed: bool = False
+    limit_reached: bool = False
 
 
 def _default_research_command(
@@ -354,9 +364,26 @@ def _run_research(
             )
         except StoppedError:
             raise
-        except (ProcessError, StateError) as error:
+        except ProcessError as error:
+            transient = transient_process_error(
+                experiment / "process" / "research",
+                stage="execution",
+                codex=command_builder is _default_research_command,
+                fallback=str(error),
+            )
+            if transient is not None:
+                raise transient from error
+            raise StateError("fresh research session did not complete") from error
+        except StateError as error:
             raise StateError("fresh research session did not complete") from error
         if result["return_code"] != 0:
+            transient = transient_process_error(
+                experiment / "process" / "research",
+                stage="execution",
+                codex=command_builder is _default_research_command,
+            )
+            if transient is not None:
+                raise transient
             raise StateError("fresh research session exited unsuccessfully")
         request_path = scratch / "request.public.json"
         try:
@@ -378,7 +405,7 @@ def _run_research(
                 for name, expectation in telemetry.items()
                 if expectation is not None
             }
-    except StateError as error:
+    except (StateError, TransientDownstreamError) as error:
         write_json_once(
             experiment / "research.failure.json",
             {
@@ -504,6 +531,10 @@ def _candidate_search(
             )
         except StoppedError:
             remove_worktree(task.config.repo, worktree)
+            raise
+        except TransientDownstreamError as error:
+            if error.stage == "execution":
+                remove_worktree(task.config.repo, worktree)
             raise
         except ResearchMiss as miss:
             try:
@@ -1472,4 +1503,9 @@ def run_task(
         experiments=len(results),
         stopped=stopped,
     )
-    return RunOutcome(tuple(results), stopped, stalled, reflection_failed)
+    limit_reached = (
+        _completed_experiment_count(task.directory) >= task.config.max_experiments
+    )
+    return RunOutcome(
+        tuple(results), stopped, stalled, reflection_failed, limit_reached
+    )

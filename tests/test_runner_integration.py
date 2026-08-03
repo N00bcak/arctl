@@ -446,7 +446,7 @@ scratch = Path(sys.argv[1])
         )
         self.assertFalse(recovered.reflection_failed)
         self.assertTrue((experiment / "published").is_file())
-        self.assertEqual(task_status(self.task)["state"], "READY")
+        self.assertEqual(task_status(self.task)["state"], "LIMIT_REACHED")
 
     def test_exact_duplicates_refresh_strategy_then_stall_without_an_experiment(self) -> None:
         (self.subject / "subject.py").write_text(

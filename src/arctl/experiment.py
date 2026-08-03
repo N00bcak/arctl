@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from dataclasses import dataclass, replace
 from pathlib import Path
 from collections.abc import Callable, Sequence
@@ -11,6 +10,7 @@ from typing import Any, Literal, Mapping
 
 from .decisions import Decision, failure_decision
 from .dossier import ensure_experiment_dossier
+from .downstream import transient_process_error
 from .errors import ProcessError, StateError, StoppedError, ValidationError
 from .git import (
     create_candidate_commit,
@@ -261,18 +261,33 @@ def run_public_checks(
     ensure_clean_worktree(worktree)
 
     failure = experiment_directory / "public-check.failure.json"
+    failed_check = None
     if failure.is_file():
-        for path in (
-            experiment_directory / "process",
-            experiment_directory / "outputs",
-        ):
-            for stale in path.glob("public-check-*"):
-                shutil.rmtree(stale)
+        try:
+            saved_failure = json.loads(failure.read_text(encoding="utf-8"))
+            failed_check = saved_failure.get("check")
+        except (OSError, json.JSONDecodeError):
+            failed_check = None
         failure.unlink()
 
     passed = True
     for index, command in enumerate(task.public_checks, start=1):
-        output = experiment_directory / "outputs" / f"public-check-{index:04d}"
+        suffix = ""
+        base_process = (
+            experiment_directory / "process" / f"public-check-{index:04d}"
+        )
+        if index == failed_check and (base_process / "started.json").is_file():
+            retries = sorted(
+                (experiment_directory / "process").glob(
+                    f"public-check-{index:04d}-retry-*"
+                )
+            )
+            suffix = f"-retry-{len(retries) + 1:04d}"
+        output = (
+            experiment_directory
+            / "outputs"
+            / f"public-check-{index:04d}{suffix}"
+        )
         output.mkdir(parents=True, exist_ok=True)
         if command_builder is None:
             execution_marker = output / "execution.started"
@@ -296,8 +311,13 @@ def run_public_checks(
             managed_command = command_builder(command, worktree, output)
             environment = None
         try:
+            process_directory = (
+                experiment_directory
+                / "process"
+                / f"public-check-{index:04d}{suffix}"
+            )
             result = run_or_load_once(
-                experiment_directory / "process" / f"public-check-{index:04d}",
+                process_directory,
                 managed_command,
                 timeout_seconds=600,
                 max_output_bytes=1_000_000,
@@ -320,6 +340,22 @@ def run_public_checks(
                 raise StateError(
                     "public-check sandbox did not start its command"
                 ) from error
+            transient = transient_process_error(
+                process_directory,
+                stage=f"public check {index}",
+                codex=False,
+                fallback=str(error),
+            )
+            if transient is not None:
+                write_json_once(
+                    failure,
+                    {
+                        "schema_version": 1,
+                        "check": index,
+                        "message": transient.detail,
+                    },
+                )
+                raise transient from error
             passed = False
             break
         if result["return_code"] != 0:
@@ -333,6 +369,21 @@ def run_public_checks(
                     },
                 )
                 raise StateError("public-check sandbox did not start its command")
+            transient = transient_process_error(
+                process_directory,
+                stage=f"public check {index}",
+                codex=False,
+            )
+            if transient is not None:
+                write_json_once(
+                    failure,
+                    {
+                        "schema_version": 1,
+                        "check": index,
+                        "message": transient.detail,
+                    },
+                )
+                raise transient
             passed = False
             break
         try:

@@ -21,6 +21,19 @@ class StoppedError(ProcessError):
     """A managed process was terminated by a controller stop request."""
 
 
+class TransientDownstreamError(ProcessError):
+    """A recognized external failure that is safe to repeat in a fresh attempt."""
+
+    def __init__(self, stage: str, category: str, detail: str, artifact_path: str):
+        super().__init__(detail)
+        self.stage = stage
+        self.category = category
+        self.detail = detail
+        self.artifact_path = artifact_path
+        self.retries_used = 0
+        self.max_retries = 0
+
+
 class ResearchMiss(ArctlError):
     """A completed research attempt did not produce a usable novel candidate."""
 

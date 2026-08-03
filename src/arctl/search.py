@@ -12,7 +12,15 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as JsonSchemaError
 
-from .errors import ProcessError, ResearchMiss, StateError, StoppedError, ValidationError
+from .downstream import transient_process_error
+from .errors import (
+    ProcessError,
+    ResearchMiss,
+    StateError,
+    StoppedError,
+    TransientDownstreamError,
+    ValidationError,
+)
 from .manifest import EvaluatorManifest
 from .process import run_or_load_once
 from .registry import LocatedTask
@@ -364,9 +372,10 @@ def ensure_strategy(
     else:
         command = command_builder(worktree, scratch, schema, prompt)
         environment = None
+    process_directory = root / "process"
     try:
         result = run_or_load_once(
-            root / "process",
+            process_directory,
             command,
             timeout_seconds=3600,
             max_output_bytes=2_000_000,
@@ -375,10 +384,38 @@ def ensure_strategy(
             stop_path=stop_path,
         )
         if result["return_code"] != 0:
+            transient = transient_process_error(
+                process_directory,
+                stage="strategy",
+                codex=command_builder is None,
+            )
+            if transient is not None:
+                raise transient
             raise StateError("fresh strategy session exited unsuccessfully")
     except StoppedError:
         raise
-    except (ProcessError, StateError) as error:
+    except ProcessError as error:
+        if isinstance(error, TransientDownstreamError):
+            failure = error
+        else:
+            failure = transient_process_error(
+                process_directory,
+                stage="strategy",
+                codex=command_builder is None,
+                fallback=str(error),
+            )
+        if failure is not None:
+            write_json_once(
+                root / "strategy.failure.json",
+                {"schema_version": 1, "message": str(failure)},
+            )
+            raise failure
+        write_json_once(
+            root / "strategy.failure.json",
+            {"schema_version": 1, "message": str(error)},
+        )
+        raise
+    except StateError as error:
         write_json_once(
             root / "strategy.failure.json",
             {"schema_version": 1, "message": str(error)},

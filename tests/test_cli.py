@@ -6,6 +6,7 @@ import json
 import subprocess
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
 
@@ -15,8 +16,11 @@ from arctl.cli import (
     _invoked_program,
     _progress,
     _rewrite_next_command,
+    _run,
     main,
 )
+from arctl.errors import TransientDownstreamError
+from arctl.runner import RunOutcome
 from arctl.experiment import start_experiment
 
 
@@ -99,6 +103,155 @@ class CliTests(unittest.TestCase):
         self.assertIn(code, (0, 1))
         next_lines = [line for line in output.splitlines() if line.startswith("Next: ")]
         self.assertEqual(next_lines, [])
+
+    def test_human_run_output_reports_exhaustion_instead_of_zero_work(self) -> None:
+        payload = {
+            "schema_version": 1,
+            "success": True,
+            "task_id": "demo",
+            "experiment_id": None,
+            "state": "LIMIT_REACHED",
+            "action_required": False,
+            "allowed_actions": ["status", "report"],
+            "artifacts": [],
+            "message": "Task demo reached its approved experiment limit.",
+            "evidence_valid": None,
+            "can_continue": True,
+            "log_path": None,
+            "next_command": "arctl report demo",
+            "results": [],
+            "experiment_limit": {"completed": 10, "maximum": 10},
+        }
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _emit(payload, as_json=False)
+
+        self.assertEqual(output.getvalue(), "Experiment limit reached: 10/10.\n")
+        self.assertNotIn("Done: 0 tested", output.getvalue())
+
+    def test_human_status_output_reports_exhaustion(self) -> None:
+        payload = {
+            "schema_version": 1,
+            "success": True,
+            "task_id": "demo",
+            "experiment_id": 10,
+            "state": "LIMIT_REACHED",
+            "action_required": False,
+            "allowed_actions": ["status", "report", "history"],
+            "artifacts": [],
+            "message": "Limit reached.",
+            "evidence_valid": None,
+            "can_continue": True,
+            "log_path": None,
+            "next_command": "arctl report demo",
+            "status": {
+                "state": "LIMIT_REACHED",
+                "trial_count": 64,
+                "champion": "a" * 40,
+                "last_result": None,
+                "provisional": False,
+                "stop_requested": False,
+                "strategy_revision": 1,
+                "search_id": 2,
+                "search_attempt": 1,
+                "completed_experiments": 10,
+                "max_experiments": 10,
+                "calibration_summary": None,
+            },
+        }
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _emit(payload, as_json=False)
+
+        self.assertIn("Task demo · LIMIT_REACHED", output.getvalue())
+        self.assertIn("Experiment limit: 10/10 reached.", output.getvalue())
+
+    def test_run_retries_one_transient_failure_without_expanding_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            task_directory = root / "tasks" / "demo"
+            task_directory.mkdir(parents=True)
+            task = SimpleNamespace(
+                directory=task_directory,
+                config=SimpleNamespace(task_id="demo", max_experiments=1),
+            )
+            transient = TransientDownstreamError(
+                "execution",
+                "capacity",
+                "Selected model is at capacity.",
+                str(root / "process"),
+            )
+            result = {
+                "experiment_id": 1,
+                "decision": "REJECT",
+                "hypothesis": "test",
+            }
+            with (
+                mock.patch("arctl.cli._located", return_value=task),
+                mock.patch(
+                    "arctl.runner.run_task",
+                    side_effect=(transient, RunOutcome((result,), False)),
+                ) as run,
+            ):
+                payload = _run(
+                    root,
+                    "demo",
+                    1,
+                    retries=1,
+                    retry_delay=0,
+                    preflight=False,
+                )
+
+            self.assertTrue(payload["success"])
+            self.assertEqual(payload["results"], (result,))
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(
+                [call.kwargs["max_experiments"] for call in run.call_args_list],
+                [1, 1],
+            )
+
+    def test_exhausted_run_reports_limit_without_starting_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            task_directory = root / "tasks" / "demo"
+            experiment = task_directory / "experiments" / "000001"
+            experiment.mkdir(parents=True)
+            (experiment / "published").write_text("")
+            task = SimpleNamespace(
+                directory=task_directory,
+                config=SimpleNamespace(task_id="demo", max_experiments=1),
+            )
+            with (
+                mock.patch("arctl.cli._located", return_value=task),
+                mock.patch("arctl.runner.run_task") as run,
+            ):
+                payload = _run(root, "demo", None, preflight=False)
+
+            run.assert_not_called()
+            self.assertEqual(payload["state"], "LIMIT_REACHED")
+            self.assertEqual(
+                payload["experiment_limit"], {"completed": 1, "maximum": 1}
+            )
+            self.assertEqual(payload["results"], ())
+
+    def test_retryable_failure_exposes_safe_detail_and_artifact_path(self) -> None:
+        failure = TransientDownstreamError(
+            "execution",
+            "capacity",
+            "Selected model is at capacity.",
+            "/tmp/research-process",
+        )
+        failure.retries_used = 2
+        failure.max_retries = 2
+        with mock.patch("arctl.cli._run", side_effect=failure):
+            code, output = self.run_cli(["run", "demo", "--json"])
+
+        payload = json.loads(output)
+        self.assertEqual(code, 1)
+        self.assertTrue(payload["can_continue"])
+        self.assertEqual(payload["failure"]["category"], "capacity")
+        self.assertEqual(payload["failure"]["retries_used"], 2)
+        self.assertEqual(payload["log_path"], "/tmp/research-process")
 
     def test_approval_table_is_compact_ordered_and_actionable(self) -> None:
         payload = {

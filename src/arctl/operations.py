@@ -69,6 +69,11 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
                 calibration = "failed"
 
     directories = _experiment_directories(task)
+    completed_experiments = sum(
+        load_experiment(directory).state == "COMPLETE"
+        and (directory / "published").is_file()
+        for directory in directories
+    )
     latest: ExperimentRecord | None = None
     last_result: dict[str, Any] | None = None
     for directory in directories:
@@ -142,6 +147,8 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
         state = "PUBLIC_CHECK_FAILED"
     elif latest is not None and latest.state != "COMPLETE":
         state = latest.state
+    elif approved and completed_experiments >= task.config.max_experiments:
+        state = "LIMIT_REACHED"
     elif search_stalled:
         state = "SEARCH_STALLED"
     elif approved and trial_count is not None:
@@ -163,6 +170,8 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
         "approved": approved,
         "calibration": calibration,
         "trial_count": trial_count,
+        "completed_experiments": completed_experiments,
+        "max_experiments": task.config.max_experiments,
         "calibration_summary": calibration_summary,
         "experiment_id": latest.experiment_id if latest is not None else None,
         "champion": champion,

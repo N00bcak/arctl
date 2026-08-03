@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from arctl.candidate_review import review_candidate
-from arctl.errors import ResearchMiss
+from arctl.errors import ResearchMiss, TransientDownstreamError
 from arctl.manifest import EvaluatorManifest
 from arctl.models import TaskConfig
 from arctl.registry import LocatedTask
@@ -79,6 +79,48 @@ scratch = Path(sys.argv[1])
         assert review is not None
         self.assertEqual(review["verdict"], "pass")
         self.assertEqual([event["event"] for event in events], ["candidate_review"])
+
+    def test_transient_policy_check_uses_a_fresh_process_attempt(self) -> None:
+        calls = 0
+
+        def check(_command, _worktree, _scratch):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return (
+                    "python3",
+                    "-c",
+                    "import sys; print('HTTP Error 503: Service Unavailable', file=sys.stderr); raise SystemExit(1)",
+                )
+            return ("true",)
+
+        arguments = {
+            "task": self.task,
+            "manifest": self.manifest,
+            "worktree": self.worktree,
+            "attempt_directory": self.root / "attempt",
+            "champion": "a" * 40,
+            "request": self.request,
+            "stop_path": self.root / "stop",
+            "review_command_builder": self.passing_review,
+            "check_command_builder": check,
+        }
+        with self.assertRaises(TransientDownstreamError):
+            review_candidate(**arguments)
+        result = review_candidate(**arguments)
+
+        assert result is not None
+        checks = (
+            self.root
+            / "attempt"
+            / "candidate-review"
+            / "round-01"
+            / "checks"
+        )
+        self.assertTrue((checks / "0001" / "process" / "stderr.bin").is_file())
+        self.assertTrue(
+            (checks / "0001-retry-0001" / "process" / "result.json").is_file()
+        )
 
     def test_contradictory_pass_is_retried_as_reviewer_output_error(self) -> None:
         prompts: list[str] = []

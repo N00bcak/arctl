@@ -12,7 +12,8 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as JsonSchemaError
 
-from .errors import ProcessError, StateError, StoppedError
+from .downstream import transient_process_error
+from .errors import ProcessError, StateError, StoppedError, TransientDownstreamError
 from .manifest import EvaluatorManifest
 from .models import TaskConfig
 from .process import run_or_load_once
@@ -321,6 +322,13 @@ def run_reflection(
             stop_path=stop_path,
         )
         if process["return_code"] != 0:
+            transient = transient_process_error(
+                attempt / "process",
+                stage="reflection",
+                codex=command_builder is None,
+            )
+            if transient is not None:
+                raise transient
             raise StateError("fresh reflection session exited unsuccessfully")
         assessment = json.loads(
             (scratch / "assessment.public.json").read_text(encoding="utf-8")
@@ -333,7 +341,31 @@ def run_reflection(
             raise StateError("reflection strategy behavior does not match the request")
     except StoppedError:
         raise
-    except (OSError, json.JSONDecodeError, JsonSchemaError, ProcessError, StateError) as error:
+    except TransientDownstreamError as error:
+        write_json_once(
+            attempt / "reflection.failure.json",
+            {"schema_version": 1, "message": str(error)},
+        )
+        raise
+    except ProcessError as error:
+        transient = transient_process_error(
+            attempt / "process",
+            stage="reflection",
+            codex=command_builder is None,
+            fallback=str(error),
+        )
+        if transient is not None:
+            write_json_once(
+                attempt / "reflection.failure.json",
+                {"schema_version": 1, "message": str(transient)},
+            )
+            raise transient from error
+        write_json_once(
+            attempt / "reflection.failure.json",
+            {"schema_version": 1, "message": str(error)},
+        )
+        raise StateError("post-trial reflection failed") from error
+    except (OSError, json.JSONDecodeError, JsonSchemaError, StateError) as error:
         write_json_once(
             attempt / "reflection.failure.json",
             {"schema_version": 1, "message": str(error)},
