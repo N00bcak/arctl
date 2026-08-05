@@ -170,10 +170,19 @@ def _research_context(experiment: Path) -> dict[str, Any]:
             raise StateError("saved strategy is invalid") from error
         strategy_name = strategy_files[-1].name
     ledger = load_ledger(task_directory)
+    supporting: dict[str, Any] = {}
+    for name in ("planning.public.json", "implementation.public.json"):
+        path = experiment / name
+        if path.is_file():
+            try:
+                supporting[name] = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise StateError(f"saved {name} is invalid") from error
     return {
         "strategy": strategy,
         "strategy_source": strategy_name,
         "exploration": ledger,
+        "supporting_artifacts": supporting,
     }
 
 
@@ -280,9 +289,14 @@ def run_reflection(
         "Inspect the candidate and champion implementation when useful. Separate direct "
         "observations from inference, do not invent causes that the aggregate evidence "
         "cannot identify, and treat implementation incompetence as a hypothesis requiring "
-        "specific evidence. Assess whether the candidate actually expressed the selected "
+        "specific evidence. Separately assess whether the candidate actually expressed "
+        "the selected behavior, whether its mechanism activated, whether implementation "
+        "fidelity was compromised, and whether the mechanism is supported, contradicted, "
+        "or inconclusive. Use strategy_behavior for realization, mechanism evidence and "
+        "missing_evidence for activation, and implementation for fidelity. "
         "strategic behavior, and record policy-specific observations about the proposed "
-        "mechanism or implementation for later executors. Assess every declared telemetry "
+        "mechanism or implementation for later planners. Recommend only a disposition; "
+        "do not invent the next candidate. Assess every declared telemetry "
         "metric exactly once. Return "
         "only the required reflection JSON. The candidate is the current working "
         f"directory; the champion is readable at {champion_worktree}.\n\n"
@@ -300,8 +314,8 @@ def run_reflection(
             prompt=prompt,
             read_paths=(champion_worktree,),
             output_name="assessment.public.json",
-            model=task.strategy_model,
-            reasoning_effort=task.strategy_reasoning_effort,
+            model=task.reflection_model,
+            reasoning_effort=task.reflection_reasoning_effort,
             writable_worktree=False,
         )
         environment = sanitized_environment(

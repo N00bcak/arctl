@@ -119,6 +119,45 @@ class RunnerIntegrationTests(unittest.TestCase):
             {"kind": "initial", "experiment_id": None, "hypothesis": None},
         )
 
+    def test_unlimited_task_honors_per_invocation_limit(self) -> None:
+        directory = self.root / "data" / "tasks" / "unlimited"
+        directory.mkdir()
+        task_file = directory / "task.yaml"
+        task_file.write_text("approved unlimited task\n")
+        raw = valid_task()
+        raw.update(
+            {
+                "task_id": "unlimited",
+                "repo": str(self.subject),
+                "editable_paths": ["subject.py"],
+                "denied_paths": [".git/**"],
+                "public_checks": [list(command) for command in self.config.public_checks],
+                "evaluator": {
+                    "repo": str(self.evaluator),
+                    "commit": self.config.evaluator.commit,
+                },
+                "trials": 4,
+                "max_experiments": "unlimited",
+            }
+        )
+        config = TaskConfig.from_mapping(raw)
+        preview = preview_approval(task_file, config)
+        confirm_approval(directory, config, preview, preview.confirmation_token)
+        task = LocatedTask(directory, config)
+
+        outcome = run_task(
+            task,
+            max_experiments=1,
+            research_command_builder=self.research_command,
+            public_check_command_builder=self.unconfined_public,
+            comparison_command_builder=self.unconfined_comparison,
+        )
+
+        self.assertEqual(len(outcome.results), 1)
+        self.assertFalse(outcome.limit_reached)
+        self.assertIsNone(task_status(task)["max_experiments"])
+        self.assertEqual(task_status(task)["state"], "READY")
+
     @staticmethod
     def research_command(worktree: Path, scratch: Path, _schema: Path, _prompt: str):
         script = """\
@@ -149,6 +188,170 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
 }))
 """
         return ("python3", "-c", script, str(worktree), str(scratch))
+
+    @staticmethod
+    def planning_command(worktree: Path, scratch: Path, _schema: Path, _prompt: str):
+        script = """\
+import json
+import sys
+from pathlib import Path
+
+worktree, scratch = map(Path, sys.argv[1:])
+assert "+ 0" in (worktree / "subject.py").read_text()
+request = {
+    "schema_version": 2,
+    "strategy_behavior_id": "environment-compatible",
+    "claim": "Add one point to each valid result.",
+    "mechanism": "Increase the subject score by one.",
+    "viability": "The score expression is directly adjustable.",
+    "evidence_review": {"summary": "No prior evidence.", "citations": []},
+    "expected_effect": "The paired score difference is positive.",
+    "expected_telemetry": {},
+    "falsifiers": ["The paired effect is not positive."],
+    "lineage": {"kind": "new", "prior_entry_id": None},
+}
+(scratch / "planning.public.json").write_text(json.dumps({
+    "schema_version": 1,
+    "directions": [{
+        "strategy_behavior_id": "environment-compatible",
+        "champion_assessment": "The baseline is environment compatible.",
+        "remaining_gap": "Its score remains improvable.",
+        "disposition": "candidate",
+        "proposed_mechanism": request["mechanism"],
+        "evidence": ["The score expression contains a zero offset."],
+        "feasibility": "One editable expression implements it.",
+        "expected_value": "A positive paired difference.",
+    }],
+    "selection_rationale": "This is the only current direction.",
+    "selection": request,
+}))
+"""
+        return ("python3", "-c", script, str(worktree), str(scratch))
+
+    @staticmethod
+    def implementation_command(
+        worktree: Path, scratch: Path, _schema: Path, _prompt: str
+    ):
+        script = """\
+import json
+import sys
+from pathlib import Path
+
+worktree, scratch = map(Path, sys.argv[1:])
+subject = worktree / "subject.py"
+subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
+(scratch / "implementation.public.json").write_text(json.dumps({
+    "schema_version": 1,
+    "status": "implemented",
+    "summary": "Implemented the frozen one-point mechanism.",
+    "deviations": [],
+}))
+"""
+        return ("python3", "-c", script, str(worktree), str(scratch))
+
+    def test_planner_freezes_request_before_separate_implementation(self) -> None:
+        outcome = run_task(
+            self.task,
+            max_experiments=1,
+            planning_command_builder=self.planning_command,
+            research_command_builder=self.implementation_command,
+            public_check_command_builder=self.unconfined_public,
+            comparison_command_builder=self.unconfined_comparison,
+        )
+
+        self.assertEqual(outcome.results[0]["decision"], "ACCEPT")
+        attempt = self.task_directory / "searches" / "000001" / "attempts" / "01"
+        plan = json.loads((attempt / "planning.public.json").read_text())
+        request = json.loads((attempt / "request.public.json").read_text())
+        self.assertEqual(plan["selection"], request)
+        self.assertTrue((attempt / "implementation.public.json").is_file())
+
+    def test_all_directions_exhausted_refreshes_strategy_then_replans(self) -> None:
+        planning_calls = 0
+        strategy_calls = 0
+
+        def planning(worktree: Path, scratch: Path, schema: Path, prompt: str):
+            nonlocal planning_calls
+            planning_calls += 1
+            if planning_calls > 1:
+                return self.planning_command(worktree, scratch, schema, prompt)
+            script = """\
+import json, sys
+from pathlib import Path
+scratch = Path(sys.argv[1])
+(scratch / "planning.public.json").write_text(json.dumps({
+    "schema_version": 1,
+    "directions": [{
+        "strategy_behavior_id": "environment-compatible",
+        "champion_assessment": "The champion already expresses this behavior.",
+        "remaining_gap": "No credible gap remains under current evidence.",
+        "disposition": "exhausted",
+        "proposed_mechanism": None,
+        "evidence": ["Prior evidence leaves no material mechanism."],
+        "feasibility": "No faithful material implementation is available.",
+        "expected_value": "Further work would repeat prior evidence.",
+    }],
+    "selection_rationale": "All current directions are exhausted.",
+    "selection": None,
+}))
+"""
+            return ("python3", "-c", script, str(scratch))
+
+        def strategy(worktree, scratch, schema, prompt):
+            nonlocal strategy_calls
+            strategy_calls += 1
+            if strategy_calls > 1:
+                script = """\
+import json, sys
+from pathlib import Path
+scratch = Path(sys.argv[1])
+(scratch / "strategy.public.json").write_text(json.dumps({
+    "schema_version": 2,
+    "environment_observations": [{
+        "id": "environment-baseline",
+        "claim": "The environment supports observable actions.",
+        "status": "inferred",
+        "evidence": [{
+            "source_id": "public-environment",
+            "location": "refreshed analysis",
+            "finding": "Observable actions remain available.",
+        }],
+    }],
+    "environment_uncertainties": [],
+    "successful_policy_behaviors": [{
+        "id": "environment-compatible",
+        "behavior": "Exploit observable action consequences.",
+        "derived_from": ["environment-baseline"],
+        "rationale": "The refreshed analysis emphasizes consequences.",
+        "tradeoffs": [],
+    }],
+}))
+"""
+                return ("python3", "-c", script, str(scratch))
+            return _compatibility_strategy_command(worktree, scratch, schema, prompt)
+
+        outcome = run_task(
+            self.task,
+            max_experiments=1,
+            planning_command_builder=planning,
+            research_command_builder=self.implementation_command,
+            strategy_command_builder=strategy,
+            public_check_command_builder=self.unconfined_public,
+            comparison_command_builder=self.unconfined_comparison,
+        )
+
+        self.assertEqual(len(outcome.results), 1)
+        self.assertEqual(planning_calls, 2)
+        self.assertEqual(strategy_calls, 2)
+        exhausted = search_ledger(
+            self.task_directory,
+            query="directions_exhausted",
+            path=None,
+            decision=None,
+        )
+        self.assertEqual(len(exhausted), 1)
+        self.assertIsNone(exhausted[0]["planning"]["selection"])
+        self.assertEqual(len(list((self.task_directory / "experiments").glob("*"))), 1)
 
     @staticmethod
     def passing_review_command(
@@ -521,7 +724,7 @@ scratch = Path(sys.argv[1])
             query="exact_duplicate",
         )
         self.assertEqual(len(misses), 6)
-        self.assertEqual(task_status(self.task)["state"], "SEARCH_STALLED")
+        self.assertEqual(task_status(self.task)["state"], "READY")
 
     def test_malformed_requests_are_bounded_search_misses(self) -> None:
         def malformed(_worktree, scratch, _schema, _prompt):

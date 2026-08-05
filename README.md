@@ -22,9 +22,10 @@ the task’s `reports/experiments/` directory. Use `--json` for AI orchestration
 Task-v3 approvals content-lock the public environment implementation,
 interface, documentation, and policy-free probes. A strategy session can read
 only those sources and derives high-level successful-policy behaviors from
-cited environment observations. Fresh executors start from the latest accepted
-champion, turn one behavior into a policy mechanism, and review prior public
-telemetry and reflections before proposing another experiment.
+cited environment observations. A read-only planner compares every behavior
+against the latest accepted champion and freezes one experiment brief; a fresh
+implementer may only realize that brief. Evidence-backed exhaustion of every
+direction triggers another environment-strategy revision rather than stopping.
 
 Tasks may also require a pre-trial candidate review contract. Approval-locked
 deterministic checks catch obvious violations, then a fresh read-only execution

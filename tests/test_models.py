@@ -43,6 +43,27 @@ class TaskConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "execution.reasoning_effort"):
             TaskConfig.from_mapping(raw)
 
+    def test_planning_reflection_roles_and_unlimited_budget(self) -> None:
+        raw = valid_task()
+        raw["planning"] = {"model": "planner", "reasoning_effort": "medium"}
+        raw["reflection"] = {"model": "reflector", "reasoning_effort": "medium"}
+        raw["max_experiments"] = "unlimited"
+
+        configured = TaskConfig.from_mapping(raw)
+
+        self.assertEqual(configured.planning_model, "planner")
+        self.assertEqual(configured.planning_reasoning_effort, "medium")
+        self.assertEqual(configured.reflection_model, "reflector")
+        self.assertEqual(configured.reflection_reasoning_effort, "medium")
+        self.assertIsNone(configured.max_experiments)
+
+        legacy = TaskConfig.from_mapping(valid_task())
+        self.assertEqual(legacy.planning_model, legacy.strategy_model)
+        self.assertEqual(
+            legacy.reflection_reasoning_effort,
+            legacy.strategy_reasoning_effort,
+        )
+
     def test_optional_candidate_review_is_strict_and_bounded(self) -> None:
         raw = valid_task()
         raw["candidate_review"] = {

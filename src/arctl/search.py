@@ -1,4 +1,4 @@
-"""Public strategy, exploration history, and bounded candidate discovery records."""
+"""Public strategy, comparative planning, and exploration records."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from .errors import (
     ValidationError,
 )
 from .manifest import EvaluatorManifest
+from .models import ResearchRequest
 from .process import run_or_load_once
 from .registry import LocatedTask
 from .sandbox import command_runtime_read_paths, research_command, sanitized_environment
@@ -135,6 +136,73 @@ def research_schema(manifest: EvaluatorManifest) -> dict[str, Any]:
             ),
         }
     )
+
+
+def planning_schema(manifest: EvaluatorManifest) -> dict[str, Any]:
+    text = {"type": "string", "minLength": 1}
+    direction = _strict_schema(
+        {
+            "strategy_behavior_id": text,
+            "champion_assessment": text,
+            "remaining_gap": text,
+            "disposition": {
+                "type": "string",
+                "enum": ["candidate", "exhausted"],
+            },
+            "proposed_mechanism": {"type": ["string", "null"], "minLength": 1},
+            "evidence": {"type": "array", "minItems": 1, "items": text},
+            "feasibility": text,
+            "expected_value": text,
+        }
+    )
+    return _strict_schema(
+        {
+            "schema_version": {"type": "integer", "const": 1},
+            "directions": {"type": "array", "minItems": 1, "items": direction},
+            "selection_rationale": text,
+            "selection": {"anyOf": [research_schema(manifest), {"type": "null"}]},
+        }
+    )
+
+
+def validate_planning(
+    value: Mapping[str, Any],
+    *,
+    strategy: Mapping[str, Any],
+    ledger: Sequence[Mapping[str, Any]],
+    manifest: EvaluatorManifest,
+) -> dict[str, Any] | None:
+    expected = {
+        item["id"] for item in strategy["successful_policy_behaviors"]
+    }
+    directions = value["directions"]
+    actual = [item["strategy_behavior_id"] for item in directions]
+    if len(actual) != len(set(actual)) or set(actual) != expected:
+        raise ValidationError("planner must assess every strategy behavior exactly once")
+    for item in directions:
+        if (item["disposition"] == "candidate") != (
+            item["proposed_mechanism"] is not None
+        ):
+            raise ValidationError("planner direction disposition and mechanism disagree")
+    selection = value["selection"]
+    if selection is None:
+        if any(item["disposition"] != "exhausted" for item in directions):
+            raise ValidationError("planner may omit selection only when all directions are exhausted")
+        return None
+    ResearchRequest.from_mapping(
+        selection,
+        allowed_telemetry=manifest.public_telemetry,
+    )
+    validate_research_links(selection, strategy=strategy, ledger=ledger)
+    selected = [
+        item for item in directions
+        if item["strategy_behavior_id"] == selection["strategy_behavior_id"]
+    ][0]
+    if selected["disposition"] != "candidate":
+        raise ValidationError("planner selected an exhausted direction")
+    if selected["proposed_mechanism"] != selection["mechanism"]:
+        raise ValidationError("selected mechanism differs from its direction assessment")
+    return dict(selection)
 
 
 def _entry_files(task_directory: Path) -> list[Path]:
@@ -333,13 +401,38 @@ def ensure_strategy(
         "behaviors a successful policy should exhibit from those observations. Do not "
         "inspect or diagnose the current policy, propose algorithms or code changes, name "
         "weights or telemetry targets, restate evaluator criteria as behaviors, implement "
-        "anything, or commit. Return only the required strategy JSON.\n\n"
+        "anything, or commit. On refresh, use the public exhaustion summaries to avoid "
+        "merely republishing directions already exhausted against the current champion. "
+        "Return only the required strategy JSON.\n\n"
         + json.dumps(
             {
                 "evaluation_boundary": {"objective": task.config.objective},
                 "environment_sources": _environment_packet(task),
                 "prior_strategy": latest[1] if latest else None,
                 "refresh_reason": "candidate search misses" if refresh else "initial analysis",
+                "direction_exhaustion": (
+                    [
+                        {
+                            "source": entry["source"],
+                            "summary": entry["message"],
+                            "directions": [
+                                {
+                                    "strategy_behavior_id": direction[
+                                        "strategy_behavior_id"
+                                    ],
+                                    "evidence": direction["evidence"],
+                                }
+                                for direction in entry.get("planning", {}).get(
+                                    "directions", []
+                                )
+                            ],
+                        }
+                        for entry in load_ledger(task.directory)
+                        if entry.get("rejection_code") == "directions_exhausted"
+                    ]
+                    if refresh
+                    else []
+                ),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -469,6 +562,7 @@ def record_miss(
     request: Mapping[str, Any] | None,
     miss: ResearchMiss,
     changed_paths: Sequence[str] = (),
+    planning: Mapping[str, Any] | None = None,
 ) -> None:
     add_ledger_entry(
         task.directory,
@@ -487,5 +581,6 @@ def record_miss(
             "changed_paths": list(changed_paths),
             "rejection_code": miss.code,
             "message": str(miss),
+            **({"planning": dict(planning)} if planning is not None else {}),
         },
     )

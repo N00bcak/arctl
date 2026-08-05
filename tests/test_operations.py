@@ -75,6 +75,21 @@ class OperationsTests(unittest.TestCase):
             self.assertEqual(status["experiment_id"], 1)
             self.assertEqual(status["log_path"], str(experiment / "process"))
 
+    def test_status_distinguishes_preserved_planning_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            task_directory = Path(temporary) / "task"
+            attempt = task_directory / "searches" / "000001" / "attempts" / "01"
+            attempt.mkdir(parents=True)
+            (attempt / "planning.failure.json").write_text(
+                json.dumps({"schema_version": 1, "message": "planner failed"})
+            )
+            config = TaskConfig.from_mapping(valid_task())
+
+            status = task_status(LocatedTask(task_directory, config))
+
+            self.assertEqual(status["state"], "PLANNING_FAILED")
+            self.assertEqual(status["log_path"], str(attempt / "planning" / "process"))
+
     def test_status_distinguishes_preserved_public_check_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -40,12 +40,18 @@ evaluator:
   commit: REPLACE_WITH_COMMIT
 strategy:
   model: gpt-5.6-sol
-  reasoning_effort: high
+  reasoning_effort: medium
+planning:
+  model: gpt-5.6-sol
+  reasoning_effort: medium
 execution:
   model: gpt-5.6-terra
   reasoning_effort: medium
+reflection:
+  model: gpt-5.6-sol
+  reasoning_effort: medium
 trials: auto
-max_experiments: 30
+max_experiments: 1000
 """
 
 
@@ -199,7 +205,9 @@ def _status_table(payload: dict[str, Any]) -> str:
         )
     completed = status.get("completed_experiments", 0)
     maximum = status.get("max_experiments")
-    if maximum is not None:
+    if maximum is None:
+        rows.append(("Experiment limit", "Unlimited"))
+    else:
         suffix = " · reached" if status["state"] == "LIMIT_REACHED" else ""
         rows.append(("Experiment limit", f"{completed}/{maximum}{suffix}"))
     if status.get("provisional"):
@@ -546,9 +554,17 @@ class _ProgressView:
                 label = "Strategy refresh" if event["refresh"] else "Strategy"
                 self._line(f"{label} · revision {event['revision']}")
             elif kind == "search_attempt":
-                self._start(
-                    f"candidate search · attempt {event['attempt']}/{event['attempts']}"
-                )
+                if event.get("attempts") is None:
+                    self._start(f"research planning · pass {event['attempt']}")
+                else:
+                    self._start(
+                        f"candidate search · attempt "
+                        f"{event['attempt']}/{event['attempts']}"
+                    )
+            elif kind == "planning":
+                self._finish("complete" if event["selected"] else "exhausted")
+                if event["selected"]:
+                    self._start("implementation")
             elif kind == "retry":
                 self._finish("failed")
                 delay = self._duration(event["delay_seconds"])
@@ -809,10 +825,14 @@ def _approve(
             "approval_summary": {
                 "models": (
                     f"{located.config.strategy_model} "
-                    f"{located.config.strategy_reasoning_effort} (Strategy + reflection); "
+                    f"{located.config.strategy_reasoning_effort} (Strategy); "
+                    f"{located.config.planning_model} "
+                    f"{located.config.planning_reasoning_effort} (Planning); "
                     f"{located.config.execution_model} "
                     f"{located.config.execution_reasoning_effort} (Execution"
-                    + (" + review)" if located.config.candidate_review else ")")
+                    + (" + review); " if located.config.candidate_review else "); ")
+                    + f"{located.config.reflection_model} "
+                    + f"{located.config.reflection_reasoning_effort} (Reflection)"
                 ),
                 "editable_paths": list(located.config.editable_paths),
                 "environment": ", ".join(
@@ -887,6 +907,8 @@ def _status(data_root: Path, task_id: str | None) -> dict[str, Any]:
         action_required = True
     elif status["state"] in (
         "RESEARCH_FAILED",
+        "PLANNING_FAILED",
+        "IMPLEMENTATION_FAILED",
         "STRATEGY_FAILED",
         "PUBLIC_CHECK_FAILED",
         "REFLECTION_FAILED",
@@ -1078,6 +1100,7 @@ def _run(
     def tracked_progress(event: dict[str, Any]) -> None:
         if event["event"] in {
             "strategy",
+            "planning",
             "candidate_review",
             "candidate",
             "public_checks_complete",
@@ -1093,7 +1116,10 @@ def _run(
                 (directory / "published").is_file()
                 for directory in (task.directory / "experiments").glob("[0-9]" * 6)
             )
-            if completed >= task.config.max_experiments:
+            if (
+                task.config.max_experiments is not None
+                and completed >= task.config.max_experiments
+            ):
                 outcome = RunOutcome((), False, limit_reached=True)
                 remaining = 0
                 break

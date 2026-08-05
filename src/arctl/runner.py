@@ -7,11 +7,12 @@ import os
 import shutil
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
+from itertools import count
 from pathlib import Path
 from typing import Any, Mapping
 
 from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError
+from jsonschema.exceptions import SchemaError, ValidationError as JsonSchemaError
 
 from .approval import verify_approval
 from .calibration import CalibrationCommandBuilder, calibrate_trial_count
@@ -64,9 +65,11 @@ from .search import (
     ensure_strategy,
     load_ledger,
     next_search_id,
+    planning_schema,
     record_miss,
     research_schema,
     validate_research_links,
+    validate_planning,
 )
 from .taskio import load_manifest
 from .trials import load_trial_count, load_trial_count_record
@@ -289,20 +292,232 @@ def _research_prompt(task: LocatedTask, manifest: EvaluatorManifest) -> str:
     return (
         "Make one focused improvement to the checked-out champion for this public "
         "research task. First select one successful-policy behavior from the strategy "
-        "and name its id as strategy_behavior_id. "
-        "Then propose a concrete policy mechanism, reason about its viability, and scan "
-        "the exploration ledger's prior results, telemetry, and reflections for evidence "
-        "that supports, contradicts, or leaves it unresolved. State whether the work is "
-        "new or refines a named ledger entry. Prefer a material mechanism over an "
-        "unsupported one-off constant tweak when the editable implementation permits "
-        "structural work; substantiate numeric-only changes with a deliberate public "
-        "sweep. Treat candidate_review_contract as a hard pre-trial constraint when it "
-        "is present. Stay within editable_paths and do not "
-        "commit. Run public checks or declared probes when useful. Your final response "
-        "must be only "
-        "the required research-request JSON object.\n\n"
+        "and name its id as strategy_behavior_id. Then propose a concrete policy "
+        "mechanism, reason about viability, and review prior results, telemetry, and "
+        "reflections in the public ledger. "
+        "Prefer material mechanisms; substantiate numeric-only changes with a public "
+        "sweep. Respect the candidate review contract and editable paths, do not commit, "
+        "and return only the required research-request JSON object.\n\n"
         + json.dumps(packet, sort_keys=True, separators=(",", ":"))
     )
+
+
+def _run_planning(
+    task: LocatedTask,
+    attempt: Path,
+    worktree: Path,
+    manifest: EvaluatorManifest,
+    *,
+    command_builder: AgentCommandBuilder | None,
+    stop_path: Path,
+) -> dict[str, Any] | None:
+    strategy_files = sorted((task.directory / "strategy").glob("*.public.json"))
+    strategy = json.loads(strategy_files[-1].read_text(encoding="utf-8"))
+    ledger = load_ledger(task.directory)
+    scratch = attempt / "planning" / "output"
+    scratch.mkdir(parents=True, exist_ok=True)
+    schema_value = planning_schema(manifest)
+    schema = scratch / "planning.schema.json"
+    write_json_once(schema, schema_value)
+    packet = {
+        "objective": task.config.objective,
+        "editable_paths": list(task.config.editable_paths),
+        "public_checks": [list(command) for command in task.config.public_checks],
+        "public_probe": list(task.config.public_probe),
+        "statistic": manifest.public_statistic,
+        "telemetry": {
+            name: asdict(metric) for name, metric in manifest.public_telemetry.items()
+        },
+        "strategy": strategy,
+        "exploration_ledger": str(
+            task.directory / "exploration" / "ledger.public.jsonl"
+        ),
+        "candidate_review_contract": (
+            task.config.candidate_review.contract
+            if task.config.candidate_review is not None
+            else None
+        ),
+    }
+    prompt = (
+        "Plan the next experiment without editing the current champion. Assess every "
+        "successful-policy behavior exactly once against the champion and public "
+        "exploration ledger. For each direction, describe what the champion expresses, "
+        "the remaining gap, and either one concrete material mechanism or an "
+        "evidence-backed exhausted judgment. It is valid to exhaust every direction; "
+        "never invent a weak candidate merely to continue. After comparing all "
+        "directions, select the best request or set selection to null when all are "
+        "exhausted. A numeric-only change requires a deliberate public sweep. Do not "
+        "edit, commit, or run hidden evaluation. Return only the required planning JSON."
+        "\n\n" + json.dumps(packet, sort_keys=True, separators=(",", ":"))
+    )
+    if command_builder is None:
+        ledger_path = task.directory / "exploration" / "ledger.public.jsonl"
+        command = research_command(
+            worktree=worktree,
+            scratch=scratch,
+            output_schema=schema,
+            prompt=prompt,
+            read_paths=((ledger_path,) if ledger_path.is_file() else ()),
+            output_name="planning.public.json",
+            model=task.config.planning_model,
+            reasoning_effort=task.config.planning_reasoning_effort,
+            writable_worktree=False,
+        )
+        environment = sanitized_environment(
+            codex_home=Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))),
+            writable_home=scratch,
+        )
+    else:
+        command = command_builder(worktree, scratch, schema, prompt)
+        environment = None
+    process = attempt / "planning" / "process"
+    result = run_or_load_once(
+        process,
+        command,
+        timeout_seconds=3600,
+        max_output_bytes=2_000_000,
+        cwd=worktree,
+        env=environment,
+        stop_path=stop_path,
+    )
+    if result["return_code"] != 0:
+        transient = transient_process_error(
+            process, stage="planning", codex=command_builder is None
+        )
+        if transient is not None:
+            raise transient
+        raise StateError("fresh planning session exited unsuccessfully")
+    try:
+        value = json.loads((scratch / "planning.public.json").read_text(encoding="utf-8"))
+        Draft202012Validator(schema_value).validate(value)
+        raw_selection = value.get("selection") if isinstance(value, dict) else None
+        selection = (
+            json.loads(json.dumps(raw_selection))
+            if isinstance(raw_selection, dict)
+            else raw_selection
+        )
+        if isinstance(selection, dict) and isinstance(selection.get("expected_telemetry"), dict):
+            selection["expected_telemetry"] = {
+                name: expectation
+                for name, expectation in selection["expected_telemetry"].items()
+                if expectation is not None
+            }
+        if not isinstance(value, dict):
+            raise ValidationError("planning output is not an object")
+        validation_value = {**value, "selection": selection}
+        selected = validate_planning(
+            validation_value, strategy=strategy, ledger=ledger, manifest=manifest
+        )
+    except (OSError, json.JSONDecodeError, JsonSchemaError, ValidationError) as error:
+        raise ResearchMiss("invalid_plan", str(error)) from error
+    write_json_once(attempt / "planning.public.json", value)
+    if selected is not None:
+        write_json_once(attempt / "request.public.json", selected)
+    return selected
+
+
+def _run_implementation(
+    task: LocatedTask,
+    attempt: Path,
+    worktree: Path,
+    request: Mapping[str, Any],
+    *,
+    command_builder: ResearchCommandBuilder | None,
+    stop_path: Path,
+) -> None:
+    scratch = attempt / "implementation"
+    scratch.mkdir(parents=True, exist_ok=True)
+    schema_value = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["schema_version", "status", "summary", "deviations"],
+        "properties": {
+            "schema_version": {"type": "integer", "const": 1},
+            "status": {"type": "string", "enum": ["implemented", "infeasible"]},
+            "summary": {"type": "string", "minLength": 1},
+            "deviations": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    schema = scratch / "implementation.schema.json"
+    write_json_once(schema, schema_value)
+    prompt = (
+        "Implement exactly the frozen experiment brief in the checked-out champion. "
+        "Do not replace, broaden, or reinterpret its claim or mechanism. Stay within "
+        "editable paths, respect the candidate-review contract, and run public checks "
+        "or probes when useful. If the mechanism cannot be faithfully implemented, do "
+        "not substitute an easier idea: report infeasible. Do not commit. Return only "
+        "the required implementation JSON.\n\n"
+        + json.dumps(
+            {
+                "request": request,
+                "editable_paths": list(task.config.editable_paths),
+                "denied_paths": list(task.config.denied_paths),
+                "public_checks": [list(command) for command in task.config.public_checks],
+                "public_probe": list(task.config.public_probe),
+                "candidate_review_contract": (
+                    task.config.candidate_review.contract
+                    if task.config.candidate_review is not None
+                    else None
+                ),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    command = (
+        research_command(
+            worktree=worktree,
+            scratch=scratch,
+            output_schema=schema,
+            prompt=prompt,
+            output_name="implementation.public.json",
+            model=task.config.execution_model,
+            reasoning_effort=task.config.execution_reasoning_effort,
+        )
+        if command_builder is None
+        else command_builder(worktree, scratch, schema, prompt)
+    )
+    process = attempt / "process" / "implementation"
+    result = run_or_load_once(
+        process,
+        command,
+        timeout_seconds=3600,
+        max_output_bytes=2_000_000,
+        cwd=worktree,
+        env=(
+            sanitized_environment(
+                codex_home=Path(
+                    os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
+                ),
+                writable_home=scratch,
+            )
+            if command_builder is None
+            else None
+        ),
+        stop_path=stop_path,
+    )
+    if result["return_code"] != 0:
+        transient = transient_process_error(
+            process, stage="implementation", codex=command_builder is None
+        )
+        if transient is not None:
+            raise transient
+        raise StateError("fresh implementation session exited unsuccessfully")
+    try:
+        value = json.loads(
+            (scratch / "implementation.public.json").read_text(encoding="utf-8")
+        )
+        Draft202012Validator(schema_value).validate(value)
+    except (OSError, json.JSONDecodeError, JsonSchemaError) as error:
+        raise ResearchMiss("invalid_implementation", "invalid implementation report") from error
+    if value["status"] == "infeasible":
+        raise ResearchMiss("implementation_infeasible", value["summary"])
+    if value["deviations"]:
+        raise ResearchMiss(
+            "implementation_deviated",
+            "implementation reported deviations from the frozen brief",
+        )
+    write_json_once(attempt / "implementation.public.json", value)
 
 
 def _run_research(
@@ -423,6 +638,7 @@ def _candidate_search(
     *,
     champion: str,
     research_command_builder: ResearchCommandBuilder,
+    planning_command_builder: AgentCommandBuilder | None,
     strategy_command_builder: AgentCommandBuilder | None,
     review_command_builder: ReviewCommandBuilder | None,
     repair_command_builder: ReviewCommandBuilder | None,
@@ -430,7 +646,7 @@ def _candidate_search(
     stop_path: Path,
     progress: ProgressCallback | None,
 ) -> tuple[Path, str, dict[str, Any], Path] | None:
-    """Return one novel controller-created candidate, or a bounded stall."""
+    """Return one novel controller-created candidate."""
     recovered = _recover_candidate_review(
         task,
         manifest,
@@ -448,7 +664,7 @@ def _candidate_search(
     strategy_worktree = task.directory / "worktrees" / f"search-{search_id:06d}-strategy"
     _checkout(task.config.repo, strategy_worktree, champion)
     try:
-        revision, _ = ensure_strategy(
+        revision, strategy_value = ensure_strategy(
             task,
             strategy_worktree,
             manifest,
@@ -460,8 +676,13 @@ def _candidate_search(
         remove_worktree(task.config.repo, strategy_worktree)
     _notify(progress, "strategy", revision=revision, refresh=False)
 
-    for attempt in range(1, 7):
-        if attempt == 4:
+    split_roles = (
+        research_command_builder is _default_research_command
+        or planning_command_builder is not None
+    )
+    attempts = range(1, 1_000_000_000) if split_roles else range(1, 7)
+    for attempt in attempts:
+        if attempt == 4 and not split_roles:
             _checkout(task.config.repo, strategy_worktree, champion)
             try:
                 revision, _ = ensure_strategy(
@@ -477,19 +698,120 @@ def _candidate_search(
             _notify(progress, "strategy", revision=revision, refresh=True)
         attempt_directory = search / "attempts" / f"{attempt:02d}"
         worktree = task.directory / "worktrees" / f"search-{search_id:06d}-attempt-{attempt:02d}"
-        _notify(progress, "search_attempt", search_id=search_id, attempt=attempt, attempts=6)
+        _notify(
+            progress,
+            "search_attempt",
+            search_id=search_id,
+            attempt=attempt,
+            attempts=None if split_roles else 6,
+        )
         _checkout(task.config.repo, worktree, champion)
         try:
-            _run_research(
-                task,
-                attempt_directory,
-                worktree,
-                manifest,
-                command_builder=research_command_builder,
-                stop_path=stop_path,
-            )
-            request_path = attempt_directory / "request.public.json"
-            request = json.loads(request_path.read_text(encoding="utf-8"))
+            if split_roles:
+                try:
+                    request = _run_planning(
+                        task,
+                        attempt_directory,
+                        worktree,
+                        manifest,
+                        command_builder=planning_command_builder,
+                        stop_path=stop_path,
+                    )
+                except (StateError, TransientDownstreamError) as error:
+                    write_json_once(
+                        attempt_directory / "planning.failure.json",
+                        {"schema_version": 1, "message": str(error)},
+                    )
+                    raise
+                _notify(progress, "planning", selected=request is not None)
+                if request is None:
+                    miss = ResearchMiss(
+                        "directions_exhausted",
+                        "planner exhausted every current strategic direction",
+                    )
+                    record_miss(
+                        task,
+                        search_id=search_id,
+                        attempt=attempt,
+                        champion=champion,
+                        request=None,
+                        miss=miss,
+                        planning=json.loads(
+                            (attempt_directory / "planning.public.json").read_text(
+                                encoding="utf-8"
+                            )
+                        ),
+                    )
+                    _notify(
+                        progress,
+                        "search_miss",
+                        attempt=attempt,
+                        code=miss.code,
+                        message=str(miss),
+                    )
+                    remove_worktree(task.config.repo, worktree)
+                    while True:
+                        _checkout(task.config.repo, strategy_worktree, champion)
+                        try:
+                            revision, refreshed = ensure_strategy(
+                                task,
+                                strategy_worktree,
+                                manifest,
+                                refresh=True,
+                                command_builder=strategy_command_builder,
+                                stop_path=stop_path,
+                            )
+                        finally:
+                            remove_worktree(task.config.repo, strategy_worktree)
+                        _notify(progress, "strategy", revision=revision, refresh=True)
+                        if refreshed != strategy_value:
+                            strategy_value = refreshed
+                            break
+                        add_ledger_entry(
+                            task.directory,
+                            {
+                                "schema_version": 1,
+                                "source": f"strategy-miss:{revision:06d}",
+                                "kind": "strategy_miss",
+                                "strategy_revision": revision,
+                                "rejection_code": "exact_duplicate_strategy",
+                                "message": (
+                                    "refreshed strategy exactly duplicated the "
+                                    "exhausted strategy"
+                                ),
+                            },
+                        )
+                    continue
+                try:
+                    _run_implementation(
+                        task,
+                        attempt_directory,
+                        worktree,
+                        request,
+                        command_builder=(
+                            None
+                            if research_command_builder is _default_research_command
+                            else research_command_builder
+                        ),
+                        stop_path=stop_path,
+                    )
+                except (StateError, TransientDownstreamError) as error:
+                    write_json_once(
+                        attempt_directory / "implementation.failure.json",
+                        {"schema_version": 1, "message": str(error)},
+                    )
+                    raise
+            else:
+                _run_research(
+                    task,
+                    attempt_directory,
+                    worktree,
+                    manifest,
+                    command_builder=research_command_builder,
+                    stop_path=stop_path,
+                )
+                request_path = attempt_directory / "request.public.json"
+                request = json.loads(request_path.read_text(encoding="utf-8"))
             if not isinstance(request, dict):
                 raise ResearchMiss("invalid_request", "research request is not an object")
             try:
@@ -533,7 +855,7 @@ def _candidate_search(
             remove_worktree(task.config.repo, worktree)
             raise
         except TransientDownstreamError as error:
-            if error.stage == "execution":
+            if error.stage in ("execution", "planning", "implementation"):
                 remove_worktree(task.config.repo, worktree)
             raise
         except ResearchMiss as miss:
@@ -588,7 +910,19 @@ def _recover_candidate_review(
         if (search / "stalled.public.json").is_file():
             continue
         search_id = int(search.name)
-        attempts = sorted((search / "attempts").glob("[0-9][0-9]"), reverse=True)
+        attempts_root = search / "attempts"
+        attempts = (
+            sorted(
+                (
+                    path
+                    for path in attempts_root.iterdir()
+                    if path.is_dir() and path.name.isdigit()
+                ),
+                reverse=True,
+            )
+            if attempts_root.is_dir()
+            else []
+        )
         for attempt_directory in attempts:
             if not (attempt_directory / "candidate-review").is_dir():
                 continue
@@ -1005,6 +1339,7 @@ def run_task(
     *,
     max_experiments: int | None = None,
     research_command_builder: ResearchCommandBuilder = _default_research_command,
+    planning_command_builder: AgentCommandBuilder | None = None,
     strategy_command_builder: AgentCommandBuilder | None | object = _DEFAULT_STRATEGY,
     review_command_builder: ReviewCommandBuilder | None = None,
     repair_command_builder: ReviewCommandBuilder | None = None,
@@ -1028,12 +1363,15 @@ def run_task(
     for published in _public_history(task, manifest):
         _record_official_result(task, published, manifest)
     limit = task.config.max_experiments if max_experiments is None else max_experiments
-    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+    if limit is not None and (
+        isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+    ):
         raise StateError("max experiments must be a positive integer")
-    remaining = task.config.max_experiments - _completed_experiment_count(
-        task.directory
-    )
-    limit = min(limit, max(remaining, 0))
+    if task.config.max_experiments is not None:
+        remaining = task.config.max_experiments - _completed_experiment_count(
+            task.directory
+        )
+        limit = max(remaining, 0) if limit is None else min(limit, max(remaining, 0))
 
     initial_stop = task.directory / "stop.requested"
     if initial_stop.exists() and _active_experiment(task.directory) is None:
@@ -1092,7 +1430,7 @@ def run_task(
     stopped = False
     stalled = False
     reflection_failed = False
-    for _ in range(limit):
+    for _ in (range(limit) if limit is not None else count()):
         stop = task.directory / "stop.requested"
         active = _active_experiment(task.directory)
         if stop.exists():
@@ -1213,6 +1551,7 @@ def run_task(
                     manifest,
                     champion=champion,
                     research_command_builder=research_command_builder,
+                    planning_command_builder=planning_command_builder,
                     strategy_command_builder=strategy_command_builder,  # type: ignore[arg-type]
                     review_command_builder=review_command_builder,
                     repair_command_builder=repair_command_builder,
@@ -1231,6 +1570,10 @@ def run_task(
             experiment, record = start_experiment(task.directory, champion)
             write_json_once(experiment / "request.public.json", raw_request)
             atomic_write_text(experiment / "candidate.commit", candidate + "\n")
+            for name in ("planning.public.json", "implementation.public.json"):
+                source = search_attempt / name
+                if source.is_file():
+                    shutil.copy2(source, experiment / name)
             review_directory = search_attempt / "candidate-review"
             if review_directory.is_dir():
                 shutil.copytree(review_directory, experiment / "candidate-review")
@@ -1503,7 +1846,7 @@ def run_task(
         experiments=len(results),
         stopped=stopped,
     )
-    limit_reached = (
+    limit_reached = task.config.max_experiments is not None and (
         _completed_experiment_count(task.directory) >= task.config.max_experiments
     )
     return RunOutcome(

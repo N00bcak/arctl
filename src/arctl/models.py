@@ -230,11 +230,15 @@ class TaskConfig:
     environment_sources: tuple[EnvironmentSource, ...]
     evaluator: EvaluatorRef
     trials: Literal["auto"] | int
-    max_experiments: int
+    max_experiments: int | None
     strategy_model: str = "gpt-5.6-sol"
-    strategy_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] = "high"
+    strategy_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] = "medium"
+    planning_model: str = "gpt-5.6-sol"
+    planning_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] = "medium"
     execution_model: str = "gpt-5.6-terra"
     execution_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] = "medium"
+    reflection_model: str = "gpt-5.6-sol"
+    reflection_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] = "medium"
     candidate_review: CandidateReviewConfig | None = None
     schema_version: int = 3
 
@@ -248,7 +252,7 @@ class TaskConfig:
     def from_mapping(cls, value: Mapping[str, Any]) -> TaskConfig:
         actual = set(value)
         required = _TASK_FIELDS | {"strategy", "execution"}
-        allowed = required | {"candidate_review"}
+        allowed = required | {"planning", "reflection", "candidate_review"}
         if not required <= actual or not actual <= allowed:
             missing = sorted(required - actual)
             extra = sorted(actual - allowed)
@@ -265,14 +269,16 @@ class TaskConfig:
         ):
             raise ValidationError("trials must be 'auto' or a positive integer")
         maximum = value["max_experiments"]
-        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
-            raise ValidationError("max_experiments must be a positive integer")
+        if maximum == "unlimited":
+            maximum = None
+        elif isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
+            raise ValidationError("max_experiments must be a positive integer or 'unlimited'")
         strategy = value["strategy"]
         if not isinstance(strategy, Mapping):
             raise ValidationError("strategy must be an object")
         _require_exact_fields(strategy, _STRATEGY_FIELDS, "strategy")
         strategy_model = _string(strategy.get("model", "gpt-5.6-sol"), "strategy.model")
-        strategy_effort = strategy.get("reasoning_effort", "high")
+        strategy_effort = strategy.get("reasoning_effort", "medium")
         if strategy_effort not in {"minimal", "low", "medium", "high", "xhigh"}:
             raise ValidationError("strategy.reasoning_effort is invalid")
         execution = value["execution"]
@@ -285,6 +291,22 @@ class TaskConfig:
         execution_effort = execution.get("reasoning_effort", "medium")
         if execution_effort not in {"minimal", "low", "medium", "high", "xhigh"}:
             raise ValidationError("execution.reasoning_effort is invalid")
+        planning = value.get("planning", strategy)
+        if not isinstance(planning, Mapping):
+            raise ValidationError("planning must be an object")
+        _require_exact_fields(planning, _STRATEGY_FIELDS, "planning")
+        planning_model = _string(planning["model"], "planning.model")
+        planning_effort = planning["reasoning_effort"]
+        if planning_effort not in {"minimal", "low", "medium", "high", "xhigh"}:
+            raise ValidationError("planning.reasoning_effort is invalid")
+        reflection = value.get("reflection", strategy)
+        if not isinstance(reflection, Mapping):
+            raise ValidationError("reflection must be an object")
+        _require_exact_fields(reflection, _STRATEGY_FIELDS, "reflection")
+        reflection_model = _string(reflection["model"], "reflection.model")
+        reflection_effort = reflection["reasoning_effort"]
+        if reflection_effort not in {"minimal", "low", "medium", "high", "xhigh"}:
+            raise ValidationError("reflection.reasoning_effort is invalid")
         return cls(
             task_id=validate_task_id(value["task_id"]),
             repo=repo,
@@ -299,8 +321,12 @@ class TaskConfig:
             max_experiments=maximum,
             strategy_model=strategy_model,
             strategy_reasoning_effort=strategy_effort,
+            planning_model=planning_model,
+            planning_reasoning_effort=planning_effort,
             execution_model=execution_model,
             execution_reasoning_effort=execution_effort,
+            reflection_model=reflection_model,
+            reflection_reasoning_effort=reflection_effort,
             candidate_review=(
                 _candidate_review(value["candidate_review"])
                 if "candidate_review" in value

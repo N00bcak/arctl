@@ -219,5 +219,6 @@ __marimo__/
 
 # Local arctl development and private experiment state
 /test_tris/
+/test_mnist/
 .arctl-data/
 /SCRATCHPAD.md

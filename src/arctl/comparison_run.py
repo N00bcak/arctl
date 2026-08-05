@@ -9,6 +9,7 @@ from typing import Any, Callable, Literal, Mapping, Sequence
 from jsonschema import Draft202012Validator
 
 from .commands import render_command
+from .downstream import primary_process_error
 from .comparison import ComparisonReservation
 from .errors import ProcessError, StateError, StoppedError, ValidationError
 from .git import ensure_clean_worktree, resolve_commit
@@ -136,7 +137,10 @@ def _run_process(
                 "sandbox",
                 f"{source} sandbox did not start its reserved command",
             )
-        raise ComparisonFailure(source, f"{source} process exited unsuccessfully")
+        detail = primary_process_error(directory)
+        raise ComparisonFailure(
+            source, f"{source} process exited unsuccessfully: {detail}"
+        )
 
 
 def _validate_batch(

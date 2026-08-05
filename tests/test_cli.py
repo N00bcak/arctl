@@ -65,6 +65,9 @@ class CliTests(unittest.TestCase):
             self.assertIn("kind: documentation", task_text)
             self.assertIn("model: gpt-5.6-sol", task_text)
             self.assertIn("model: gpt-5.6-terra", task_text)
+            self.assertIn("planning:\n  model: gpt-5.6-sol", task_text)
+            self.assertIn("reflection:\n  model: gpt-5.6-sol", task_text)
+            self.assertIn("max_experiments: 1000", task_text)
 
             code, output = self.run_cli(
                 [
@@ -250,6 +253,12 @@ class CliTests(unittest.TestCase):
         with contextlib.redirect_stdout(pending):
             _emit(payload, as_json=False)
         self.assertIn("Unfrozen (to be autocalibrated)", pending.getvalue())
+
+        payload["status"]["max_experiments"] = None
+        unlimited = io.StringIO()
+        with contextlib.redirect_stdout(unlimited):
+            _emit(payload, as_json=False)
+        self.assertIn("│ Experiment limit │ Unlimited", unlimited.getvalue())
 
     def test_report_table_prints_dossier_root_once_and_preserves_exact_json(self) -> None:
         root = "/tmp/" + "long-root/" * 10 + "reports/experiments"

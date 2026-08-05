@@ -125,18 +125,23 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
     )
     searches = sorted((task.directory / "searches").glob("[0-9]" * 6))
     latest_search = searches[-1] if searches else None
-    search_stalled = (
-        latest_search is not None
-        and (latest_search / "stalled.public.json").is_file()
-        and (latest is None or latest.state == "COMPLETE")
-    )
     attempts = (
-        sorted((latest_search / "attempts").glob("[0-9][0-9]"))
-        if latest_search is not None
+        sorted(
+            path
+            for path in (latest_search / "attempts").iterdir()
+            if path.is_dir() and path.name.isdigit()
+        )
+        if latest_search is not None and (latest_search / "attempts").is_dir()
         else []
     )
     search_research_failed = bool(
         attempts and (attempts[-1] / "research.failure.json").is_file()
+    )
+    planning_failed = bool(
+        attempts and (attempts[-1] / "planning.failure.json").is_file()
+    )
+    implementation_failed = bool(
+        attempts and (attempts[-1] / "implementation.failure.json").is_file()
     )
 
     strategy_failed = bool(
@@ -167,6 +172,10 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
         state = "REFLECTION_FAILED"
     elif strategy_failed:
         state = "STRATEGY_FAILED"
+    elif planning_failed:
+        state = "PLANNING_FAILED"
+    elif implementation_failed:
+        state = "IMPLEMENTATION_FAILED"
     elif search_research_failed:
         state = "RESEARCH_FAILED"
     elif (
@@ -181,10 +190,12 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
         state = "PUBLIC_CHECK_FAILED"
     elif latest is not None and latest.state != "COMPLETE":
         state = latest.state
-    elif approved and completed_experiments >= task.config.max_experiments:
+    elif (
+        approved
+        and task.config.max_experiments is not None
+        and completed_experiments >= task.config.max_experiments
+    ):
         state = "LIMIT_REACHED"
-    elif search_stalled:
-        state = "SEARCH_STALLED"
     elif approved and trial_count is not None:
         state = "READY"
     elif approved and calibration == "failed":
@@ -228,6 +239,10 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
             if reflection_failed
             else str(strategy_failures[-1].parent / "process")
             if strategy_failed
+            else str(attempts[-1] / "planning" / "process")
+            if planning_failed
+            else str(attempts[-1] / "process" / "implementation")
+            if implementation_failed
             else str(attempts[-1] / "process")
             if search_research_failed
             else str(directories[-1] / "process")
@@ -339,6 +354,8 @@ def inspect_experiment(
                 if path.name.endswith(".public.json")
                 or path.name in {
                     "request.public.json",
+                    "planning.public.json",
+                    "implementation.public.json",
                     "result.public.json",
                     "reflection.public.json",
                     "published",

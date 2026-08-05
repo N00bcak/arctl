@@ -48,6 +48,19 @@ class DownstreamTests(unittest.TestCase):
             self.assertEqual(error.category, "network")
             self.assertIn("HTTPError", error.detail)
 
+    def test_python_traceback_surfaces_terminal_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            process = Path(temporary)
+            (process / "stderr.bin").write_text(
+                "Traceback (most recent call last):\n"
+                "  File 'evaluator.py', line 5, in <module>\n"
+                "ModuleNotFoundError: No module named 'numpy'\n"
+            )
+            self.assertEqual(
+                primary_process_error(process),
+                "ModuleNotFoundError: No module named 'numpy'",
+            )
+
     def test_retry_budget_is_consecutive_and_resets_on_success(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             events: list[dict] = []

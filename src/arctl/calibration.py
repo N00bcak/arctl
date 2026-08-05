@@ -15,6 +15,7 @@ from .comparison_run import (
     _validate_subject_output,
 )
 from .errors import ProcessError, StateError
+from .downstream import primary_process_error
 from .git import ensure_clean_worktree, resolve_commit
 from .manifest import EvaluatorManifest
 from .models import TaskConfig
@@ -166,8 +167,10 @@ def _run_pilot_process(
             raise StateError(
                 f"calibration {source} sandbox did not start its reserved command"
             )
+        detail = primary_process_error(directory)
         raise StateError(
-            f"calibration {source} exited unsuccessfully and cannot be retried"
+            f"calibration {source} exited unsuccessfully and cannot be retried: "
+            f"{detail}"
         )
 
 
@@ -721,7 +724,11 @@ def calibrate_trial_count(
     except (ProcessError, StateError) as error:
         raise StateError("automatic calibration failed and cannot be retried") from error
     if result["return_code"] != 0:
-        raise StateError("automatic calibration exited unsuccessfully and cannot be retried")
+        detail = primary_process_error(root / "process")
+        raise StateError(
+            "automatic calibration exited unsuccessfully and cannot be retried: "
+            f"{detail}"
+        )
     response = _load_object(response_path, "calibration response")
     count = _validated_response(
         response,

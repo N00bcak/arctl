@@ -26,8 +26,8 @@ the normative contract; this document emphasizes how the pieces fit together.
   └────────────────┘            └────────────┬───────────┘
                                              │
                  ┌───────────────────────────v──────────────────────────┐
-                 │ Start from latest champion; propose one mechanism;   │
-                 │ inspect public history; edit only approved paths     │
+                 │ Compare every behavior against the latest champion; │
+                 │ freeze one brief, then implement only that brief     │
                  └───────────────────────────┬──────────────────────────┘
                                              │ candidate
                                              v
@@ -49,7 +49,7 @@ the normative contract; this document emphasizes how the pieces fit together.
                                              v
                  ┌──────────────────────────────────────────────────────┐
                  │ Telemetry reflection -> publish result + dossier ->  │
-                 │ append public ledger -> loop until stop/stall/limit  │
+                 │ append public ledger -> loop until stop or limit     │
                  └──────────────────────────────────────────────────────┘
 ```
 
@@ -103,16 +103,16 @@ flowchart TD
     CAL -->|process/evidence failure| CALF[CALIBRATION_FAILED]
     READY -->|arctl run| WORK[Active search or experiment state]
     WORK -->|safe stop| STOP[STOPPED]
-    WORK -->|six candidate misses| STALL[SEARCH_STALLED]
+    WORK -->|all directions exhausted| REVISE[Revise environment strategy]
     WORK -->|recoverable downstream failure| FAIL[Inspectable failure state]
     WORK -->|experiment published| READY
     READY -->|completed equals approved maximum| LIMIT[LIMIT_REACHED]
-    STALL -->|explicit later run| WORK
+    REVISE --> WORK
     FAIL -->|safe recovery or retry| WORK
     STOP -->|explicit later run| WORK
 ```
 
-`max_experiments` is an approval-locked lifetime ceiling. The
+`max_experiments` is an approval-locked lifetime ceiling or `unlimited`. The
 `--max-experiments` option is only a smaller per-invocation bound. Reaching the
 task ceiling produces `LIMIT_REACHED`; it does not run calibration again or
 pretend that an empty invocation tested a candidate.
@@ -149,21 +149,24 @@ guarantee for every future effect. A ceiling fallback remains visible in
 
 ## Strategy and candidate search
 
-Strategy and execution deliberately have different information. Strategy sees
+Strategy, planning, and execution deliberately have different information. Strategy sees
 the objective as a boundary plus approval-locked environment sources and
 policy-free probes. It does not see the champion, evaluator statistic,
-telemetry targets, or exploration ledger. Execution sees the current champion,
-strategy behaviors, editable-path contract, public probes, and public history.
+telemetry targets, or current policy. Planning sees the current champion,
+strategy behaviors, and public history but cannot edit. Execution receives one
+frozen brief and may edit only approved paths.
 
 ```mermaid
 flowchart TD
     START[Need candidate] --> STRAT{Current strategy exists?}
     STRAT -->|no| ANALYZE[Fresh read-only environment analysis]
-    STRAT -->|yes| ATTEMPT
+    STRAT -->|yes| PLAN
     ANALYZE --> BEHAVIOR[Publish cited successful-policy behaviors]
-    BEHAVIOR --> ATTEMPT[Fresh execution attempt from latest champion]
-    ATTEMPT --> REQUEST[Select behavior; propose mechanism; review ledger evidence]
-    REQUEST --> EDIT[Edit only approved paths and run public development tools]
+    BEHAVIOR --> PLAN[Assess every behavior against latest champion]
+    PLAN -->|all exhausted| REFRESH[Refresh environment strategy]
+    REFRESH --> PLAN
+    PLAN --> REQUEST[Freeze best evidence-backed experiment brief]
+    REQUEST --> EDIT[Fresh implementer edits only approved paths]
     EDIT --> VALIDATE{Request, links, paths, and tree valid?}
     VALIDATE -->|no| MISS[Record typed public search miss]
     VALIDATE -->|yes| GUARD[Deterministic policy checks]
@@ -172,11 +175,7 @@ flowchart TD
     REVIEW -->|fail and repair available| REPAIR[Fresh bounded repair]
     REPAIR --> GUARD
     REVIEW -->|fail after bound| MISS
-    MISS --> COUNT{Three or six misses?}
-    COUNT -->|fewer than three| ATTEMPT
-    COUNT -->|three| REFRESH[Refresh environment strategy once]
-    REFRESH --> ATTEMPT
-    COUNT -->|six| STALL[SEARCH_STALLED; no experiment or seeds consumed]
+    MISS --> PLAN
 ```
 
 Exact duplicate Git trees are hard misses. Semantic similarity is only ledger

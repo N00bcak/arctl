@@ -100,8 +100,9 @@ class ApprovalIntegrationTests(unittest.TestCase):
         summary = payload["approval_summary"]
         self.assertEqual(
             summary["models"],
-            "gpt-5.6-sol high (Strategy + reflection); "
-            "gpt-5.6-terra medium (Execution)",
+            "gpt-5.6-sol high (Strategy); gpt-5.6-sol high (Planning); "
+            "gpt-5.6-terra medium (Execution); "
+            "gpt-5.6-sol high (Reflection)",
         )
         self.assertEqual(summary["editable_paths"], ["src/**", "tests/**"])
         self.assertEqual(summary["environment"], "public-environment, environment-probe")
