@@ -57,7 +57,12 @@ from .process import run_or_load_once
 from .reflection import ReflectionCommandBuilder, run_reflection, validate_reflection
 from .registry import LocatedTask
 from .results import validate_public_result
-from .sandbox import command_runtime_read_paths, research_command, sanitized_environment
+from .sandbox import (
+    agent_prompt_path,
+    command_runtime_read_paths,
+    research_command,
+    sanitized_environment,
+)
 from .storage import atomic_write_text, write_json_once
 from .search import (
     AgentCommandBuilder,
@@ -66,6 +71,7 @@ from .search import (
     load_ledger,
     next_search_id,
     planning_schema,
+    rebuild_catalog,
     record_miss,
     research_schema,
     validate_research_links,
@@ -153,6 +159,7 @@ class RunOutcome:
     stalled: bool = False
     reflection_failed: bool = False
     limit_reached: bool = False
+    reflection_error: str | None = None
 
 
 def _default_research_command(
@@ -280,9 +287,11 @@ def _research_prompt(task: LocatedTask, manifest: EvaluatorManifest) -> str:
             name: asdict(metric)
             for name, metric in manifest.public_telemetry.items()
         },
-        "completed_results": _public_history(task, manifest),
         "strategy": strategy,
-        "exploration_ledger": str(task.directory / "exploration" / "ledger.public.jsonl"),
+        "exploration_catalog": str(
+            task.directory / "exploration" / "ledger.public.jsonl"
+        ),
+        "exploration_entries": str(task.directory / "exploration" / "entries"),
         "candidate_review_contract": (
             task.config.candidate_review.contract
             if task.config.candidate_review is not None
@@ -293,8 +302,9 @@ def _research_prompt(task: LocatedTask, manifest: EvaluatorManifest) -> str:
         "Make one focused improvement to the checked-out champion for this public "
         "research task. First select one successful-policy behavior from the strategy "
         "and name its id as strategy_behavior_id. Then propose a concrete policy "
-        "mechanism, reason about viability, and review prior results, telemetry, and "
-        "reflections in the public ledger. "
+        "mechanism, reason about viability, and search prior results, telemetry, and "
+        "reflections through the compact public catalog before opening only the "
+        "canonical history entries relevant to the decision. "
         "Prefer material mechanisms; substantiate numeric-only changes with a public "
         "sweep. Respect the candidate review contract and editable paths, do not commit, "
         "and return only the required research-request JSON object.\n\n"
@@ -329,9 +339,10 @@ def _run_planning(
             name: asdict(metric) for name, metric in manifest.public_telemetry.items()
         },
         "strategy": strategy,
-        "exploration_ledger": str(
+        "exploration_catalog": str(
             task.directory / "exploration" / "ledger.public.jsonl"
         ),
+        "exploration_entries": str(task.directory / "exploration" / "entries"),
         "candidate_review_contract": (
             task.config.candidate_review.contract
             if task.config.candidate_review is not None
@@ -341,9 +352,14 @@ def _run_planning(
     prompt = (
         "Plan the next experiment without editing the current champion. Assess every "
         "successful-policy behavior exactly once against the champion and public "
-        "exploration ledger. For each direction, describe what the champion expresses, "
-        "the remaining gap, and either one concrete material mechanism or an "
-        "evidence-backed exhausted judgment. It is valid to exhaust every direction; "
+        "exploration catalog. Search the catalog, then open only relevant canonical "
+        "entries. For each direction, describe what the champion expresses and the "
+        "remaining gap, then attach one complete research request or mark the direction "
+        "exhausted. The top-level selection must contain only the chosen strategy "
+        "behavior id; the selected direction's request is the sole frozen request. "
+        "Requests may specify only policy changes within editable paths: never prescribe "
+        "trial counts, seeds, calibration, statistical thresholds, evaluator changes, "
+        "or other controller-owned protocol. It is valid to exhaust every direction; "
         "never invent a weak candidate merely to continue. After comparing all "
         "directions, select the best request or set selection to null when all are "
         "exhausted. A numeric-only change requires a deliberate public sweep. Do not "
@@ -351,13 +367,13 @@ def _run_planning(
         "\n\n" + json.dumps(packet, sort_keys=True, separators=(",", ":"))
     )
     if command_builder is None:
-        ledger_path = task.directory / "exploration" / "ledger.public.jsonl"
+        exploration = task.directory / "exploration"
         command = research_command(
             worktree=worktree,
             scratch=scratch,
             output_schema=schema,
             prompt=prompt,
-            read_paths=((ledger_path,) if ledger_path.is_file() else ()),
+            read_paths=((exploration,) if exploration.is_dir() else ()),
             output_name="planning.public.json",
             model=task.config.planning_model,
             reasoning_effort=task.config.planning_reasoning_effort,
@@ -379,6 +395,11 @@ def _run_planning(
         cwd=worktree,
         env=environment,
         stop_path=stop_path,
+        stdin_path=(
+            agent_prompt_path(scratch)
+            if command_builder is None and agent_prompt_path(scratch).is_file()
+            else None
+        ),
     )
     if result["return_code"] != 0:
         transient = transient_process_error(
@@ -390,23 +411,10 @@ def _run_planning(
     try:
         value = json.loads((scratch / "planning.public.json").read_text(encoding="utf-8"))
         Draft202012Validator(schema_value).validate(value)
-        raw_selection = value.get("selection") if isinstance(value, dict) else None
-        selection = (
-            json.loads(json.dumps(raw_selection))
-            if isinstance(raw_selection, dict)
-            else raw_selection
-        )
-        if isinstance(selection, dict) and isinstance(selection.get("expected_telemetry"), dict):
-            selection["expected_telemetry"] = {
-                name: expectation
-                for name, expectation in selection["expected_telemetry"].items()
-                if expectation is not None
-            }
         if not isinstance(value, dict):
             raise ValidationError("planning output is not an object")
-        validation_value = {**value, "selection": selection}
         selected = validate_planning(
-            validation_value, strategy=strategy, ledger=ledger, manifest=manifest
+            value, strategy=strategy, ledger=ledger, manifest=manifest
         )
     except (OSError, json.JSONDecodeError, JsonSchemaError, ValidationError) as error:
         raise ResearchMiss("invalid_plan", str(error)) from error
@@ -473,6 +481,17 @@ def _run_implementation(
             output_name="implementation.public.json",
             model=task.config.execution_model,
             reasoning_effort=task.config.execution_reasoning_effort,
+            read_paths=tuple(
+                dict.fromkeys(
+                    path
+                    for public_command in (
+                        *task.config.public_checks,
+                        task.config.public_probe,
+                    )
+                    for path in command_runtime_read_paths(public_command)
+                    if not path.is_relative_to(worktree)
+                )
+            ),
         )
         if command_builder is None
         else command_builder(worktree, scratch, schema, prompt)
@@ -495,6 +514,11 @@ def _run_implementation(
             else None
         ),
         stop_path=stop_path,
+        stdin_path=(
+            agent_prompt_path(scratch)
+            if command_builder is None and agent_prompt_path(scratch).is_file()
+            else None
+        ),
     )
     if result["return_code"] != 0:
         transient = transient_process_error(
@@ -538,9 +562,9 @@ def _run_research(
         runtime_paths: list[Path] = []
         for public_command in (*task.config.public_checks, task.config.public_probe):
             runtime_paths.extend(command_runtime_read_paths(public_command))
-        ledger = task.directory / "exploration" / "ledger.public.jsonl"
-        if ledger.is_file():
-            runtime_paths.append(ledger)
+        exploration = task.directory / "exploration"
+        if exploration.is_dir():
+            runtime_paths.append(exploration)
         command = research_command(
             worktree=worktree,
             scratch=scratch,
@@ -576,6 +600,11 @@ def _run_research(
                 cwd=worktree,
                 env=environment,
                 stop_path=stop_path,
+                stdin_path=(
+                    agent_prompt_path(scratch)
+                    if command_builder is _default_research_command
+                    else None
+                ),
             )
         except StoppedError:
             raise
@@ -1362,6 +1391,7 @@ def run_task(
     )
     for published in _public_history(task, manifest):
         _record_official_result(task, published, manifest)
+    rebuild_catalog(task.directory)
     limit = task.config.max_experiments if max_experiments is None else max_experiments
     if limit is not None and (
         isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
@@ -1430,6 +1460,7 @@ def run_task(
     stopped = False
     stalled = False
     reflection_failed = False
+    reflection_error = None
     for _ in (range(limit) if limit is not None else count()):
         stop = task.directory / "stop.requested"
         active = _active_experiment(task.directory)
@@ -1517,13 +1548,15 @@ def run_task(
                 stop.unlink(missing_ok=True)
                 stopped = True
                 break
-            except (OSError, json.JSONDecodeError, StateError):
+            except (OSError, json.JSONDecodeError, StateError) as error:
                 _mark_reflection_failed(experiment)
                 reflection_failed = True
+                reflection_error = str(error)
                 _notify(
                     progress,
                     "reflection_failed",
                     experiment_id=load_experiment(experiment).experiment_id,
+                    message=reflection_error,
                 )
                 break
             results.append(result_value)
@@ -1824,13 +1857,15 @@ def run_task(
                 stop.unlink(missing_ok=True)
                 stopped = True
                 break
-            except StateError:
+            except StateError as error:
                 _mark_reflection_failed(experiment)
                 reflection_failed = True
+                reflection_error = str(error)
                 _notify(
                     progress,
                     "reflection_failed",
                     experiment_id=record.experiment_id,
+                    message=reflection_error,
                 )
                 break
         _record_official_result(task, result, manifest)
@@ -1850,5 +1885,10 @@ def run_task(
         _completed_experiment_count(task.directory) >= task.config.max_experiments
     )
     return RunOutcome(
-        tuple(results), stopped, stalled, reflection_failed, limit_reached
+        tuple(results),
+        stopped,
+        stalled,
+        reflection_failed,
+        limit_reached,
+        reflection_error,
     )

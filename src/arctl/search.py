@@ -25,7 +25,12 @@ from .manifest import EvaluatorManifest
 from .models import ResearchRequest
 from .process import run_or_load_once
 from .registry import LocatedTask
-from .sandbox import command_runtime_read_paths, research_command, sanitized_environment
+from .sandbox import (
+    agent_prompt_path,
+    command_runtime_read_paths,
+    research_command,
+    sanitized_environment,
+)
 from .storage import atomic_write_text, write_json_once
 
 AgentCommandBuilder = Callable[[Path, Path, Path, str], Sequence[str]]
@@ -149,7 +154,7 @@ def planning_schema(manifest: EvaluatorManifest) -> dict[str, Any]:
                 "type": "string",
                 "enum": ["candidate", "exhausted"],
             },
-            "proposed_mechanism": {"type": ["string", "null"], "minLength": 1},
+            "request": {"anyOf": [research_schema(manifest), {"type": "null"}]},
             "evidence": {"type": "array", "minItems": 1, "items": text},
             "feasibility": text,
             "expected_value": text,
@@ -157,10 +162,10 @@ def planning_schema(manifest: EvaluatorManifest) -> dict[str, Any]:
     )
     return _strict_schema(
         {
-            "schema_version": {"type": "integer", "const": 1},
+            "schema_version": {"type": "integer", "const": 2},
             "directions": {"type": "array", "minItems": 1, "items": direction},
             "selection_rationale": text,
-            "selection": {"anyOf": [research_schema(manifest), {"type": "null"}]},
+            "selection": {"type": ["string", "null"], "minLength": 1},
         }
     )
 
@@ -179,30 +184,44 @@ def validate_planning(
     actual = [item["strategy_behavior_id"] for item in directions]
     if len(actual) != len(set(actual)) or set(actual) != expected:
         raise ValidationError("planner must assess every strategy behavior exactly once")
+    requests: dict[str, Mapping[str, Any]] = {}
     for item in directions:
+        request = item["request"]
         if (item["disposition"] == "candidate") != (
-            item["proposed_mechanism"] is not None
+            request is not None
         ):
-            raise ValidationError("planner direction disposition and mechanism disagree")
+            raise ValidationError("planner direction disposition and request disagree")
+        if request is None:
+            continue
+        normalized_request = dict(request)
+        telemetry = normalized_request.get("expected_telemetry")
+        if isinstance(telemetry, Mapping):
+            normalized_request["expected_telemetry"] = {
+                name: expectation
+                for name, expectation in telemetry.items()
+                if expectation is not None
+            }
+        ResearchRequest.from_mapping(
+            normalized_request,
+            allowed_telemetry=manifest.public_telemetry,
+        )
+        if (
+            normalized_request["strategy_behavior_id"]
+            != item["strategy_behavior_id"]
+        ):
+            raise ValidationError("planner request belongs to a different direction")
+        validate_research_links(normalized_request, strategy=strategy, ledger=ledger)
+        requests[item["strategy_behavior_id"]] = normalized_request
     selection = value["selection"]
     if selection is None:
         if any(item["disposition"] != "exhausted" for item in directions):
             raise ValidationError("planner may omit selection only when all directions are exhausted")
         return None
-    ResearchRequest.from_mapping(
-        selection,
-        allowed_telemetry=manifest.public_telemetry,
-    )
-    validate_research_links(selection, strategy=strategy, ledger=ledger)
-    selected = [
-        item for item in directions
-        if item["strategy_behavior_id"] == selection["strategy_behavior_id"]
-    ][0]
-    if selected["disposition"] != "candidate":
+    if selection not in expected:
+        raise ValidationError("planner selected an unknown direction")
+    if selection not in requests:
         raise ValidationError("planner selected an exhausted direction")
-    if selected["proposed_mechanism"] != selection["mechanism"]:
-        raise ValidationError("selected mechanism differs from its direction assessment")
-    return dict(selection)
+    return dict(requests[selection])
 
 
 def _entry_files(task_directory: Path) -> list[Path]:
@@ -238,19 +257,143 @@ def add_ledger_entry(task_directory: Path, entry: Mapping[str, Any]) -> dict[str
         task_directory / "exploration" / "entries" / f"{identifier}.public.json",
         value,
     )
-    _rebuild_ledger(task_directory)
+    rebuild_catalog(task_directory)
     return value
 
 
 def _rebuild_ledger(task_directory: Path) -> None:
     lines = [
-        json.dumps(entry, sort_keys=True, separators=(",", ":"))
+        json.dumps(
+            _catalog_entry(task_directory, entry),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         for entry in load_ledger(task_directory)
     ]
     atomic_write_text(
         task_directory / "exploration" / "ledger.public.jsonl",
         "\n".join(lines) + ("\n" if lines else ""),
     )
+
+
+def rebuild_catalog(task_directory: Path) -> None:
+    """Regenerate bounded public indexes from canonical exploration entries."""
+    _rebuild_ledger(task_directory)
+    exhaustion = [
+        {
+            "entry_id": entry["entry_id"],
+            "source": entry["source"],
+            "summary": entry["message"],
+            "directions": [
+                {
+                    "strategy_behavior_id": direction["strategy_behavior_id"],
+                    "evidence": direction["evidence"],
+                }
+                for direction in entry.get("planning", {}).get("directions", [])
+            ],
+        }
+        for entry in load_ledger(task_directory)
+        if entry.get("rejection_code") == "directions_exhausted"
+    ]
+    atomic_write_text(
+        task_directory / "exploration" / "direction-exhaustion.public.jsonl",
+        "\n".join(
+            json.dumps(item, sort_keys=True, separators=(",", ":"))
+            for item in exhaustion
+        )
+        + ("\n" if exhaustion else ""),
+    )
+
+
+def _catalog_entry(task_directory: Path, entry: Mapping[str, Any]) -> dict[str, Any]:
+    catalog = {
+        key: entry[key]
+        for key in (
+            "entry_id",
+            "source",
+            "kind",
+            "strategy_behavior_id",
+            "decision",
+            "rejection_code",
+            "claim",
+            "mechanism",
+            "message",
+            "lineage",
+            "changed_paths",
+        )
+        if entry.get(key) is not None
+    }
+    behaviors = entry.get("successful_policy_behaviors")
+    if isinstance(behaviors, list):
+        catalog["strategy_behavior_ids"] = [
+            item.get("id") for item in behaviors if isinstance(item, Mapping)
+        ]
+    reflection = entry.get("reflection")
+    if isinstance(reflection, Mapping):
+        assessment = reflection.get("assessment")
+        compact_reflection: dict[str, Any] = {
+            "status": reflection.get("status"),
+            "warning": reflection.get("warning"),
+        }
+        if isinstance(assessment, Mapping):
+            compact_reflection.update(
+                {
+                    "summary": assessment.get("summary"),
+                    "strategy_realization": (
+                        assessment.get("strategy_behavior", {}).get("realization")
+                        if isinstance(assessment.get("strategy_behavior"), Mapping)
+                        else None
+                    ),
+                    "mechanism_status": (
+                        assessment.get("mechanism", {}).get("status")
+                        if isinstance(assessment.get("mechanism"), Mapping)
+                        else None
+                    ),
+                    "implementation_status": (
+                        assessment.get("implementation", {}).get("status")
+                        if isinstance(assessment.get("implementation"), Mapping)
+                        else None
+                    ),
+                    "metric_findings": [
+                        {
+                            "metric": item.get("metric"),
+                            "finding": item.get("finding"),
+                        }
+                        for item in assessment.get("metric_assessments", [])
+                        if isinstance(item, Mapping)
+                    ],
+                    "next_action": (
+                        assessment.get("next_action", {}).get("kind")
+                        if isinstance(assessment.get("next_action"), Mapping)
+                        else None
+                    ),
+                }
+            )
+        catalog["reflection"] = {
+            key: value for key, value in compact_reflection.items() if value is not None
+        }
+    source = entry.get("source")
+    if isinstance(source, str) and source.startswith("experiment:"):
+        result_path = (
+            task_directory
+            / "experiments"
+            / source.removeprefix("experiment:")
+            / "result.public.json"
+        )
+        if result_path.is_file():
+            try:
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+                comparisons = result["evaluation"]["comparisons"]
+            except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+                raise StateError(f"published result is invalid: {result_path}") from error
+            if comparisons:
+                comparison = comparisons[-1]
+                catalog["effect_estimate"] = comparison["effect_estimate"]
+                catalog["one_sided_lower_bound"] = comparison["one_sided_lower_bound"]
+    catalog["entry_path"] = str(
+        Path("entries") / f"{entry['entry_id']}.public.json"
+    )
+    return catalog
 
 
 def search_ledger(
@@ -411,27 +554,13 @@ def ensure_strategy(
                 "prior_strategy": latest[1] if latest else None,
                 "refresh_reason": "candidate search misses" if refresh else "initial analysis",
                 "direction_exhaustion": (
-                    [
-                        {
-                            "source": entry["source"],
-                            "summary": entry["message"],
-                            "directions": [
-                                {
-                                    "strategy_behavior_id": direction[
-                                        "strategy_behavior_id"
-                                    ],
-                                    "evidence": direction["evidence"],
-                                }
-                                for direction in entry.get("planning", {}).get(
-                                    "directions", []
-                                )
-                            ],
-                        }
-                        for entry in load_ledger(task.directory)
-                        if entry.get("rejection_code") == "directions_exhausted"
-                    ]
+                    str(
+                        task.directory
+                        / "exploration"
+                        / "direction-exhaustion.public.jsonl"
+                    )
                     if refresh
-                    else []
+                    else None
                 ),
             },
             sort_keys=True,
@@ -439,6 +568,9 @@ def ensure_strategy(
         )
     )
     if command_builder is None:
+        exhaustion_path = (
+            task.directory / "exploration" / "direction-exhaustion.public.jsonl"
+        )
         command = research_command(
             worktree=worktree,
             scratch=scratch,
@@ -452,6 +584,7 @@ def ensure_strategy(
                     for source in task.config.environment_sources
                     if source.path is not None
                 ),
+                *((exhaustion_path,) if refresh and exhaustion_path.is_file() else ()),
             ),
             model=task.config.strategy_model,
             reasoning_effort=task.config.strategy_reasoning_effort,
@@ -475,6 +608,9 @@ def ensure_strategy(
             cwd=worktree,
             env=environment,
             stop_path=stop_path,
+            stdin_path=(
+                agent_prompt_path(scratch) if command_builder is None else None
+            ),
         )
         if result["return_code"] != 0:
             transient = transient_process_error(

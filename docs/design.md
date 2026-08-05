@@ -87,8 +87,11 @@ flowchart LR
   diagnostic, suspect-test rule, telemetry contract, and final decision rule.
 - **Strategy** studies the environment, not the current policy. It produces
   cited environment observations and implementation-independent behaviors.
-- **Execution** starts from the latest accepted champion, reads public history,
-  chooses one strategic behavior, and implements one testable mechanism.
+- **Planning** starts from the latest accepted champion, searches a compact public
+  catalog, and gives each candidate direction one authoritative request. Selection
+  references the chosen direction; it never restates or paraphrases the mechanism.
+- **Implementation** receives that frozen request and current code, not the growing
+  research history.
 - **Review and reflection** are advisory methodology checks. Neither can alter
   the evaluator's verdict.
 
@@ -153,8 +156,8 @@ Strategy, planning, and execution deliberately have different information. Strat
 the objective as a boundary plus approval-locked environment sources and
 policy-free probes. It does not see the champion, evaluator statistic,
 telemetry targets, or current policy. Planning sees the current champion,
-strategy behaviors, and public history but cannot edit. Execution receives one
-frozen brief and may edit only approved paths.
+strategy behaviors, and the searchable public catalog but cannot edit. Execution
+receives one direction-owned frozen brief and may edit only approved paths.
 
 ```mermaid
 flowchart TD
@@ -299,9 +302,17 @@ TASK/
 │   ├── result.public.json            # allowlisted aggregate result
 │   ├── reflection.public.json
 │   └── published
-├── exploration/ledger.public.jsonl   # strategy, misses, results, reflections
+├── exploration/
+│   ├── entries/                      # full immutable canonical records
+│   ├── ledger.public.jsonl           # compact deterministic search catalog
+│   └── direction-exhaustion.public.jsonl
 └── reports/experiments/000001/        # immutable public Markdown dossier
 ```
+
+Agent prompts are immutable `prompt.public.txt` artifacts. They are limited to
+32 KiB, hashed in the process reservation, and streamed to `codex exec -` over
+standard input. Growing history is retrieved from the catalog and canonical
+entries instead of being embedded in an argv argument or copied into each prompt.
 
 The dossier is derived, public-only, and readable by a human. Private
 reservations, seeds, cases, schedules, evaluator outputs, raw subject outputs,

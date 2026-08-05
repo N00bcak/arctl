@@ -89,6 +89,7 @@ Research and subject sandboxes must not read the evaluator repo, path, commit, c
 
 ## 6. Fresh session rule
 Each strategy revision, comparative plan, implementation, review, repair, and reflection starts one new Codex session. Sessions are never resumed. Rejected pre-trial work remains outside official experiments.
+Every controller-authored agent prompt is written once as `prompt.public.txt`, bounded by the global `MAX_AGENT_PROMPT_BYTES` limit (32 KiB), and streamed to `codex exec -` through standard input. The exactly-once process record stores the prompt path, byte count, and SHA-256 hash; recovery refuses a changed prompt. No complete exploration history is copied into a prompt.
 The session may read the public task, rules, allowed paths, a worktree of the champion, public tests, dev probes, the evaluator manifest's approved public statistic and subject-interface description, safe results from completed experiments, and the required experiment JSON format.
 The session may not read evaluator code or location, hidden cases or answers, official seeds or schedules, raw subject output, private evidence, private errors, or earlier Codex chat logs.
 The session ends before candidate freeze and official test choice. It is never resumed.
@@ -233,7 +234,7 @@ The evaluator owns and explains how its diagnostic is calculated; `arctl` owns t
 ### 10.2 Develop and freeze
 Before the first search, `arctl` starts a read-only strategy session with the objective boundary, approval-locked environment sources and probes, prior strategies, and any public all-directions-exhausted summaries. It cannot read the champion policy. It saves cited environment observations, uncertainties, and high-level successful-policy behaviors. Strategy refresh may revise, split, merge, add, or retire directions.
 
-For candidate discovery, a fresh read-only planner inspects the champion, current strategy, and public ledger. It must assess every strategy behavior exactly once, recording the champion gap and either one material mechanism or evidence-backed exhaustion. Only after comparing all directions may it freeze one research request:
+For candidate discovery, a fresh read-only planner inspects the champion, current strategy, and a compact deterministic public catalog. Full canonical exploration entries remain separate immutable files. The planner searches the catalog and opens only entries relevant to its decision. Planning schema v2 assesses every strategy behavior exactly once. Each candidate direction owns one complete research request; an exhausted direction owns none. After comparing all directions, the top-level selection contains only the chosen behavior ID, and `arctl` freezes that direction's request without paraphrasing or comparing duplicated prose:
 ```json
 {
   "schema_version": 2,
@@ -254,7 +255,7 @@ For candidate discovery, a fresh read-only planner inspects the champion, curren
   }
 }
 ```
-The planner may exhaust every direction when evidence warrants it; this immediately returns control to the environment strategist and does not consume an experiment or seed. There is no scientific strike count or `SEARCH_STALLED` terminal state. A separate fresh implementer receives the immutable request and may implement it or report infeasibility, but may not substitute another idea. `arctl` validates the request, links, implementation report, changed paths, and exact candidate novelty before the existing deterministic checks and semantic reviewer. Misses return to planning indefinitely until explicit stop, an operational failure, or an approved experiment limit. Every implementer starts from the latest accepted champion.
+The planner may exhaust every direction when evidence warrants it; this immediately returns control to the environment strategist and does not consume an experiment or seed. There is no scientific strike count or `SEARCH_STALLED` terminal state. A planner request specifies only a policy change within editable paths; trial counts, seeds, calibration, statistical thresholds, and evaluator behavior remain controller-owned. A separate fresh implementer receives the immutable request and may implement it or report infeasibility, but may not substitute another idea. `arctl` validates the request, links, implementation report, changed paths, and exact candidate novelty before the existing deterministic checks and semantic reviewer. Pre-trial misses are operational or methodological history, not empirical evidence that a mechanism is ineffective. Misses return to planning indefinitely until explicit stop, an operational failure, or an approved experiment limit. Every implementer starts from the latest accepted champion.
 
 ### 10.3 Run one comparison
 `ComparisonRun(kind)` is the only official evaluation workflow:
@@ -298,7 +299,7 @@ The controller applies the same decision rule to either comparison:
 
 After a primary `ACCEPT` that requests a suspect test, the experiment is internally `PROVISIONAL`: keep the champion unchanged and run exactly one fresh `ComparisonRun(kind="suspect")` with non-overlapping seeds. Its decision becomes final and it cannot request another run. Otherwise the primary decision is final.
 
-Only a final `ACCEPT` may update the champion ref. The verdict and promotion are fixed before interpretation and cannot be changed by a model. When the manifest declares telemetry, `arctl` enters `REFLECTING` and launches one fresh, schema-constrained, read-only session over the public result, semantic telemetry, selected strategy behavior, viability and prior-evidence review, precommitted expectations and falsifiers, public checks, and champion/candidate source. It must assess every metric, distinguish observation from inference, state when causes are not identifiable, judge whether the candidate expressed the selected behavior, criticize or reinterpret the policy mechanism, record policy-specific findings for later executors, assess implementation evidence, and recommend a nonbinding next research action. Its separate `reflection.public.json` is advisory and never changes `ACCEPT`, `ARCHIVE`, `REJECT`, or promotion.
+Only a final `ACCEPT` may update the champion ref. The verdict and promotion are fixed before interpretation and cannot be changed by a model. When the manifest declares telemetry, `arctl` enters `REFLECTING` and launches one fresh, schema-constrained, read-only session over the public result, semantic telemetry, selected strategy behavior, viability and prior-evidence review, precommitted expectations and falsifiers, public checks, champion/candidate source, and the compact exploration catalog. The reflector searches that catalog, opens relevant canonical entries, and cites their entry IDs in its response. It must assess every metric, distinguish observation from inference, state when causes are not identifiable, judge whether the candidate expressed the selected behavior, criticize or reinterpret the policy mechanism, record policy-specific findings for later planners, assess implementation evidence, and recommend a nonbinding next research action. Its separate `reflection.public.json` is advisory and never changes `ACCEPT`, `ARCHIVE`, `REJECT`, or promotion.
 
 If the manifest declares no telemetry, `arctl` skips the model session and publishes a persistent warning that causal reflection is unavailable. If a required reflection process or response fails, the valid verdict and promotion remain saved but the task becomes `REFLECTION_FAILED`; no later candidate search may start. A later explicit `run` makes a fresh reflection attempt before any research. There is no bypass. After reflection succeeds or is intentionally skipped, `arctl` marks the experiment complete, removes temporary worktrees, and gives the result plus reflection to later sessions. There is no controller-defined metric direction, minimum delta, or unit-specific threshold.
 
@@ -363,6 +364,7 @@ and prints the activation command. The script must be safe to rerun and must not
   exploration/
     entries/
     ledger.public.jsonl
+    direction-exhaustion.public.jsonl
   searches/000001/
     attempts/01/
     stalled.public.json

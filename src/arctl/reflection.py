@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections.abc import Callable, Mapping, Sequence
@@ -17,14 +18,14 @@ from .errors import ProcessError, StateError, StoppedError, TransientDownstreamE
 from .manifest import EvaluatorManifest
 from .models import TaskConfig
 from .process import run_or_load_once
-from .sandbox import research_command, sanitized_environment
+from .sandbox import agent_prompt_path, research_command, sanitized_environment
 from .search import load_ledger
 from .storage import write_json_once
 
 ReflectionCommandBuilder = Callable[[Path, Path, Path, str], Sequence[str]]
 
 
-def reflection_schema() -> dict[str, Any]:
+def reflection_schema(*, version: int = 2) -> dict[str, Any]:
     text = {"type": "string", "minLength": 1}
 
     def strict(properties: Mapping[str, Any]) -> dict[str, Any]:
@@ -35,9 +36,8 @@ def reflection_schema() -> dict[str, Any]:
             "properties": dict(properties),
         }
 
-    return strict(
-        {
-            "schema_version": {"type": "integer", "const": 1},
+    properties = {
+            "schema_version": {"type": "integer", "const": version},
             "summary": text,
             "strategy_behavior": strict(
                 {
@@ -114,7 +114,21 @@ def reflection_schema() -> dict[str, Any]:
                 }
             ),
         }
-    )
+    if version == 2:
+        properties["history_citations"] = {
+            "type": "array",
+            "items": strict(
+                {
+                    "entry_id": text,
+                    "bearing": {
+                        "type": "string",
+                        "enum": ["supports", "contradicts", "unresolved"],
+                    },
+                    "finding": text,
+                }
+            ),
+        }
+    return strict(properties)
 
 
 def _basis(
@@ -161,27 +175,22 @@ def _basis(
 def _research_context(experiment: Path) -> dict[str, Any]:
     task_directory = experiment.parent.parent
     strategy_files = sorted((task_directory / "strategy").glob("*.public.json"))
-    strategy = None
     strategy_name = None
     if strategy_files:
-        try:
-            strategy = json.loads(strategy_files[-1].read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise StateError("saved strategy is invalid") from error
         strategy_name = strategy_files[-1].name
-    ledger = load_ledger(task_directory)
-    supporting: dict[str, Any] = {}
+    supporting: dict[str, str] = {}
     for name in ("planning.public.json", "implementation.public.json"):
         path = experiment / name
         if path.is_file():
-            try:
-                supporting[name] = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as error:
-                raise StateError(f"saved {name} is invalid") from error
+            supporting[name] = str(path)
+    catalog = task_directory / "exploration" / "ledger.public.jsonl"
+    catalog_bytes = catalog.read_bytes() if catalog.is_file() else b""
     return {
-        "strategy": strategy,
         "strategy_source": strategy_name,
-        "exploration": ledger,
+        "strategy": str(strategy_files[-1]) if strategy_files else None,
+        "exploration_catalog": str(catalog),
+        "exploration_entries": str(task_directory / "exploration" / "entries"),
+        "catalog_sha256": hashlib.sha256(catalog_bytes).hexdigest(),
         "supporting_artifacts": supporting,
     }
 
@@ -204,7 +213,7 @@ def validate_reflection(
         "assessment",
     }:
         raise StateError("saved reflection fields are invalid")
-    if value["schema_version"] != 1 or not isinstance(value["basis"], Mapping):
+    if value["schema_version"] not in {1, 2} or not isinstance(value["basis"], Mapping):
         raise StateError("saved reflection values are invalid")
     if value["status"] == "SKIPPED_NO_TELEMETRY":
         if (
@@ -217,7 +226,12 @@ def validate_reflection(
         if value["warning"] is not None:
             raise StateError("saved complete reflection is invalid")
         try:
-            Draft202012Validator(reflection_schema()).validate(value["assessment"])
+            assessment_version = value["assessment"].get("schema_version")
+            if assessment_version not in {1, 2}:
+                raise StateError("saved reflection assessment version is invalid")
+            Draft202012Validator(
+                reflection_schema(version=assessment_version)
+            ).validate(value["assessment"])
         except JsonSchemaError as error:
             raise StateError("saved reflection assessment is invalid") from error
         names = [item["metric"] for item in value["assessment"]["metric_assessments"]]
@@ -249,7 +263,7 @@ def run_reflection(
     context = _research_context(experiment)
     basis["context_refs"] = {
         "strategy": context["strategy_source"],
-        "ledger_entries": [entry.get("entry_id") for entry in context["exploration"]],
+        "catalog_sha256": context["catalog_sha256"],
     }
     published = experiment / "reflection.public.json"
     if published.is_file():
@@ -281,7 +295,7 @@ def run_reflection(
         write_json_once(published, value)
         return value
 
-    schema = reflection_schema()
+    schema = reflection_schema(version=2)
     schema_path = scratch / "reflection.schema.json"
     write_json_once(schema_path, schema)
     prompt = (
@@ -294,8 +308,10 @@ def run_reflection(
         "fidelity was compromised, and whether the mechanism is supported, contradicted, "
         "or inconclusive. Use strategy_behavior for realization, mechanism evidence and "
         "missing_evidence for activation, and implementation for fidelity. "
-        "strategic behavior, and record policy-specific observations about the proposed "
-        "mechanism or implementation for later planners. Recommend only a disposition; "
+        "Record policy-specific observations about the proposed mechanism or "
+        "implementation for later planners. Search the compact public "
+        "catalog, open only relevant canonical entries, and cite every history entry "
+        "relied upon. Recommend only a disposition; "
         "do not invent the next candidate. Assess every declared telemetry "
         "metric exactly once. Return "
         "only the required reflection JSON. The candidate is the current working "
@@ -307,12 +323,18 @@ def run_reflection(
         )
     )
     if command_builder is None:
+        history_paths = [experiment.parent.parent / "exploration"]
+        if context["strategy"] is not None:
+            history_paths.append(Path(context["strategy"]))
+        history_paths.extend(
+            Path(path) for path in context["supporting_artifacts"].values()
+        )
         command = research_command(
             worktree=candidate_worktree,
             scratch=scratch,
             output_schema=schema_path,
             prompt=prompt,
-            read_paths=(champion_worktree,),
+            read_paths=(champion_worktree, *history_paths),
             output_name="assessment.public.json",
             model=task.reflection_model,
             reasoning_effort=task.reflection_reasoning_effort,
@@ -334,6 +356,9 @@ def run_reflection(
             cwd=candidate_worktree,
             env=environment,
             stop_path=stop_path,
+            stdin_path=(
+                agent_prompt_path(scratch) if command_builder is None else None
+            ),
         )
         if process["return_code"] != 0:
             transient = transient_process_error(
@@ -347,12 +372,24 @@ def run_reflection(
         assessment = json.loads(
             (scratch / "assessment.public.json").read_text(encoding="utf-8")
         )
-        Draft202012Validator(schema).validate(assessment)
+        assessment_version = assessment.get("schema_version")
+        if assessment_version not in {1, 2}:
+            raise StateError("reflection schema version is unsupported")
+        Draft202012Validator(
+            reflection_schema(version=assessment_version)
+        ).validate(assessment)
         names = [item["metric"] for item in assessment["metric_assessments"]]
         if len(names) != len(set(names)) or set(names) != set(manifest.public_telemetry):
             raise StateError("reflection must assess every telemetry metric exactly once")
         if assessment["strategy_behavior"]["id"] != request["strategy_behavior_id"]:
             raise StateError("reflection strategy behavior does not match the request")
+        if assessment_version == 2:
+            citation_ids = [item["entry_id"] for item in assessment["history_citations"]]
+            known_ids = {
+                entry["entry_id"] for entry in load_ledger(experiment.parent.parent)
+            }
+            if any(identifier not in known_ids for identifier in citation_ids):
+                raise StateError("reflection cites invalid exploration entries")
     except StoppedError:
         raise
     except TransientDownstreamError as error:
@@ -378,15 +415,15 @@ def run_reflection(
             attempt / "reflection.failure.json",
             {"schema_version": 1, "message": str(error)},
         )
-        raise StateError("post-trial reflection failed") from error
+        raise StateError(f"post-trial reflection failed: {error}") from error
     except (OSError, json.JSONDecodeError, JsonSchemaError, StateError) as error:
         write_json_once(
             attempt / "reflection.failure.json",
             {"schema_version": 1, "message": str(error)},
         )
-        raise StateError("post-trial reflection failed") from error
+        raise StateError(f"post-trial reflection failed: {error}") from error
     value = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "COMPLETE",
         "warning": None,
         "basis": basis,

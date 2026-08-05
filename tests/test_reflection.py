@@ -9,6 +9,8 @@ from arctl.errors import StateError
 from arctl.manifest import EvaluatorManifest
 from arctl.models import TaskConfig
 from arctl.reflection import run_reflection
+from arctl.sandbox import MAX_AGENT_PROMPT_BYTES
+from arctl.search import add_ledger_entry
 
 from .helpers import valid_task
 from .test_manifest import valid_manifest
@@ -146,6 +148,64 @@ class ReflectionTests(unittest.TestCase):
             value["assessment"]["next_action"]["kind"],
             "revisit_after_better_evidence",
         )
+
+    def test_version_two_reflection_cites_a_canonical_history_entry(self) -> None:
+        entry = add_ledger_entry(
+            self.experiment.parent.parent,
+            {
+                "source": "search:000001",
+                "kind": "research_miss",
+                "rejection_code": "duplicate_hypothesis",
+                "message": "The same safe-action mechanism was already tested.",
+            },
+        )
+        value = assessment(["errors"])
+        value["schema_version"] = 2
+        value["history_citations"] = [
+            {
+                "entry_id": entry["entry_id"],
+                "bearing": "supports",
+                "finding": "The prior entry supports implementation feasibility.",
+            },
+            {
+                "entry_id": entry["entry_id"],
+                "bearing": "unresolved",
+                "finding": "The same entry does not resolve causal attribution.",
+            },
+        ]
+
+        reflected = self.reflect(command_builder=self.builder(value))
+
+        self.assertEqual(
+            [
+                citation["entry_id"]
+                for citation in reflected["assessment"]["history_citations"]
+            ],
+            [entry["entry_id"], entry["entry_id"]],
+        )
+
+    def test_prompt_size_does_not_grow_with_canonical_history(self) -> None:
+        add_ledger_entry(
+            self.experiment.parent.parent,
+            {
+                "source": "search:000001",
+                "kind": "research_miss",
+                "rejection_code": "diagnostic",
+                "message": "short catalog summary",
+                "planning": {"detail": "large history " * 20_000},
+            },
+        )
+        seen_prompt = ""
+
+        def builder(worktree, scratch, schema, prompt):
+            nonlocal seen_prompt
+            seen_prompt = prompt
+            return self.builder(assessment(["errors"]))(worktree, scratch, schema, prompt)
+
+        self.reflect(command_builder=builder)
+
+        self.assertLess(len(seen_prompt.encode("utf-8")), MAX_AGENT_PROMPT_BYTES)
+        self.assertNotIn("large history", seen_prompt)
 
     def test_failure_is_preserved_and_a_later_attempt_can_recover(self) -> None:
         with self.assertRaisesRegex(StateError, "post-trial reflection failed"):

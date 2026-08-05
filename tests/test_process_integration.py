@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import signal
 import subprocess
@@ -16,6 +17,57 @@ from arctl.process import read_valid_result, run_once, run_or_load_once
 
 
 class ProcessIntegrationTests(unittest.TestCase):
+    def test_streams_immutable_stdin_and_records_its_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stdin = root / "prompt.txt"
+            stdin.write_text("exact prompt\n", encoding="utf-8")
+            directory = root / "process"
+            result = run_or_load_once(
+                directory,
+                [sys.executable, "-c", "import sys; print(sys.stdin.read(), end='')"],
+                timeout_seconds=2,
+                max_output_bytes=1000,
+                cwd=root,
+                stdin_path=stdin,
+            )
+
+            self.assertEqual(result["return_code"], 0)
+            self.assertEqual((directory / "stdout.bin").read_text(), "exact prompt\n")
+            started = json.loads((directory / "started.json").read_text())
+            self.assertEqual(started["schema_version"], 2)
+            self.assertEqual(started["stdin"]["bytes"], len(b"exact prompt\n"))
+            self.assertEqual(
+                started["stdin"]["sha256"],
+                hashlib.sha256(b"exact prompt\n").hexdigest(),
+            )
+
+            stdin.write_text("changed\n", encoding="utf-8")
+            with self.assertRaisesRegex(StateError, "reserved command"):
+                run_or_load_once(
+                    directory,
+                    [sys.executable, "-c", "import sys; print(sys.stdin.read(), end='')"],
+                    timeout_seconds=2,
+                    max_output_bytes=1000,
+                    cwd=root,
+                    stdin_path=stdin,
+                )
+
+    def test_refuses_symlinked_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / "target"
+            target.write_text("prompt", encoding="utf-8")
+            link = root / "link"
+            link.symlink_to(target)
+            with self.assertRaisesRegex(StateError, "regular file"):
+                run_once(
+                    root / "process",
+                    ["true"],
+                    timeout_seconds=2,
+                    stdin_path=link,
+                )
+
     def test_records_real_process_and_refuses_rerun(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary, "process")

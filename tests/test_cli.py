@@ -359,6 +359,33 @@ class CliTests(unittest.TestCase):
                 [1, 1],
             )
 
+    def test_stop_during_search_does_not_claim_zero_experiments_after_prior_work(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            task_directory = root / "tasks" / "demo"
+            prior = task_directory / "experiments" / "000004"
+            prior.mkdir(parents=True)
+            (prior / "published").touch()
+            task = SimpleNamespace(
+                directory=task_directory,
+                config=SimpleNamespace(task_id="demo", max_experiments=10),
+            )
+            with (
+                mock.patch("arctl.cli._located", return_value=task),
+                mock.patch(
+                    "arctl.runner.run_task",
+                    return_value=RunOutcome((), True),
+                ),
+            ):
+                payload = _run(root, "demo", 1, preflight=False)
+
+            self.assertEqual(payload["state"], "STOPPED")
+            self.assertEqual(
+                payload["message"],
+                "Task demo stopped safely during candidate search; "
+                "no experiments completed in this run.",
+            )
+
     def test_exhausted_run_reports_limit_without_starting_runner(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -564,6 +591,25 @@ class CliTests(unittest.TestCase):
         self.assertIn("Strategy · revision 1", rendered)
         self.assertIn("candidate search · attempt 1/6", rendered)
         self.assertIn("Miss: same candidate was already tested", rendered)
+
+    def test_progress_surfaces_the_reflection_failure_reason(self) -> None:
+        output = io.StringIO()
+        view = _ProgressView(output, interactive=False)
+        view({"event": "reflection"})
+        view(
+            {
+                "event": "reflection_failed",
+                "message": "reflection cites an unknown exploration entry",
+            }
+        )
+        view.close()
+
+        rendered = output.getvalue()
+        self.assertIn("✗ REFLECTING", rendered)
+        self.assertIn(
+            "Reason: reflection cites an unknown exploration entry",
+            rendered,
+        )
 
     def test_each_progress_stage_requires_only_its_own_fields(self) -> None:
         events = [

@@ -19,6 +19,7 @@ from arctl.registry import LocatedTask
 from arctl.runner import (
     _compatibility_strategy_command,
     _default_research_command,
+    _run_implementation,
     _run_research,
     run_task,
 )
@@ -191,6 +192,8 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
 
     @staticmethod
     def planning_command(worktree: Path, scratch: Path, _schema: Path, _prompt: str):
+        assert "selection must contain only the chosen strategy behavior id" in _prompt
+        assert "never prescribe trial counts" in _prompt
         script = """\
 import json
 import sys
@@ -211,19 +214,19 @@ request = {
     "lineage": {"kind": "new", "prior_entry_id": None},
 }
 (scratch / "planning.public.json").write_text(json.dumps({
-    "schema_version": 1,
+    "schema_version": 2,
     "directions": [{
         "strategy_behavior_id": "environment-compatible",
         "champion_assessment": "The baseline is environment compatible.",
         "remaining_gap": "Its score remains improvable.",
         "disposition": "candidate",
-        "proposed_mechanism": request["mechanism"],
+        "request": request,
         "evidence": ["The score expression contains a zero offset."],
         "feasibility": "One editable expression implements it.",
         "expected_value": "A positive paired difference.",
     }],
     "selection_rationale": "This is the only current direction.",
-    "selection": request,
+    "selection": request["strategy_behavior_id"],
 }))
 """
         return ("python3", "-c", script, str(worktree), str(scratch))
@@ -263,7 +266,8 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
         attempt = self.task_directory / "searches" / "000001" / "attempts" / "01"
         plan = json.loads((attempt / "planning.public.json").read_text())
         request = json.loads((attempt / "request.public.json").read_text())
-        self.assertEqual(plan["selection"], request)
+        self.assertEqual(plan["selection"], request["strategy_behavior_id"])
+        self.assertEqual(plan["directions"][0]["request"], request)
         self.assertTrue((attempt / "implementation.public.json").is_file())
 
     def test_all_directions_exhausted_refreshes_strategy_then_replans(self) -> None:
@@ -280,13 +284,13 @@ import json, sys
 from pathlib import Path
 scratch = Path(sys.argv[1])
 (scratch / "planning.public.json").write_text(json.dumps({
-    "schema_version": 1,
+    "schema_version": 2,
     "directions": [{
         "strategy_behavior_id": "environment-compatible",
         "champion_assessment": "The champion already expresses this behavior.",
         "remaining_gap": "No credible gap remains under current evidence.",
         "disposition": "exhausted",
-        "proposed_mechanism": None,
+        "request": None,
         "evidence": ["Prior evidence leaves no material mechanism."],
         "feasibility": "No faithful material implementation is available.",
         "expected_value": "Further work would repeat prior evidence.",
@@ -656,6 +660,7 @@ scratch = Path(sys.argv[1])
             )
 
         self.assertTrue(failed.reflection_failed)
+        self.assertEqual(failed.reflection_error, "reflection backend failed")
         self.assertEqual(failed.results[0]["decision"], "ACCEPT")
         self.assertEqual(task_status(self.task)["state"], "REFLECTION_FAILED")
         experiment = self.task_directory / "experiments" / "000001"
@@ -807,6 +812,50 @@ scratch = Path(sys.argv[1])
         self.assertEqual(captured["read_paths"], (runtime,))
         self.assertEqual(captured["model"], "gpt-5.6-terra")
         self.assertEqual(captured["reasoning_effort"], "medium")
+
+    def test_default_implementation_receives_public_runtime_paths(self) -> None:
+        attempt = self.task_directory / "searches" / "000001" / "attempts" / "01"
+        attempt.mkdir(parents=True)
+        runtime = self.root / "approved-runtime"
+        runtime.mkdir()
+        captured: dict = {}
+
+        def build_implementation_command(**arguments):
+            captured.update(arguments)
+            script = (
+                "import json,pathlib,sys;"
+                "pathlib.Path(sys.argv[1]).write_text(json.dumps({"
+                "'schema_version':1,'status':'implemented','summary':'done',"
+                "'deviations':[]}))"
+            )
+            return (
+                "python3",
+                "-c",
+                script,
+                str(arguments["scratch"] / "implementation.public.json"),
+            )
+
+        with (
+            mock.patch(
+                "arctl.runner.command_runtime_read_paths",
+                return_value=(runtime,),
+            ),
+            mock.patch(
+                "arctl.runner.research_command",
+                side_effect=build_implementation_command,
+            ),
+        ):
+            _run_implementation(
+                self.task,
+                attempt,
+                self.subject,
+                {"claim": "test the runtime"},
+                command_builder=None,
+                stop_path=self.task_directory / "stop.requested",
+            )
+
+        self.assertEqual(captured["read_paths"], (runtime,))
+        self.assertEqual(captured["model"], "gpt-5.6-terra")
 
     def test_resumes_finalizing_experiment_without_research_or_evaluation_reruns(
         self,

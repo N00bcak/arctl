@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -90,6 +91,7 @@ def run_once(
     cwd: Path | None = None,
     env: Mapping[str, str] | None = None,
     stop_path: Path | None = None,
+    stdin_path: Path | None = None,
 ) -> dict[str, Any]:
     """Run one argv command, recording start before execution and never rerunning it."""
     if not command or any(not isinstance(argument, str) for argument in command):
@@ -104,14 +106,16 @@ def run_once(
     if started.exists():
         raise StateError("process has already started and cannot be rerun")
     directory.mkdir(parents=True, exist_ok=True)
+    stdin_record = _stdin_record(stdin_path)
     atomic_write_json(
         started,
         {
-            "schema_version": 1,
+            "schema_version": 2 if stdin_record is not None else 1,
             "command": list(command),
             "cwd": str(cwd.resolve()) if cwd is not None else None,
             "environment": dict(env) if env is not None else None,
             "stop_path": str(stop_path.resolve()) if stop_path is not None else None,
+            **({"stdin": stdin_record} if stdin_record is not None else {}),
         },
     )
 
@@ -128,7 +132,15 @@ def run_once(
     gate_read: int | None = None
     gate_write: int | None = None
     try:
-        with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+        with (
+            stdout_path.open("wb") as stdout,
+            stderr_path.open("wb") as stderr,
+            (
+                stdin_path.open("rb")
+                if stdin_path is not None
+                else open(os.devnull, "rb")
+            ) as stdin,
+        ):
             gate_read, gate_write = os.pipe()
             process = subprocess.Popen(
                 [
@@ -139,7 +151,7 @@ def run_once(
                     *command,
                 ],
                 cwd=process_directory,
-                stdin=subprocess.DEVNULL,
+                stdin=stdin,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
@@ -252,13 +264,16 @@ def run_or_load_once(
     cwd: Path,
     env: Mapping[str, str] | None = None,
     stop_path: Path | None = None,
+    stdin_path: Path | None = None,
 ) -> dict[str, Any]:
+    stdin_record = _stdin_record(stdin_path)
     expected_started = {
-        "schema_version": 1,
+        "schema_version": 2 if stdin_record is not None else 1,
         "command": list(command),
         "cwd": str(cwd.resolve()),
         "environment": dict(env) if env is not None else None,
         "stop_path": str(stop_path.resolve()) if stop_path is not None else None,
+        **({"stdin": stdin_record} if stdin_record is not None else {}),
     }
     started_path = directory / "started.json"
     if (directory / "result.json").exists():
@@ -280,4 +295,18 @@ def run_or_load_once(
         cwd=cwd,
         env=env,
         stop_path=stop_path,
+        stdin_path=stdin_path,
     )
+
+
+def _stdin_record(path: Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise StateError("process stdin must be one regular file")
+    content = path.read_bytes()
+    return {
+        "path": str(path.resolve()),
+        "bytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }

@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Sequence
 
 from .errors import StateError
+from .storage import atomic_write_text
+
+MAX_AGENT_PROMPT_BYTES = 32 * 1024
 
 _MARK_AND_EXEC = """\
 import os
@@ -140,6 +143,22 @@ def research_command(
     writable_worktree: bool = True,
     read_worktree: bool = True,
 ) -> tuple[str, ...]:
+    encoded_prompt = prompt.encode("utf-8")
+    if len(encoded_prompt) > MAX_AGENT_PROMPT_BYTES:
+        raise StateError(
+            "agent prompt exceeds the global limit: "
+            f"{len(encoded_prompt)} > {MAX_AGENT_PROMPT_BYTES} bytes"
+        )
+    prompt_path = scratch.parent / "prompt.public.txt"
+    if prompt_path.is_symlink():
+        raise StateError("saved agent prompt must not be a symlink")
+    if prompt_path.is_file():
+        if prompt_path.read_bytes() != encoded_prompt:
+            raise StateError("saved agent prompt differs from the requested prompt")
+    elif prompt_path.exists():
+        raise StateError("saved agent prompt is not a regular file")
+    else:
+        atomic_write_text(prompt_path, prompt)
     profile = "arctl-research"
     overrides: tuple[str, ...] = ()
     if reasoning_effort is not None:
@@ -192,8 +211,12 @@ def research_command(
         "plugins",
         "--disable",
         "image_generation",
-        prompt,
+        "-",
     )
+
+
+def agent_prompt_path(scratch: Path) -> Path:
+    return scratch.parent / "prompt.public.txt"
 
 
 def sanitized_environment(

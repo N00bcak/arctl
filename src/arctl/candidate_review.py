@@ -17,6 +17,7 @@ from .manifest import EvaluatorManifest
 from .process import run_or_load_once
 from .registry import LocatedTask
 from .sandbox import (
+    agent_prompt_path,
     command_runtime_read_paths,
     marked_command,
     research_command,
@@ -165,6 +166,9 @@ def _run_agent(
                 )
             ),
             stop_path=stop_path,
+            stdin_path=(
+                None if command_builder is not None else agent_prompt_path(scratch)
+            ),
         )
     except ProcessError as error:
         transient = transient_process_error(

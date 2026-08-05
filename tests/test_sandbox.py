@@ -10,6 +10,7 @@ from arctl.errors import StateError
 from arctl.manifest import EvaluatorManifest
 from arctl.runner import _research_schema, _validate_codex_output_schema
 from arctl.sandbox import (
+    MAX_AGENT_PROMPT_BYTES,
     command_runtime_read_paths,
     research_command,
     sandbox_command,
@@ -160,6 +161,22 @@ class SandboxCommandTests(unittest.TestCase):
             self.assertIn(f'"{(root / "worktree" / ".git").resolve()}"="read"', joined)
             self.assertIn(f'"{runtime.resolve()}"="read"', joined)
             self.assertIn(f'"{(root / "worktree").resolve()}"="write"', joined)
+            self.assertEqual(command[-1], "-")
+            self.assertEqual(
+                (root / "prompt.public.txt").read_text(encoding="utf-8"),
+                "Make one improvement.",
+            )
+
+    def test_research_rejects_a_prompt_over_the_global_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(StateError, "global limit"):
+                research_command(
+                    worktree=root / "worktree",
+                    scratch=root / "scratch",
+                    output_schema=root / "schema.json",
+                    prompt="x" * (MAX_AGENT_PROMPT_BYTES + 1),
+                )
 
     def test_strategy_selects_explicit_model_effort_and_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

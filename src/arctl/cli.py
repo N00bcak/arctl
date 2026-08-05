@@ -633,6 +633,10 @@ class _ProgressView:
                 self._finish()
             elif kind == "reflection_failed":
                 self._finish("failed")
+                self._line(
+                    "    Reason: "
+                    + safe_terminal_text(event["message"], limit=180)
+                )
             elif kind == "result":
                 self._finish()
                 self._line("  ✓ FINALIZING")
@@ -1177,11 +1181,22 @@ def _run(
         allowed_actions=("status", "history", "report", "inspect", "run"),
         next_command=next_command,
         message=(
-            f"Task {identifier} stopped safely after {len(results)} experiments."
+            (
+                f"Task {identifier} stopped safely after {len(results)} "
+                f"experiment{'s' if len(results) != 1 else ''} in this run."
+                if results
+                else f"Task {identifier} stopped safely during candidate search; "
+                "no experiments completed in this run."
+            )
             if outcome.stopped
             else (
                 f"Post-trial reflection failed for {identifier}; valid statistical "
                 "evidence was preserved and no further research was started."
+                + (
+                    f" Reason: {outcome.reflection_error}"
+                    if outcome.reflection_error
+                    else ""
+                )
                 if outcome.reflection_failed
                 else
                 f"Candidate search for {identifier} stalled after six attempts; "
