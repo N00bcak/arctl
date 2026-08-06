@@ -172,11 +172,11 @@ flowchart TD
     PLAN -->|all exhausted| REFRESH[Refresh environment strategy]
     REFRESH --> PLAN
     PLAN --> REQUEST[Freeze best evidence-backed experiment brief]
-    REQUEST --> EDIT[Fresh implementer edits only approved paths]
+    REQUEST --> EDIT[Implement brief and audit every frozen obligation]
     EDIT --> VALIDATE{Request, links, paths, and tree valid?}
     VALIDATE -->|no| MISS[Record typed public search miss]
     VALIDATE -->|yes| GUARD[Deterministic policy checks]
-    GUARD --> REVIEW[Fresh read-only semantic review]
+    GUARD --> REVIEW[Review diff, audit coverage, and evidence]
     REVIEW -->|pass| FREEZE[Commit and freeze novel candidate]
     REVIEW -->|fail and repair available| REPAIR[Fresh bounded repair]
     REPAIR --> GUARD
@@ -280,6 +280,9 @@ flowchart TD
 Codex capacity/rate-limit/network/timeouts and transient network failures in
 pre-trial public processes. The count is consecutive and resets after a
 successful downstream stage. Ctrl-C or `arctl stop` interrupts the delay.
+Published execution failures carry a sanitized explanation. Human views label
+results without valid comparison evidence as `No score` and retain the reason in
+the experiment dossier.
 
 ## Storage and audit trail
 

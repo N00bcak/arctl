@@ -146,6 +146,19 @@ scratch = Path(sys.argv[1])
             champion="a" * 40,
             request=self.request,
             stop_path=self.root / "stop",
+            implementation_report={
+                "schema_version": 2,
+                "status": "implemented",
+                "summary": "Implemented the mechanism.",
+                "deviations": [],
+                "requirements": [
+                    {
+                        "requirement": "Preserve deterministic behavior.",
+                        "status": "verified",
+                        "evidence": "policy.py:10",
+                    }
+                ],
+            },
             review_command_builder=review,
             check_command_builder=self.check,
         )
@@ -155,6 +168,8 @@ scratch = Path(sys.argv[1])
         self.assertEqual(result["findings"], [])
         self.assertEqual(len(prompts), 1)
         self.assertIn("findings array is exclusively", prompts[0])
+        self.assertIn("Preserve deterministic behavior.", prompts[0])
+        self.assertIn("report every independently supported violation", prompts[0])
 
     def test_default_reviewer_reuses_ambient_authenticated_codex_home(self) -> None:
         seen_environment: list[dict[str, str]] = []
@@ -204,6 +219,7 @@ scratch = Path(sys.argv[1])
 
     def test_tripwire_failure_gets_one_repair_then_semantic_review(self) -> None:
         (self.worktree / "bad").write_text("violation")
+        review_prompts: list[str] = []
 
         def repair(_worktree: Path, scratch: Path, _schema: Path, _prompt: str):
             script = """\
@@ -212,11 +228,21 @@ from pathlib import Path
 worktree, scratch = map(Path, sys.argv[1:])
 (worktree / 'bad').unlink()
 (scratch / 'repair.public.json').write_text(json.dumps({
-    'schema_version': 1,
+    'schema_version': 2,
+    'status': 'repaired',
     'summary': 'Removed the prohibited access.',
+    'requirements': [{
+        'requirement': 'Use only supplied observations.',
+        'status': 'verified',
+        'evidence': 'bad was removed and the policy check passes.',
+    }],
 }))
 """
             return ("python3", "-c", script, str(self.worktree), str(scratch))
+
+        def review(worktree: Path, scratch: Path, schema: Path, prompt: str):
+            review_prompts.append(prompt)
+            return self.passing_review(worktree, scratch, schema, prompt)
 
         events: list[dict] = []
         review = review_candidate(
@@ -227,7 +253,7 @@ worktree, scratch = map(Path, sys.argv[1:])
             champion="a" * 40,
             request=self.request,
             stop_path=self.root / "stop",
-            review_command_builder=self.passing_review,
+            review_command_builder=review,
             repair_command_builder=repair,
             check_command_builder=self.check,
             progress=events.append,
@@ -238,6 +264,45 @@ worktree, scratch = map(Path, sys.argv[1:])
             [event["event"] for event in events],
             ["candidate_review", "candidate_repair", "candidate_review"],
         )
+        self.assertIn("Use only supplied observations.", review_prompts[0])
+        self.assertIn("bad was removed", review_prompts[0])
+
+    def test_infeasible_repair_ends_the_attempt(self) -> None:
+        (self.worktree / "bad").write_text("violation")
+
+        def infeasible(_worktree: Path, scratch: Path, _schema: Path, _prompt: str):
+            script = """\
+import json, sys
+from pathlib import Path
+scratch = Path(sys.argv[1])
+(scratch / 'repair.public.json').write_text(json.dumps({
+    'schema_version': 2,
+    'status': 'infeasible',
+    'summary': 'The mechanism cannot obey the interface.',
+    'requirements': [{
+        'requirement': 'Use only supplied observations.',
+        'status': 'unverified',
+        'evidence': 'The required input is not supplied.',
+    }],
+}))
+"""
+            return ("python3", "-c", script, str(scratch))
+
+        with self.assertRaisesRegex(
+            ResearchMiss, "mechanism cannot obey the interface"
+        ):
+            review_candidate(
+                self.task,
+                self.manifest,
+                worktree=self.worktree,
+                attempt_directory=self.root / "attempt",
+                champion="a" * 40,
+                request=self.request,
+                stop_path=self.root / "stop",
+                review_command_builder=self.passing_review,
+                repair_command_builder=infeasible,
+                check_command_builder=self.check,
+            )
 
     def test_second_tripwire_failure_is_a_research_miss(self) -> None:
         (self.worktree / "bad").write_text("violation")
@@ -254,7 +319,7 @@ scratch = Path(sys.argv[1])
 """
             return ("python3", "-c", script, str(scratch))
 
-        with self.assertRaisesRegex(ResearchMiss, "Deterministic candidate check"):
+        with self.assertRaisesRegex(ResearchMiss, "candidate_check_1") as raised:
             review_candidate(
                 self.task,
                 self.manifest,
@@ -267,6 +332,10 @@ scratch = Path(sys.argv[1])
                 repair_command_builder=ineffective_repair,
                 check_command_builder=self.check,
             )
+        self.assertEqual(
+            raised.exception.details["candidate_review"]["findings"][0]["rule"],
+            "candidate_check_1",
+        )
 
 
 if __name__ == "__main__":

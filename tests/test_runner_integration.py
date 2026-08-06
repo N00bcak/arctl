@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from arctl.approval import confirm_approval, preview_approval
-from arctl.errors import StateError
+from arctl.errors import StateError, ValidationError
 from arctl.experiment import start_experiment
 from arctl.git import create_candidate_commit, create_candidate_ref, resolve_commit
 from arctl.models import CandidateReviewConfig, TaskConfig
@@ -21,6 +21,7 @@ from arctl.runner import (
     _default_research_command,
     _run_implementation,
     _run_research,
+    _validate_implementation_report,
     run_task,
 )
 from arctl.search import search_ledger
@@ -816,6 +817,7 @@ scratch = Path(sys.argv[1])
     def test_default_implementation_receives_public_runtime_paths(self) -> None:
         attempt = self.task_directory / "searches" / "000001" / "attempts" / "01"
         attempt.mkdir(parents=True)
+        manifest = load_manifest(self.task_directory / "evaluator.manifest.json")[0]
         runtime = self.root / "approved-runtime"
         runtime.mkdir()
         captured: dict = {}
@@ -826,13 +828,16 @@ scratch = Path(sys.argv[1])
                     "model": agent.model,
                     "read_paths": request.read_paths,
                     "scratch": request.scratch,
+                    "prompt": request.prompt,
+                    "schema": json.loads(request.output_schema.read_text()),
                 }
             )
             script = (
                 "import json,pathlib,sys;"
                 "pathlib.Path(sys.argv[1]).write_text(json.dumps({"
-                "'schema_version':1,'status':'implemented','summary':'done',"
-                "'deviations':[]}))"
+                "'schema_version':2,'status':'implemented','summary':'done',"
+                "'deviations':[],'requirements':[{'requirement':'use runtime',"
+                "'status':'verified','evidence':'policy.py:1'}]}))"
             )
             return (
                 "python3",
@@ -853,6 +858,7 @@ scratch = Path(sys.argv[1])
         ):
             _run_implementation(
                 self.task,
+                manifest,
                 attempt,
                 self.subject,
                 {"claim": "test the runtime"},
@@ -862,6 +868,27 @@ scratch = Path(sys.argv[1])
 
         self.assertEqual(captured["read_paths"], (runtime,))
         self.assertEqual(captured["model"], "gpt-5.6-terra")
+        self.assertEqual(captured["schema"]["properties"]["schema_version"]["const"], 2)
+        self.assertIn("sentence by sentence", captured["prompt"])
+        self.assertIn(manifest.subject_interface, captured["prompt"])
+
+    def test_implemented_report_requires_every_requirement_verified(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "unverified requirements"):
+            _validate_implementation_report(
+                {
+                    "schema_version": 2,
+                    "status": "implemented",
+                    "summary": "Claimed complete.",
+                    "deviations": [],
+                    "requirements": [
+                        {
+                            "requirement": "Validate transitions.",
+                            "status": "unverified",
+                            "evidence": "No targeted probe exists.",
+                        }
+                    ],
+                }
+            )
 
     def test_resumes_finalizing_experiment_without_research_or_evaluation_reruns(
         self,

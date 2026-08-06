@@ -288,13 +288,17 @@ The planner may exhaust every direction when evidence warrants it; this returns
 control to strategy without consuming an experiment or seed. There is no
 scientific strike count or `SEARCH_STALLED` state. A request specifies only a
 policy change; trial counts, seeds, thresholds, and evaluator behavior remain
-controller-owned. A fresh implementer starts from the latest champion and must
-implement the frozen brief or report infeasibility.
+controller-owned. A fresh implementer starts from the latest champion, derives
+a checklist covering every behavioral, fallback, validation, and fidelity
+obligation, and must attach concrete code or test evidence to every item before
+reporting the brief implemented. Otherwise it reports infeasibility.
 
 `arctl` validates the request, links, report, changed paths, and candidate
-novelty before deterministic checks and semantic review. The reviewer returns
-a summary and actionable findings; the controller derives `pass` from an empty
-findings set and `fail` otherwise. Pre-trial misses are operational or
+novelty before deterministic checks and semantic review. The reviewer checks
+the complete mechanism, audit coverage, and claimed evidence and returns every
+independently supported actionable finding it can establish; the controller
+derives `pass` from an empty findings set and `fail` otherwise. A repair fixes
+all findings and repeats the complete audit. Pre-trial misses are operational or
 methodological history, not evidence that a mechanism is ineffective. Search
 returns to planning until stopped, failed operationally, or limited.
 
@@ -389,7 +393,7 @@ Every calibration or comparison process is a `ProcessRun`:
 - without a `started` record it may run;
 - with valid saved output the controller uses that output;
 - with `started` but no valid output it never runs again.
-Candidate public-test, subject, or hard-rule failure gives `REJECT`. Champion, evaluator, sandbox, controller, or host failure gives `INVALID`. Calibration failure blocks the task before research and never silently redraws calibration seeds.
+Candidate public-test, subject, or hard-rule failure gives `REJECT`. Champion, evaluator, sandbox, controller, or host failure gives `INVALID`. A published execution failure includes a sanitized public explanation; scoreless results are explicitly labeled rather than appearing as unexplained verdicts. Calibration failure blocks the task before research and never silently redraws calibration seeds.
 Failure before the primary comparison is reserved discards the unfinished experiment. Recoverable candidate-search misses precede the experiment and remain in the public ledger; infrastructure and saved-state failures remain inspectable engineering failures. `run` may opt into bounded, delayed retries for recognized transient Codex failures and pre-trial public-command network failures; each retry receives a fresh process record and preserves the failed artifact. The consecutive retry count resets after a successful downstream stage. Failure after any calibration or comparison command starts never receives a controller retry, even for a network error. A saved valid primary `PROVISIONAL` result may continue only into its one not-yet-started suspect comparison.
 Every process starts in its own process group. On exit, timeout, stop, or too much output, `arctl` must stop and clean up all child processes.
 Reflection attempts use the same exactly-once process records, but may be retried in a fresh numbered attempt because they neither redraw evidence nor affect the fixed verdict. Failed reflection attempts remain inspectable.

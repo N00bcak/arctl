@@ -122,6 +122,7 @@ def validate_public_result(
     if not isinstance(value, Mapping) or set(value) not in (
         base_fields,
         base_fields | {"failure"},
+        base_fields | {"failure", "failure_detail"},
     ):
         raise StateError("public result fields are invalid")
     identifier = value["experiment_id"]
@@ -145,6 +146,12 @@ def validate_public_result(
         "system_execution",
     ):
         raise StateError("public result failure is invalid")
+    if "failure_detail" in value and (
+        "failure" not in value
+        or not isinstance(value["failure_detail"], str)
+        or not value["failure_detail"]
+    ):
+        raise StateError("public result failure detail is invalid")
 
     constraints = value["constraints"]
     if (

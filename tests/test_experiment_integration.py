@@ -426,3 +426,45 @@ class ExperimentIntegrationTests(unittest.TestCase):
         self.assertEqual(public["decision"], "INVALID")
         self.assertEqual(len(public["evaluation"]["comparisons"]), 1)
         self.assertEqual(public["failure"], "system_execution")
+        self.assertEqual(
+            public["failure_detail"],
+            "Evaluator execution failed; no valid score was produced.",
+        )
+
+    def test_candidate_timeout_publishes_a_safe_explanation(self) -> None:
+        _, request = self.freeze()
+        self.assertTrue(
+            run_public_checks(
+                self.task_directory,
+                self.experiment_directory,
+                self.task,
+                command_builder=self.unconfined,
+            )
+        )
+        mark_comparison_reserved(self.experiment_directory, kind="primary")
+
+        public = publish_comparison_failure(
+            self.task,
+            self.experiment_directory,
+            request,
+            self.manifest,
+            source="candidate",
+            cause="process timed out: /private/path/must-not-leak",
+        )
+
+        self.assertEqual(public["decision"], "REJECT")
+        self.assertEqual(public["evaluation"]["comparisons"], [])
+        self.assertEqual(
+            public["failure_detail"],
+            "Candidate exceeded the approved 60-second execution limit.",
+        )
+        self.assertNotIn("private", json.dumps(public))
+        evaluation = (
+            self.task_directory
+            / "reports"
+            / "experiments"
+            / "000001"
+            / "evaluation.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("## Execution failure", evaluation)
+        self.assertIn(public["failure_detail"], evaluation)

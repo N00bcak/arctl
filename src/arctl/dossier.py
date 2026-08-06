@@ -263,6 +263,16 @@ def _documents(
                 or ["- None published."]
             ),
             "",
+            *(
+                [
+                    "## Execution failure",
+                    "",
+                    safe_text(result["failure_detail"]),
+                    "",
+                ]
+                if result.get("failure_detail")
+                else []
+            ),
             f"## Final decision\n\n**{decision}**",
             "",
             f"Champion after: {_code(str(result['champion_after'])[:12])}",

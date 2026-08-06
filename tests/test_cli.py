@@ -334,6 +334,41 @@ class CliTests(unittest.TestCase):
             0.03123456789,
         )
 
+    def test_scoreless_failure_is_explained_in_human_views(self) -> None:
+        result = {
+            "experiment_id": 1,
+            "decision": "REJECT",
+            "hypothesis": "Use bounded beam search.",
+            "candidate": "b" * 40,
+            "champion_after": "a" * 40,
+            "evaluation": {"comparisons": []},
+            "failure": "candidate_execution",
+            "failure_detail": "Candidate exceeded the approved 300-second execution limit.",
+            "dossier_path": "/tmp/reports/experiments/000001/README.md",
+        }
+        payload = {
+            "schema_version": 1,
+            "success": True,
+            "task_id": "demo",
+            "state": "REPORT",
+            "message": "Report.",
+            "report": {
+                "completed_experiments": 1,
+                "results": [result],
+                "dossier_root": "/tmp/reports/experiments",
+                "calibration_summary": None,
+            },
+        }
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            _emit(payload, as_json=False)
+
+        rendered = output.getvalue()
+        self.assertIn("No score", rendered)
+        self.assertIn("approved 300-second", rendered)
+        self.assertIn("execution limit", rendered)
+        self.assertLessEqual(max(map(len, rendered.splitlines())), 140)
+
     def test_run_retries_one_transient_failure_without_expanding_budget(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -601,15 +636,19 @@ class CliTests(unittest.TestCase):
         view(
             {
                 "event": "search_miss",
-                "code": "exact_duplicate",
-                "message": "same candidate was already tested",
+                "code": "policy_review_failed",
+                "message": (
+                    "transition fidelity — policy/greedy.py simulates on a board "
+                    "that still contains the active piece " + "and cannot validate " * 8
+                ),
             }
         )
         view.close()
         rendered = output.getvalue()
         self.assertIn("Strategy · revision 1", rendered)
         self.assertIn("candidate search · attempt 1/6", rendered)
-        self.assertIn("Miss: same candidate was already tested", rendered)
+        self.assertIn("Miss: transition fidelity", rendered)
+        self.assertLessEqual(max(map(len, rendered.splitlines())), 140)
 
     def test_progress_surfaces_the_reflection_failure_reason(self) -> None:
         output = io.StringIO()

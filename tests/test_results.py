@@ -138,6 +138,34 @@ class ExperimentOutcomeTests(unittest.TestCase):
             public,
         )
 
+    def test_accepts_explained_execution_failure_and_legacy_failure(self) -> None:
+        public = {
+            "experiment_id": 7,
+            "hypothesis": "Improve routing.",
+            "champion_before": "a" * 40,
+            "candidate": "b" * 40,
+            "champion_after": "a" * 40,
+            "decision": "REJECT",
+            "evaluation": {"statistic": "expected score", "comparisons": []},
+            "constraints": {"tests": "PASS"},
+            "telemetry": {},
+            "failure": "candidate_execution",
+            "failure_detail": "Candidate exceeded the approved limit.",
+        }
+        arguments = {
+            "allowed_telemetry": {},
+            "allowed_suspect_reasons": (),
+            "expected_statistic": "expected score",
+        }
+
+        self.assertEqual(validate_public_result(public, **arguments), public)
+        legacy = {key: value for key, value in public.items() if key != "failure_detail"}
+        self.assertEqual(validate_public_result(legacy, **arguments), legacy)
+
+        invalid = {**public, "failure_detail": ""}
+        with self.assertRaisesRegex(StateError, "failure detail"):
+            validate_public_result(invalid, **arguments)
+
     def publish(self, outcome):
         return build_public_result(
             experiment_id=7,

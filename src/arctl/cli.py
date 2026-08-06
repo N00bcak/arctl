@@ -94,6 +94,11 @@ def _result_line(result: dict[str, Any]) -> str:
 
     comparisons = result.get("evaluation", {}).get("comparisons", [])
     final = comparisons[-1] if comparisons else {}
+    if not final and result.get("failure_detail"):
+        return (
+            f"{result['experiment_id']:>3}  {result['decision']:<7} · no score: "
+            + safe_terminal_text(result["failure_detail"], limit=100)
+        )
     measurement = (
         f" · effect {final.get('effect_estimate')} · lower bound "
         f"{final.get('one_sided_lower_bound')}"
@@ -188,7 +193,12 @@ def _status_table(payload: dict[str, Any]) -> str:
             f" · effect {_short_number(final.get('effect_estimate'))}"
             f" · lower {_short_number(final.get('one_sided_lower_bound'))}"
             if isinstance(final, dict)
-            else ""
+            else (
+                "\nNo score · "
+                + safe_terminal_text(latest["failure_detail"], limit=100)
+                if latest.get("failure_detail")
+                else ""
+            )
         )
         rows.append(
             (
@@ -232,7 +242,12 @@ def _report_table(report: dict[str, Any]) -> str:
             f"{_short_number(final.get('effect_estimate'))}\n"
             f"LB {_short_number(final.get('one_sided_lower_bound'))}"
             if isinstance(final, dict)
-            else "—"
+            else (
+                "No score\n"
+                + safe_terminal_text(result["failure_detail"], limit=80)
+                if result.get("failure_detail")
+                else "—"
+            )
         )
         rows.append(
             (
@@ -248,7 +263,7 @@ def _report_table(report: dict[str, Any]) -> str:
         headers=("Expt", "Decision", "Evidence", "Hypothesis", "Dossier"),
         tablefmt="simple_grid",
         disable_numparse=True,
-        maxcolwidths=(4, 8, 15, 89, 8),
+        maxcolwidths=(4, 8, 28, 76, 8),
     )
 
 
@@ -377,6 +392,11 @@ def _emit_human(
                     f"{comparison['trials']} paired trial(s) · effect "
                     f"{comparison['effect_estimate']} · lower bound "
                     f"{comparison['one_sided_lower_bound']}"
+                )
+            if result.get("failure_detail"):
+                print(
+                    "No score: "
+                    + safe_terminal_text(result["failure_detail"], limit=180)
                 )
             print(f"Candidate: {result['candidate'][:12]}")
             print(
@@ -572,7 +592,7 @@ class _ProgressView:
                 self._finish("failed")
                 self._line(
                     "    Miss: "
-                    + safe_terminal_text(event["message"], limit=180)
+                    + safe_terminal_text(event["message"], limit=120)
                 )
             elif kind == "research":
                 self._start("RESEARCHING")

@@ -37,6 +37,13 @@ class TransientDownstreamError(ProcessError):
 class ResearchMiss(ArctlError):
     """A completed research attempt did not produce a usable novel candidate."""
 
-    def __init__(self, code: str, message: str):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        details: dict[str, object] | None = None,
+    ):
         super().__init__(message)
         self.code = code
+        self.details = details or {}

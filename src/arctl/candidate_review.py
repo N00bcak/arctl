@@ -32,6 +32,26 @@ CheckCommandBuilder = Callable[[Sequence[str], Path, Path], Sequence[str]]
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 
+def requirement_audit_schema() -> dict[str, Any]:
+    return {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["requirement", "status", "evidence"],
+            "properties": {
+                "requirement": {"type": "string", "minLength": 1},
+                "status": {
+                    "type": "string",
+                    "enum": ["verified", "unverified"],
+                },
+                "evidence": {"type": "string", "minLength": 1},
+            },
+        },
+    }
+
+
 def review_schema() -> dict[str, Any]:
     text = {"type": "string", "minLength": 1}
     finding = {
@@ -60,12 +80,42 @@ def repair_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["schema_version", "summary"],
+        "required": ["schema_version", "status", "summary", "requirements"],
         "properties": {
-            "schema_version": {"type": "integer", "const": 1},
+            "schema_version": {"type": "integer", "const": 2},
+            "status": {"type": "string", "enum": ["repaired", "infeasible"]},
             "summary": {"type": "string", "minLength": 1},
+            "requirements": requirement_audit_schema(),
         },
     }
+
+
+def _validate_repair(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict) and value.get("schema_version") == 1:
+        legacy = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["schema_version", "summary"],
+            "properties": {
+                "schema_version": {"type": "integer", "const": 1},
+                "summary": {"type": "string", "minLength": 1},
+            },
+        }
+        try:
+            Draft202012Validator(legacy).validate(value)
+        except JsonSchemaError as error:
+            raise StateError("candidate repair did not write valid repair JSON") from error
+        return {**value, "status": "repaired", "requirements": []}
+    try:
+        Draft202012Validator(repair_schema()).validate(value)
+    except JsonSchemaError as error:
+        raise StateError("candidate repair did not write valid repair JSON") from error
+    assert isinstance(value, dict)
+    if value["status"] == "repaired" and any(
+        item["status"] != "verified" for item in value["requirements"]
+    ):
+        raise StateError("completed candidate repair has unverified requirements")
+    return value
 
 
 def _validate_review(value: Any) -> dict[str, Any]:
@@ -323,6 +373,7 @@ def _review_prompt(
     subject_interface: str,
     champion: str,
     request: Mapping[str, Any],
+    implementation_report: Mapping[str, Any] | None,
 ) -> str:
     assert task.config.candidate_review is not None
     packet = {
@@ -333,14 +384,20 @@ def _review_prompt(
         "contract": task.config.candidate_review.contract,
         "subject_interface": subject_interface,
         "research_request": request,
+        "implementation_audit": implementation_report,
     }
     return (
         "Independently review the uncommitted champion-to-candidate diff before any "
         "trial runs. Inspect the changed implementation and its trusted public interface. "
         "Pass only when the candidate obeys the contract, uses no privileged information "
         "or side channel, remains deterministic for the same observable history, and "
-        "implements the declared research mechanism. Do not edit anything. Cite concrete "
-        "paths and constructs in each finding. The findings array is exclusively for "
+        "implements the declared research mechanism. Independently check whether the "
+        "implementation audit covers every material obligation and whether each claimed "
+        "verification matches the code. Continue after finding a violation and report "
+        "every independently supported violation you can establish in this review. Do "
+        "not require a particular code structure when different code has the required "
+        "behavior. Do not edit anything. Cite concrete paths, constructs, and behavioral "
+        "consequences in each finding. The findings array is exclusively for "
         "contract violations that require remediation. Leave it empty when there are "
         "no violations, and put evidence supporting a clean review in the summary. "
         "The controller derives the verdict from whether findings is empty. Return "
@@ -352,20 +409,29 @@ def _review_prompt(
 def _repair_prompt(
     task: LocatedTask,
     *,
+    subject_interface: str,
     request: Mapping[str, Any],
     review: Mapping[str, Any],
+    implementation_report: Mapping[str, Any] | None,
 ) -> str:
     assert task.config.candidate_review is not None
     packet = {
         "contract": task.config.candidate_review.contract,
+        "subject_interface": subject_interface,
         "research_request": request,
         "review": review,
+        "prior_implementation_audit": implementation_report,
     }
     return (
-        "Repair only the cited candidate-review violations in the current worktree. "
-        "Preserve the research claim and mechanism; do not broaden scope, commit, or touch "
-        "denied paths. Run relevant public checks when useful. Return only the required "
-        "repair JSON after editing.\n\n"
+        "Repair every cited candidate-review violation in the current worktree, then "
+        "re-audit the complete frozen request sentence by sentence. Extract every "
+        "behavioral, fallback, validation, and fidelity obligation into the requirements "
+        "checklist. Inspect the relevant trusted interface, run applicable public checks "
+        "and targeted probes, and keep fixing until every requirement has concrete code "
+        "or test evidence. Preserve the research claim and mechanism; do not broaden "
+        "scope, commit, or touch denied paths. Return status repaired only when every "
+        "requirement is verified; otherwise return infeasible. Emit schema version 2 and "
+        "only the required repair JSON after editing.\n\n"
         + json.dumps(packet, sort_keys=True, separators=(",", ":"))
     )
 
@@ -379,6 +445,7 @@ def review_candidate(
     champion: str,
     request: Mapping[str, Any],
     stop_path: Path,
+    implementation_report: Mapping[str, Any] | None = None,
     review_command_builder: AgentCommandBuilder | None = None,
     repair_command_builder: AgentCommandBuilder | None = None,
     check_command_builder: CheckCommandBuilder | None = None,
@@ -407,6 +474,7 @@ def review_candidate(
                 subject_interface=manifest.subject_interface,
                 champion=champion,
                 request=request,
+                implementation_report=implementation_report,
             )
             raw = _run_agent(
                 task,
@@ -425,7 +493,12 @@ def review_candidate(
         if review["verdict"] == "pass":
             return review
         if round_number == rounds:
-            raise ResearchMiss("policy_review_failed", review["summary"])
+            finding = review["findings"][0]
+            raise ResearchMiss(
+                "policy_review_failed",
+                f"{finding['rule']} — {finding['evidence']}",
+                details={"candidate_review": review},
+            )
         if progress is not None:
             progress({"event": "candidate_repair", "attempt": round_number, "attempts": config.repair_attempts})
         repair = _run_agent(
@@ -433,14 +506,22 @@ def review_candidate(
             worktree=worktree,
             scratch=root / "repair",
             schema_value=repair_schema(),
-            prompt=_repair_prompt(task, request=request, review=review),
+            prompt=_repair_prompt(
+                task,
+                subject_interface=manifest.subject_interface,
+                request=request,
+                review=review,
+                implementation_report=implementation_report,
+            ),
             output_name="repair.public.json",
             command_builder=repair_command_builder,
             writable=True,
             stop_path=stop_path,
         )
-        try:
-            Draft202012Validator(repair_schema()).validate(repair)
-        except JsonSchemaError as error:
-            raise StateError("candidate repair did not write valid repair JSON") from error
+        implementation_report = _validate_repair(repair)
+        if implementation_report["status"] == "infeasible":
+            raise ResearchMiss(
+                "candidate_repair_infeasible",
+                implementation_report["summary"],
+            )
     raise AssertionError("candidate review loop did not terminate")

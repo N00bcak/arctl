@@ -24,8 +24,9 @@ policy-free probes, and research method. A strategy session reads only the
 environment snapshot and derives successful-policy behaviors from cited
 observations. A read-only planner compares those behaviors with the latest
 accepted champion and freezes one experiment brief; a fresh implementer may
-only realize that brief. Task-v3 files remain supported with their legacy
-single-agent assignments.
+only realize that brief. The implementer publishes a requirement-by-requirement
+audit and may claim completion only when every frozen obligation is verified.
+Task-v3 files remain supported with their legacy single-agent assignments.
 
 `serial-v1` assigns one agent to each agent-driven component.
 `serial-hotseat-v1` instead draws from an approved component-local pool for
@@ -35,10 +36,10 @@ search.
 
 Tasks may also require a pre-trial candidate review contract. Approval-locked
 deterministic checks catch obvious violations, then a fresh read-only execution
-session reviews the candidate diff. One configured repair may run before a
-second review; repeated failure is a research miss and consumes no experiment
-or official trial seeds. This is cooperative methodology enforcement, not
-hostile-code isolation.
+session reviews the candidate diff and implementation audit. One configured
+repair re-audits the complete brief before a second review; repeated failure is
+a research miss and consumes no experiment or official trial seeds. This is
+cooperative methodology enforcement, not hostile-code isolation.
 
 Manifest-v3 evaluators describe publishable telemetry by meaning, arm scope,
 role, unit, and direction. After each valid verdict, a fresh read-only session

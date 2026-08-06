@@ -19,7 +19,7 @@ from .agent_selection import select_agent
 from .approval import verify_approval
 from .calibration import CalibrationCommandBuilder, calibrate_trial_count
 from .candidate_review import AgentCommandBuilder as ReviewCommandBuilder
-from .candidate_review import review_candidate
+from .candidate_review import requirement_audit_schema, review_candidate
 from .comparison import ComparisonReservation, load_reservation, reserve_comparison
 from .comparison_run import CommandBuilder, ComparisonFailure, run_comparison
 from .downstream import transient_process_error
@@ -457,39 +457,90 @@ def _run_planning(
     return selected
 
 
+def _implementation_schema() -> dict[str, Any]:
+    text = {"type": "string", "minLength": 1}
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "schema_version",
+            "status",
+            "summary",
+            "deviations",
+            "requirements",
+        ],
+        "properties": {
+            "schema_version": {"type": "integer", "const": 2},
+            "status": {"type": "string", "enum": ["implemented", "infeasible"]},
+            "summary": text,
+            "deviations": {"type": "array", "items": text},
+            "requirements": requirement_audit_schema(),
+        },
+    }
+
+
+def _validate_implementation_report(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict) and value.get("schema_version") == 1:
+        legacy = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["schema_version", "status", "summary", "deviations"],
+            "properties": {
+                "schema_version": {"type": "integer", "const": 1},
+                "status": {
+                    "type": "string",
+                    "enum": ["implemented", "infeasible"],
+                },
+                "summary": {"type": "string", "minLength": 1},
+                "deviations": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+        }
+        Draft202012Validator(legacy).validate(value)
+        return value
+    Draft202012Validator(_implementation_schema()).validate(value)
+    assert isinstance(value, dict)
+    if value["status"] == "implemented" and any(
+        item["status"] != "verified" for item in value["requirements"]
+    ):
+        raise ValidationError(
+            "completed implementation has unverified requirements"
+        )
+    return value
+
+
 def _run_implementation(
     task: LocatedTask,
+    manifest: EvaluatorManifest,
     attempt: Path,
     worktree: Path,
     request: Mapping[str, Any],
     *,
     command_builder: ResearchCommandBuilder | None,
     stop_path: Path,
-) -> None:
+) -> dict[str, Any]:
     assert task.config.method is not None
     task.config.method.require_component("execute", "execute.worktree-v1")
     scratch = attempt / "implementation"
     scratch.mkdir(parents=True, exist_ok=True)
-    schema_value = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["schema_version", "status", "summary", "deviations"],
-        "properties": {
-            "schema_version": {"type": "integer", "const": 1},
-            "status": {"type": "string", "enum": ["implemented", "infeasible"]},
-            "summary": {"type": "string", "minLength": 1},
-            "deviations": {"type": "array", "items": {"type": "string"}},
-        },
-    }
+    schema_value = _implementation_schema()
     schema = scratch / "implementation.schema.json"
     write_json_once(schema, schema_value)
     prompt = (
         "Implement exactly the frozen experiment brief in the checked-out champion. "
-        "Do not replace, broaden, or reinterpret its claim or mechanism. Stay within "
-        "editable paths, respect the candidate-review contract, and run public checks "
-        "or probes when useful. If the mechanism cannot be faithfully implemented, do "
-        "not substitute an easier idea: report infeasible. Do not commit. Return only "
-        "the required implementation JSON.\n\n"
+        "Before editing, inspect the relevant trusted interface and extract every "
+        "behavioral, fallback, validation, and fidelity obligation from the request. "
+        "After editing, run applicable public checks and targeted probes, then re-read "
+        "the request sentence by sentence against the final diff. Keep fixing until "
+        "every requirement has concrete code or test evidence; generic tests alone do "
+        "not verify mechanism-specific branches. Do not replace, broaden, or reinterpret "
+        "the claim or mechanism. Stay within editable paths and respect the candidate-"
+        "review contract. Return status implemented only when every checklist item is "
+        "verified. If fidelity cannot be established, do not substitute an easier idea: "
+        "report infeasible. Emit schema version 2, do not commit, and return only the "
+        "required implementation JSON.\n\n"
         + json.dumps(
             {
                 "request": request,
@@ -502,6 +553,7 @@ def _run_implementation(
                     if task.config.candidate_review is not None
                     else None
                 ),
+                "subject_interface": manifest.subject_interface,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -580,11 +632,16 @@ def _run_implementation(
             raise transient
         raise StateError("fresh implementation session exited unsuccessfully")
     try:
-        value = json.loads(
+        raw = json.loads(
             (scratch / "implementation.public.json").read_text(encoding="utf-8")
         )
-        Draft202012Validator(schema_value).validate(value)
-    except (OSError, json.JSONDecodeError, JsonSchemaError) as error:
+        value = _validate_implementation_report(raw)
+    except (
+        OSError,
+        json.JSONDecodeError,
+        JsonSchemaError,
+        ValidationError,
+    ) as error:
         raise ResearchMiss("invalid_implementation", "invalid implementation report") from error
     if value["status"] == "infeasible":
         raise ResearchMiss("implementation_infeasible", value["summary"])
@@ -594,6 +651,21 @@ def _run_implementation(
             "implementation reported deviations from the frozen brief",
         )
     write_json_once(attempt / "implementation.public.json", value)
+    return value
+
+
+def _load_implementation_report(
+    attempt: Path,
+) -> dict[str, Any] | None:
+    path = attempt / "implementation.public.json"
+    if not path.is_file():
+        return None
+    try:
+        return _validate_implementation_report(
+            json.loads(path.read_text(encoding="utf-8"))
+        )
+    except (OSError, json.JSONDecodeError, JsonSchemaError, ValidationError) as error:
+        raise StateError("saved implementation report is invalid") from error
 
 
 def _run_research(
@@ -801,6 +873,7 @@ def _candidate_search(
             attempts=None if split_roles else 6,
         )
         _checkout(task.config.repo, worktree, champion)
+        implementation_report: dict[str, Any] | None = None
         try:
             if split_roles:
                 try:
@@ -878,8 +951,9 @@ def _candidate_search(
                         )
                     continue
                 try:
-                    _run_implementation(
+                    implementation_report = _run_implementation(
                         task,
+                        manifest,
                         attempt_directory,
                         worktree,
                         request,
@@ -933,6 +1007,7 @@ def _candidate_search(
                 champion=champion,
                 request=request,
                 stop_path=stop_path,
+                implementation_report=implementation_report,
                 review_command_builder=review_command_builder,
                 repair_command_builder=repair_command_builder,
                 check_command_builder=check_command_builder,
@@ -1051,8 +1126,9 @@ def _recover_candidate_stage(
                 if not isinstance(request, dict):
                     raise StateError("recoverable candidate request is invalid")
                 try:
-                    _run_implementation(
+                    implementation_report = _run_implementation(
                         task,
+                        manifest,
                         attempt_directory,
                         worktree,
                         request,
@@ -1090,6 +1166,7 @@ def _recover_candidate_stage(
                 champion=champion,
                 request=request,
                 stop_path=stop_path,
+                implementation_report=implementation_report,
                 review_command_builder=review_command_builder,
                 repair_command_builder=repair_command_builder,
                 check_command_builder=check_command_builder,
@@ -1198,6 +1275,9 @@ def _recover_candidate_review(
                 champion=champion,
                 request=request,
                 stop_path=stop_path,
+                implementation_report=(
+                    _load_implementation_report(attempt_directory)
+                ),
                 review_command_builder=review_command_builder,
                 repair_command_builder=repair_command_builder,
                 check_command_builder=check_command_builder,
@@ -1961,6 +2041,7 @@ def run_task(
                 request,
                 manifest,
                 source=error.source,
+                cause=str(error),
             )
         else:
             current = load_experiment(experiment)
@@ -2004,6 +2085,7 @@ def run_task(
                         manifest,
                         source=error.source,
                         primary=primary,
+                        cause=str(error),
                     )
                 else:
                     save_comparison_result(experiment, primary, suspect)

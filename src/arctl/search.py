@@ -854,6 +854,7 @@ def record_miss(
             "changed_paths": list(changed_paths),
             "rejection_code": miss.code,
             "message": str(miss),
+            **miss.details,
             **({"planning": dict(planning)} if planning is not None else {}),
         },
     )

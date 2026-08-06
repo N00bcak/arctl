@@ -549,6 +549,7 @@ def publish_comparison_failure(
         "sandbox",
     ],
     primary: Evidence | None = None,
+    cause: str | None = None,
 ) -> dict[str, Any]:
     record = load_experiment(experiment_directory)
     if record.state not in ("PRIMARY_RESERVED", "PROVISIONAL", "SUSPECT_RESERVED"):
@@ -571,6 +572,28 @@ def publish_comparison_failure(
         raise StateError("champion changed before failure publication")
 
     decision = failure_decision(source)
+    if source == "candidate":
+        if cause is not None and "timed out" in cause.casefold():
+            failure_detail = (
+                "Candidate exceeded the approved "
+                f"{manifest.limits.timeout_seconds}-second execution limit."
+            )
+        elif cause is not None and "was not written" in cause.casefold():
+            failure_detail = "Candidate did not write the required result."
+        else:
+            failure_detail = (
+                "Candidate execution failed before valid results were produced."
+            )
+    elif source == "champion":
+        failure_detail = "Champion execution failed; the candidate was not scored."
+    elif source == "evaluator":
+        failure_detail = "Evaluator execution failed; no valid score was produced."
+    elif source == "evidence":
+        failure_detail = "Evaluator evidence failed validation; no score was published."
+    elif source == "sandbox":
+        failure_detail = "The sandbox did not start the reserved comparison command."
+    else:
+        failure_detail = "The run was stopped after comparison reservation."
     public = {
         "experiment_id": record.experiment_id,
         "hypothesis": request.claim,
@@ -589,6 +612,7 @@ def publish_comparison_failure(
         "failure": (
             "candidate_execution" if source == "candidate" else "system_execution"
         ),
+        "failure_detail": failure_detail,
     }
     write_json_once(experiment_directory / "result.public.json", public)
     save_experiment(
