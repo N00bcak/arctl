@@ -13,6 +13,7 @@ from arctl.search import (
     add_ledger_entry,
     planning_schema,
     rebuild_catalog,
+    strategy_schema,
     validate_planning,
 )
 
@@ -81,6 +82,39 @@ class PlanningContractTests(unittest.TestCase):
         )
 
         self.assertEqual(selected, selected_request)
+
+    def test_contextual_schema_rejects_unknown_ids_and_invalid_lineage(self) -> None:
+        schema = planning_schema(
+            self.manifest,
+            behavior_ids=("behavior-a", "behavior-b"),
+            ledger_ids=("entry-000001",),
+        )
+        value = {
+            "schema_version": 2,
+            "directions": [
+                direction("behavior-a", request("behavior-a", "Use an ensemble.")),
+                direction("behavior-b", None),
+            ],
+            "selection_rationale": "Select the viable direction.",
+            "selection": "behavior-a",
+        }
+        validator = Draft202012Validator(schema)
+        validator.validate(value)
+
+        value["selection"] = "behavior-c"
+        self.assertTrue(list(validator.iter_errors(value)))
+        value["selection"] = "behavior-a"
+        value["directions"][0]["request"]["lineage"] = {
+            "kind": "new",
+            "prior_entry_id": "entry-000001",
+        }
+        self.assertTrue(list(validator.iter_errors(value)))
+
+    def test_contextual_strategy_schema_rejects_unknown_sources(self) -> None:
+        schema = strategy_schema(source_ids=("environment-core",))
+        source = schema["properties"]["environment_observations"]["items"]
+        source = source["properties"]["evidence"]["items"]["properties"]["source_id"]
+        self.assertEqual(source["enum"], ["environment-core"])
 
     def test_request_must_belong_to_its_direction(self) -> None:
         value = {

@@ -8,10 +8,79 @@ from arctl.models import Evidence, ResearchRequest, TaskConfig
 from arctl.search import validate_research_links, validate_strategy_links
 from arctl.manifest import TelemetryMetric
 
-from .helpers import valid_evidence, valid_task
+from .helpers import valid_evidence, valid_task, valid_task_v4
 
 
 class TaskConfigTests(unittest.TestCase):
+    def test_v4_resolves_serial_and_hotseat_method_profiles(self) -> None:
+        serial = TaskConfig.from_mapping(valid_task_v4())
+        self.assertEqual(serial.schema_version, 4)
+        assert serial.method is not None
+        self.assertEqual(serial.method.profile, "serial-v1")
+        self.assertEqual(len(serial.method.pool("strategize")), 1)
+        self.assertEqual(serial.strategy_model, "gpt-5.6-sol")
+        self.assertEqual(serial.environment_sources[0].commit, "b" * 40)
+
+        raw = valid_task_v4(hotseat=True)
+        raw["method"]["agents"] = {
+            "critic": {
+                "backend": "codex-cli-v1",
+                "model": "critic-model",
+                "settings": {"reasoning_effort": "high"},
+            }
+        }
+        raw["method"]["overrides"] = {
+            "strategize": {
+                "component": "strategize.environment-v1",
+                "agent_pool": ["strategy-a", "critic"],
+            }
+        }
+        hotseat = TaskConfig.from_mapping(raw)
+        assert hotseat.method is not None
+        self.assertEqual(hotseat.method.profile, "serial-hotseat-v1")
+        self.assertEqual(hotseat.method.pool("strategize")[1].model, "critic-model")
+
+    def test_v4_rejects_cross_component_and_unknown_agent_assignments(self) -> None:
+        raw = valid_task_v4(hotseat=True)
+        raw["method"]["overrides"] = {
+            "strategize": {
+                "component": "execute.worktree-v1",
+                "agent_pool": [],
+            }
+        }
+        with self.assertRaisesRegex(ValidationError, "incompatible"):
+            TaskConfig.from_mapping(raw)
+
+        raw = valid_task_v4(hotseat=True)
+        raw["method"]["overrides"] = {
+            "reflect": {
+                "component": "reflect.evidence-v1",
+                "agent_pool": ["reflection-a", "missing"],
+            }
+        }
+        with self.assertRaisesRegex(ValidationError, "unknown agent"):
+            TaskConfig.from_mapping(raw)
+
+    def test_backend_identifiers_are_resolved_at_approval_not_parse_time(self) -> None:
+        raw = valid_task_v4()
+        raw["method"]["agents"] = {
+            "experimental": {
+                "backend": "fake-v1",
+                "model": "adapter-under-test",
+                "settings": {"reasoning_effort": "low"},
+            }
+        }
+        raw["method"]["overrides"] = {
+            "plan": {
+                "component": "plan.comparative-v1",
+                "agent_pool": ["experimental"],
+            }
+        }
+        task = TaskConfig.from_mapping(raw)
+        assert task.method is not None
+        self.assertEqual(task.method.pool("plan")[0].backend, "fake-v1")
+        self.assertNotIn("certification", task.method.to_lock()["agents"]["experimental"])
+
     def test_accepts_strict_task(self) -> None:
         task = TaskConfig.from_mapping(valid_task())
         self.assertEqual(task.task_id, "demo")
@@ -329,4 +398,26 @@ class StrategyContractTests(unittest.TestCase):
         validate_strategy_links(strategy, source_ids={"environment-core"})
         strategy["environment_observations"][0]["evidence"][0]["source_id"] = "policy"
         with self.assertRaisesRegex(StateError, "unknown environment source"):
+            validate_strategy_links(strategy, source_ids={"environment-core"})
+
+    def test_behaviors_may_be_grounded_in_declared_uncertainties(self) -> None:
+        strategy = {
+            "environment_observations": [
+                {
+                    "id": "visible-preview",
+                    "evidence": [{"source_id": "environment-core"}],
+                }
+            ],
+            "environment_uncertainties": [{"id": "unseen-continuation"}],
+            "successful_policy_behaviors": [
+                {
+                    "id": "robust-planning",
+                    "derived_from": ["visible-preview", "unseen-continuation"],
+                }
+            ],
+        }
+        validate_strategy_links(strategy, source_ids={"environment-core"})
+
+        strategy["successful_policy_behaviors"][0]["derived_from"] = ["missing"]
+        with self.assertRaisesRegex(StateError, "unknown environment grounding"):
             validate_strategy_links(strategy, source_ids={"environment-core"})

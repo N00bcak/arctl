@@ -11,6 +11,8 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as JsonSchemaError
 
+from .agent_backend import AgentSessionRequest, agent_command, agent_environment, agent_provenance
+from .agent_selection import select_agent
 from .downstream import transient_process_error
 from .errors import ProcessError, ResearchMiss, StateError, StoppedError
 from .manifest import EvaluatorManifest
@@ -20,7 +22,6 @@ from .sandbox import (
     agent_prompt_path,
     command_runtime_read_paths,
     marked_command,
-    research_command,
     sandbox_command,
     sanitized_environment,
 )
@@ -46,10 +47,9 @@ def review_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["schema_version", "verdict", "summary", "findings"],
+        "required": ["schema_version", "summary", "findings"],
         "properties": {
             "schema_version": {"type": "integer", "const": 1},
-            "verdict": {"type": "string", "enum": ["pass", "fail"]},
             "summary": text,
             "findings": {"type": "array", "items": finding},
         },
@@ -69,16 +69,18 @@ def repair_schema() -> dict[str, Any]:
 
 
 def _validate_review(value: Any) -> dict[str, Any]:
+    legacy_verdict = value.get("verdict") if isinstance(value, dict) else None
+    if legacy_verdict is not None:
+        value = {key: item for key, item in value.items() if key != "verdict"}
     try:
         Draft202012Validator(review_schema()).validate(value)
     except JsonSchemaError as error:
         raise StateError("candidate reviewer did not write valid review JSON") from error
     assert isinstance(value, dict)
-    if value["verdict"] == "pass" and value["findings"]:
-        raise StateError("passing candidate review must not contain findings")
-    if value["verdict"] == "fail" and not value["findings"]:
-        raise StateError("failing candidate review must contain findings")
-    return value
+    verdict = "fail" if value["findings"] else "pass"
+    if legacy_verdict is not None and legacy_verdict != verdict:
+        raise StateError("legacy candidate review verdict contradicts its findings")
+    return {**value, "verdict": verdict}
 
 
 def _load_json(path: Path, *, label: str) -> dict[str, Any]:
@@ -92,7 +94,7 @@ def _load_json(path: Path, *, label: str) -> dict[str, Any]:
 
 
 def _agent_command(
-    task: LocatedTask,
+    agent,
     *,
     worktree: Path,
     scratch: Path,
@@ -101,15 +103,16 @@ def _agent_command(
     output_name: str,
     writable: bool,
 ) -> Sequence[str]:
-    return research_command(
-        worktree=worktree,
-        scratch=scratch,
-        output_schema=schema,
-        prompt=prompt,
-        output_name=output_name,
-        model=task.config.execution_model,
-        reasoning_effort=task.config.execution_reasoning_effort,
-        writable_worktree=writable,
+    return agent_command(
+        agent,
+        AgentSessionRequest(
+            worktree=worktree,
+            scratch=scratch,
+            output_schema=schema,
+            prompt=prompt,
+            output_name=output_name,
+            writable_worktree=writable,
+        ),
     )
 
 
@@ -134,11 +137,21 @@ def _run_agent(
     scratch.mkdir(parents=True, exist_ok=True)
     schema = scratch / "output.schema.json"
     write_json_once(schema, schema_value)
+    agent = None
+    if command_builder is None:
+        assert task.config.method is not None
+        role = "repair" if writable else "review"
+        agent = select_agent(
+            task.config.method,
+            component="execute",
+            lifecycle=f"{role}:{agent_root.parent.name}:{agent_root.name}",
+            root=agent_root,
+        )
     command = (
         command_builder(worktree, scratch, schema, prompt)
         if command_builder is not None
         else _agent_command(
-            task,
+            agent,
             worktree=worktree,
             scratch=scratch,
             schema=schema,
@@ -148,6 +161,15 @@ def _run_agent(
         )
     )
     process_directory = scratch / "process"
+    if command_builder is None:
+        write_json_once(
+            scratch / "agent.public.json",
+            agent_provenance(
+                agent,
+                lifecycle=f"{'repair' if writable else 'review'}:"
+                f"{agent_root.parent.name}:{agent_root.name}",
+            ),
+        )
     try:
         result = run_or_load_once(
             process_directory,
@@ -158,8 +180,9 @@ def _run_agent(
             env=(
                 None
                 if command_builder is not None
-                else sanitized_environment(
-                    codex_home=Path(
+                else agent_environment(
+                    agent,
+                    credential_home=Path(
                         os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
                     ),
                     writable_home=scratch,
@@ -318,9 +341,10 @@ def _review_prompt(
         "or side channel, remains deterministic for the same observable history, and "
         "implements the declared research mechanism. Do not edit anything. Cite concrete "
         "paths and constructs in each finding. The findings array is exclusively for "
-        "contract violations that require remediation: a pass must have no findings, "
-        "while a fail must have at least one. Put evidence supporting a pass in the "
-        "summary, never in findings. Return only the required review JSON.\n\n"
+        "contract violations that require remediation. Leave it empty when there are "
+        "no violations, and put evidence supporting a clean review in the summary. "
+        "The controller derives the verdict from whether findings is empty. Return "
+        "only the required review JSON.\n\n"
         + json.dumps(packet, sort_keys=True, separators=(",", ":"))
     )
 
@@ -384,31 +408,18 @@ def review_candidate(
                 champion=champion,
                 request=request,
             )
-            for output_attempt in range(2):
-                raw = _run_agent(
-                    task,
-                    worktree=worktree,
-                    scratch=root / "semantic",
-                    schema_value=review_schema(),
-                    prompt=prompt,
-                    output_name="review.public.json",
-                    command_builder=review_command_builder,
-                    writable=False,
-                    stop_path=stop_path,
-                )
-                try:
-                    review = _validate_review(raw)
-                except StateError:
-                    if output_attempt == 1:
-                        raise
-                    prompt += (
-                        "\n\nYour previous review contradicted the output contract. "
-                        "Return verdict pass with findings [] when there are no violations; "
-                        "otherwise return verdict fail with only actionable violations in "
-                        "findings."
-                    )
-                else:
-                    break
+            raw = _run_agent(
+                task,
+                worktree=worktree,
+                scratch=root / "semantic",
+                schema_value=review_schema(),
+                prompt=prompt,
+                output_name="review.public.json",
+                command_builder=review_command_builder,
+                writable=False,
+                stop_path=stop_path,
+            )
+            review = _validate_review(raw)
             assert review is not None
         write_json_once(root / "decision.public.json", review)
         if review["verdict"] == "pass":

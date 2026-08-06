@@ -27,6 +27,27 @@ from arctl.experiment import start_experiment
 
 
 class CliTests(unittest.TestCase):
+    @staticmethod
+    def initialize_repo(repo: Path) -> None:
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        (repo / "ENVIRONMENT.md").write_text("# Environment\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "ENVIRONMENT.md"], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "user.name=arctl tests",
+                "-c",
+                "user.email=tests@invalid",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+            check=True,
+        )
+
     def run_cli(self, arguments: list[str]) -> tuple[int, str]:
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
@@ -38,7 +59,7 @@ class CliTests(unittest.TestCase):
             root = Path(temporary)
             repo = root / "subject"
             repo.mkdir()
-            subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+            self.initialize_repo(repo)
             code, output = self.run_cli(
                 [
                     "--data",
@@ -61,12 +82,10 @@ class CliTests(unittest.TestCase):
             task = root / "data" / "tasks" / "subject" / "task.yaml"
             task_text = task.read_text()
             self.assertIn(f'repo: "{repo}"', task_text)
-            self.assertIn("schema_version: 3", task_text)
-            self.assertIn("kind: documentation", task_text)
-            self.assertIn("model: gpt-5.6-sol", task_text)
-            self.assertIn("model: gpt-5.6-terra", task_text)
-            self.assertIn("planning:\n  model: gpt-5.6-sol", task_text)
-            self.assertIn("reflection:\n  model: gpt-5.6-sol", task_text)
+            self.assertIn("schema_version: 4", task_text)
+            self.assertIn("codebases:", task_text)
+            self.assertIn("profile: serial-v1", task_text)
+            self.assertIn("allow_unverified_isolation: false", task_text)
             self.assertIn("max_experiments: 1000", task_text)
 
             code, output = self.run_cli(
@@ -704,7 +723,7 @@ class CliTests(unittest.TestCase):
 
             repo = root / "repo"
             repo.mkdir()
-            subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+            self.initialize_repo(repo)
             code, _ = self.run_cli(
                 [
                     "--data",
@@ -723,7 +742,7 @@ class CliTests(unittest.TestCase):
             root = Path(temporary)
             repo = root / "subject"
             repo.mkdir()
-            subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+            self.initialize_repo(repo)
             data = root / "data"
             code, _ = self.run_cli(
                 ["--data", str(data), "init", "--repo", str(repo), "--json"]
@@ -760,7 +779,7 @@ class CliTests(unittest.TestCase):
             root = Path(temporary)
             repo = root / "subject"
             repo.mkdir()
-            subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+            self.initialize_repo(repo)
             data = root / "data"
             self.run_cli(
                 ["--data", str(data), "init", "--repo", str(repo), "--json"]
@@ -801,7 +820,7 @@ class CliTests(unittest.TestCase):
             root = Path(temporary)
             repo = root / "subject"
             repo.mkdir()
-            subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+            self.initialize_repo(repo)
             data = root / "data"
             self.run_cli(
                 ["--data", str(data), "init", "--repo", str(repo), "--json"]
@@ -823,7 +842,7 @@ class CliTests(unittest.TestCase):
             root = Path(temporary)
             repo = root / "subject"
             repo.mkdir()
-            subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+            self.initialize_repo(repo)
             data = root / "data"
             self.run_cli(
                 ["--data", str(data), "init", "--repo", str(repo), "--json"]

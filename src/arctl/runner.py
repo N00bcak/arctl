@@ -14,6 +14,8 @@ from typing import Any, Mapping
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError as JsonSchemaError
 
+from .agent_backend import AgentSessionRequest, agent_command, agent_environment, agent_provenance
+from .agent_selection import select_agent
 from .approval import verify_approval
 from .calibration import CalibrationCommandBuilder, calibrate_trial_count
 from .candidate_review import AgentCommandBuilder as ReviewCommandBuilder
@@ -321,12 +323,22 @@ def _run_planning(
     command_builder: AgentCommandBuilder | None,
     stop_path: Path,
 ) -> dict[str, Any] | None:
+    assert task.config.method is not None
+    task.config.method.require_component("plan", "plan.comparative-v1")
     strategy_files = sorted((task.directory / "strategy").glob("*.public.json"))
     strategy = json.loads(strategy_files[-1].read_text(encoding="utf-8"))
     ledger = load_ledger(task.directory)
     scratch = attempt / "planning" / "output"
     scratch.mkdir(parents=True, exist_ok=True)
-    schema_value = planning_schema(manifest)
+    behavior_ids = tuple(
+        item["id"] for item in strategy["successful_policy_behaviors"]
+    )
+    ledger_ids = tuple(entry["entry_id"] for entry in ledger)
+    schema_value = planning_schema(
+        manifest,
+        behavior_ids=behavior_ids,
+        ledger_ids=ledger_ids,
+    )
     schema = scratch / "planning.schema.json"
     write_json_once(schema, schema_value)
     packet = {
@@ -366,27 +378,48 @@ def _run_planning(
         "edit, commit, or run hidden evaluation. Return only the required planning JSON."
         "\n\n" + json.dumps(packet, sort_keys=True, separators=(",", ":"))
     )
+    planning_root = attempt / "planning"
+    session_paths = sorted((planning_root / "attempts").glob("[0-9]" * 4))
+    session = planning_root / "attempts" / f"{len(session_paths) + 1:04d}"
     if command_builder is None:
         exploration = task.directory / "exploration"
-        command = research_command(
-            worktree=worktree,
-            scratch=scratch,
-            output_schema=schema,
-            prompt=prompt,
-            read_paths=((exploration,) if exploration.is_dir() else ()),
-            output_name="planning.public.json",
-            model=task.config.planning_model,
-            reasoning_effort=task.config.planning_reasoning_effort,
-            writable_worktree=False,
+        assert task.config.method is not None
+        agent = select_agent(
+            task.config.method,
+            component="plan",
+            lifecycle=f"planning:{attempt.parent.parent.name}:{attempt.name}",
+            root=planning_root,
         )
-        environment = sanitized_environment(
-            codex_home=Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))),
+        command = agent_command(
+            agent,
+            AgentSessionRequest(
+                worktree=worktree,
+                scratch=scratch,
+                output_schema=schema,
+                prompt=prompt,
+                read_paths=((exploration,) if exploration.is_dir() else ()),
+                output_name="planning.public.json",
+                writable_worktree=False,
+            ),
+        )
+        environment = agent_environment(
+            agent,
+            credential_home=Path(
+                os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
+            ),
             writable_home=scratch,
+        )
+        write_json_once(
+            session / "agent.public.json",
+            agent_provenance(
+                agent,
+                lifecycle=f"planning:{attempt.parent.parent.name}:{attempt.name}",
+            ),
         )
     else:
         command = command_builder(worktree, scratch, schema, prompt)
         environment = None
-    process = attempt / "planning" / "process"
+    process = session / "process"
     result = run_or_load_once(
         process,
         command,
@@ -433,6 +466,8 @@ def _run_implementation(
     command_builder: ResearchCommandBuilder | None,
     stop_path: Path,
 ) -> None:
+    assert task.config.method is not None
+    task.config.method.require_component("execute", "execute.worktree-v1")
     scratch = attempt / "implementation"
     scratch.mkdir(parents=True, exist_ok=True)
     schema_value = {
@@ -472,16 +507,27 @@ def _run_implementation(
             separators=(",", ":"),
         )
     )
-    command = (
-        research_command(
-            worktree=worktree,
-            scratch=scratch,
-            output_schema=schema,
-            prompt=prompt,
-            output_name="implementation.public.json",
-            model=task.config.execution_model,
-            reasoning_effort=task.config.execution_reasoning_effort,
-            read_paths=tuple(
+    implementation_root = attempt / "implementation"
+    session_paths = sorted((implementation_root / "attempts").glob("[0-9]" * 4))
+    session = implementation_root / "attempts" / f"{len(session_paths) + 1:04d}"
+    if command_builder is None:
+        assert task.config.method is not None
+        agent = select_agent(
+            task.config.method,
+            component="execute",
+            lifecycle=f"implementation:{attempt.parent.parent.name}:{attempt.name}",
+            root=implementation_root,
+        )
+        command = agent_command(
+            agent,
+            AgentSessionRequest(
+                worktree=worktree,
+                scratch=scratch,
+                output_schema=schema,
+                prompt=prompt,
+                output_name="implementation.public.json",
+                writable_worktree=True,
+                read_paths=tuple(
                 dict.fromkeys(
                     path
                     for public_command in (
@@ -491,28 +537,34 @@ def _run_implementation(
                     for path in command_runtime_read_paths(public_command)
                     if not path.is_relative_to(worktree)
                 )
+                ),
             ),
         )
-        if command_builder is None
-        else command_builder(worktree, scratch, schema, prompt)
-    )
-    process = attempt / "process" / "implementation"
+        environment = agent_environment(
+            agent,
+            credential_home=Path(
+                os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
+            ),
+            writable_home=scratch,
+        )
+        write_json_once(
+            session / "agent.public.json",
+            agent_provenance(
+                agent,
+                lifecycle=f"implementation:{attempt.parent.parent.name}:{attempt.name}",
+            ),
+        )
+    else:
+        command = command_builder(worktree, scratch, schema, prompt)
+        environment = None
+    process = session / "process"
     result = run_or_load_once(
         process,
         command,
         timeout_seconds=3600,
         max_output_bytes=2_000_000,
         cwd=worktree,
-        env=(
-            sanitized_environment(
-                codex_home=Path(
-                    os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
-                ),
-                writable_home=scratch,
-            )
-            if command_builder is None
-            else None
-        ),
+        env=environment,
         stop_path=stop_path,
         stdin_path=(
             agent_prompt_path(scratch)
@@ -676,6 +728,20 @@ def _candidate_search(
     progress: ProgressCallback | None,
 ) -> tuple[Path, str, dict[str, Any], Path] | None:
     """Return one novel controller-created candidate."""
+    recovered = _recover_candidate_stage(
+        task,
+        manifest,
+        champion=champion,
+        planning_command_builder=planning_command_builder,
+        research_command_builder=research_command_builder,
+        review_command_builder=review_command_builder,
+        repair_command_builder=repair_command_builder,
+        check_command_builder=check_command_builder,
+        stop_path=stop_path,
+        progress=progress,
+    )
+    if recovered is not None:
+        return recovered
     recovered = _recover_candidate_review(
         task,
         manifest,
@@ -917,6 +983,135 @@ def _candidate_search(
         search / "stalled.public.json",
         {"schema_version": 1, "search_id": search_id, "attempts": 6},
     )
+    return None
+
+
+def _recover_candidate_stage(
+    task: LocatedTask,
+    manifest: EvaluatorManifest,
+    *,
+    champion: str,
+    planning_command_builder: AgentCommandBuilder | None,
+    research_command_builder: ResearchCommandBuilder,
+    review_command_builder: ReviewCommandBuilder | None,
+    repair_command_builder: ReviewCommandBuilder | None,
+    check_command_builder: PublicCheckCommandBuilder | None,
+    stop_path: Path,
+    progress: ProgressCallback | None,
+) -> tuple[Path, str, dict[str, Any], Path] | None:
+    """Retry a failed planning or implementation lifecycle with its saved draw."""
+    searches = sorted((task.directory / "searches").glob("[0-9]" * 6), reverse=True)
+    for search in searches:
+        attempts = sorted((search / "attempts").glob("[0-9][0-9]"), reverse=True)
+        for attempt_directory in attempts:
+            if (
+                (attempt_directory / "candidate-review").is_dir()
+                or (attempt_directory / "candidate.public.json").is_file()
+                or (attempt_directory / "recovery.complete").is_file()
+            ):
+                continue
+            planning_failed = (attempt_directory / "planning.failure.json").is_file()
+            implementation_failed = (
+                attempt_directory / "implementation.failure.json"
+            ).is_file()
+            if not (planning_failed or implementation_failed):
+                continue
+            search_id = int(search.name)
+            attempt_number = int(attempt_directory.name)
+            worktree = (
+                task.directory
+                / "worktrees"
+                / f"search-{search_id:06d}-attempt-{attempt_number:02d}"
+            )
+            if worktree.exists():
+                remove_worktree(task.config.repo, worktree)
+            _checkout(task.config.repo, worktree, champion)
+            try:
+                if planning_failed and not (
+                    attempt_directory / "request.public.json"
+                ).is_file():
+                    request = _run_planning(
+                        task,
+                        attempt_directory,
+                        worktree,
+                        manifest,
+                        command_builder=planning_command_builder,
+                        stop_path=stop_path,
+                    )
+                    if request is None:
+                        atomic_write_text(attempt_directory / "recovery.complete", "\n")
+                        remove_worktree(task.config.repo, worktree)
+                        return None
+                else:
+                    request = json.loads(
+                        (attempt_directory / "request.public.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                if not isinstance(request, dict):
+                    raise StateError("recoverable candidate request is invalid")
+                try:
+                    _run_implementation(
+                        task,
+                        attempt_directory,
+                        worktree,
+                        request,
+                        command_builder=(
+                            None
+                            if research_command_builder is _default_research_command
+                            else research_command_builder
+                        ),
+                        stop_path=stop_path,
+                    )
+                except (StateError, TransientDownstreamError) as error:
+                    failure_path = attempt_directory / "implementation.failure.json"
+                    if not failure_path.exists():
+                        write_json_once(
+                            failure_path,
+                            {"schema_version": 1, "message": str(error)},
+                        )
+                    raise
+            except (StateError, TransientDownstreamError):
+                remove_worktree(task.config.repo, worktree)
+                raise
+            ResearchRequest.from_mapping(
+                request, allowed_telemetry=manifest.public_telemetry
+            )
+            strategy_files = sorted((task.directory / "strategy").glob("*.public.json"))
+            strategy = json.loads(strategy_files[-1].read_text(encoding="utf-8"))
+            validate_research_links(
+                request, strategy=strategy, ledger=load_ledger(task.directory)
+            )
+            review_candidate(
+                task,
+                manifest,
+                worktree=worktree,
+                attempt_directory=attempt_directory,
+                champion=champion,
+                request=request,
+                stop_path=stop_path,
+                review_command_builder=review_command_builder,
+                repair_command_builder=repair_command_builder,
+                check_command_builder=check_command_builder,
+                progress=progress,
+            )
+            candidate, changed_paths = create_candidate_commit(
+                worktree,
+                champion=champion,
+                editable_paths=task.config.editable_paths,
+                denied_paths=task.config.denied_paths,
+                prior_candidate_ref_prefix=f"refs/arctl/{task.config.task_id}/candidates/",
+                message=f"arctl search {search_id} attempt {attempt_number}",
+            )
+            write_json_once(
+                attempt_directory / "candidate.public.json",
+                {
+                    "schema_version": 1,
+                    "candidate": candidate,
+                    "changed_paths": list(changed_paths),
+                },
+            )
+            return worktree, candidate, request, attempt_directory
     return None
 
 
@@ -1386,6 +1581,9 @@ def run_task(
             else _compatibility_strategy_command
         )
     approval = verify_approval(task.directory, task.config)
+    assert task.config.method is not None
+    task.config.method.require_component("search", "search.serial-champion-v1")
+    task.config.method.require_component("evaluate", "evaluate.paired-suspect-v1")
     manifest, manifest_hash = load_manifest(
         task.directory / "evaluator.manifest.json"
     )
@@ -1601,6 +1799,21 @@ def run_task(
                 break
             research_worktree, candidate, raw_request, search_attempt = found
             experiment, record = start_experiment(task.directory, champion)
+            if task.config.schema_version == 4:
+                write_json_once(
+                    experiment / "branch.public.json",
+                    {
+                        "schema_version": 1,
+                        "search_component": task.config.method.components[
+                            "search"
+                        ].identifier,
+                        "generation_id": record.experiment_id,
+                        "branch_id": f"serial-{record.experiment_id:06d}",
+                        "parent_branch_id": None,
+                        "seed_policy": champion,
+                        "official_champion": champion,
+                    },
+                )
             write_json_once(experiment / "request.public.json", raw_request)
             atomic_write_text(experiment / "candidate.commit", candidate + "\n")
             for name in ("planning.public.json", "implementation.public.json"):

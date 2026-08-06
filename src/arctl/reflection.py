@@ -13,19 +13,27 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as JsonSchemaError
 
+from .agent_backend import AgentSessionRequest, agent_command, agent_environment, agent_provenance
+from .agent_selection import select_agent
 from .downstream import transient_process_error
 from .errors import ProcessError, StateError, StoppedError, TransientDownstreamError
 from .manifest import EvaluatorManifest
 from .models import TaskConfig
 from .process import run_or_load_once
-from .sandbox import agent_prompt_path, research_command, sanitized_environment
+from .sandbox import agent_prompt_path
 from .search import load_ledger
 from .storage import write_json_once
 
 ReflectionCommandBuilder = Callable[[Path, Path, Path, str], Sequence[str]]
 
 
-def reflection_schema(*, version: int = 2) -> dict[str, Any]:
+def reflection_schema(
+    *,
+    version: int = 2,
+    metric_names: Sequence[str] | None = None,
+    strategy_behavior_id: str | None = None,
+    history_entry_ids: Sequence[str] | None = None,
+) -> dict[str, Any]:
     text = {"type": "string", "minLength": 1}
 
     def strict(properties: Mapping[str, Any]) -> dict[str, Any]:
@@ -41,7 +49,11 @@ def reflection_schema(*, version: int = 2) -> dict[str, Any]:
             "summary": text,
             "strategy_behavior": strict(
                 {
-                    "id": text,
+                    "id": (
+                        {"type": "string", "const": strategy_behavior_id}
+                        if strategy_behavior_id is not None
+                        else text
+                    ),
                     "realization": {
                         "type": "string",
                         "enum": ["expressed", "not_expressed", "unclear"],
@@ -49,19 +61,49 @@ def reflection_schema(*, version: int = 2) -> dict[str, Any]:
                     "evidence": {"type": "array", "items": text},
                 }
             ),
-            "metric_assessments": {
-                "type": "array",
-                "items": strict(
+            "metric_assessments": (
+                strict(
                     {
-                        "metric": text,
-                        "finding": {
-                            "type": "string",
-                            "enum": ["supports", "contradicts", "inconclusive"],
-                        },
-                        "rationale": text,
+                        name: strict(
+                            {
+                                "finding": {
+                                    "type": "string",
+                                    "enum": ["supports", "contradicts", "inconclusive"],
+                                },
+                                "rationale": text,
+                            }
+                        )
+                        for name in metric_names
                     }
-                ),
-            },
+                )
+                if version == 3 and metric_names is not None
+                else {
+                    "type": "object",
+                    "additionalProperties": strict(
+                        {
+                            "finding": {
+                                "type": "string",
+                                "enum": ["supports", "contradicts", "inconclusive"],
+                            },
+                            "rationale": text,
+                        }
+                    ),
+                }
+                if version == 3
+                else {
+                    "type": "array",
+                    "items": strict(
+                        {
+                            "metric": text,
+                            "finding": {
+                                "type": "string",
+                                "enum": ["supports", "contradicts", "inconclusive"],
+                            },
+                            "rationale": text,
+                        }
+                    ),
+                }
+            ),
             "mechanism": strict(
                 {
                     "status": {
@@ -114,12 +156,16 @@ def reflection_schema(*, version: int = 2) -> dict[str, Any]:
                 }
             ),
         }
-    if version == 2:
+    if version in {2, 3}:
         properties["history_citations"] = {
             "type": "array",
             "items": strict(
                 {
-                    "entry_id": text,
+                    "entry_id": (
+                        {"type": "string", "enum": list(history_entry_ids)}
+                        if version == 3 and history_entry_ids
+                        else text
+                    ),
                     "bearing": {
                         "type": "string",
                         "enum": ["supports", "contradicts", "unresolved"],
@@ -128,6 +174,8 @@ def reflection_schema(*, version: int = 2) -> dict[str, Any]:
                 }
             ),
         }
+        if version == 3 and history_entry_ids is not None and not history_entry_ids:
+            properties["history_citations"]["maxItems"] = 0
     return strict(properties)
 
 
@@ -196,7 +244,8 @@ def _research_context(experiment: Path) -> dict[str, Any]:
 
 
 def _next_attempt(root: Path) -> Path:
-    attempts = [int(path.name) for path in root.glob("[0-9][0-9][0-9][0-9]")]
+    paths = sorted(root.glob("[0-9][0-9][0-9][0-9]"))
+    attempts = [int(path.name) for path in paths]
     return root / f"{max(attempts, default=0) + 1:04d}"
 
 
@@ -213,7 +262,7 @@ def validate_reflection(
         "assessment",
     }:
         raise StateError("saved reflection fields are invalid")
-    if value["schema_version"] not in {1, 2} or not isinstance(value["basis"], Mapping):
+    if value["schema_version"] not in {1, 2, 3} or not isinstance(value["basis"], Mapping):
         raise StateError("saved reflection values are invalid")
     if value["status"] == "SKIPPED_NO_TELEMETRY":
         if (
@@ -227,16 +276,29 @@ def validate_reflection(
             raise StateError("saved complete reflection is invalid")
         try:
             assessment_version = value["assessment"].get("schema_version")
-            if assessment_version not in {1, 2}:
+            if assessment_version not in {1, 2, 3}:
                 raise StateError("saved reflection assessment version is invalid")
             Draft202012Validator(
-                reflection_schema(version=assessment_version)
+                reflection_schema(
+                    version=assessment_version,
+                    metric_names=metric_names if assessment_version == 3 else None,
+                    strategy_behavior_id=(
+                        value["basis"].get("strategy_behavior_id")
+                        if assessment_version == 3
+                        else None
+                    ),
+                )
             ).validate(value["assessment"])
         except JsonSchemaError as error:
             raise StateError("saved reflection assessment is invalid") from error
-        names = [item["metric"] for item in value["assessment"]["metric_assessments"]]
-        if len(names) != len(set(names)) or set(names) != set(metric_names):
-            raise StateError("reflection must assess every telemetry metric exactly once")
+        assessments = value["assessment"]["metric_assessments"]
+        if assessment_version == 3:
+            if set(assessments) != set(metric_names):
+                raise StateError("reflection must assess every telemetry metric exactly once")
+        else:
+            names = [item["metric"] for item in assessments]
+            if len(names) != len(set(names)) or set(names) != set(metric_names):
+                raise StateError("reflection must assess every telemetry metric exactly once")
         if (
             value["assessment"]["strategy_behavior"]["id"]
             != value["basis"]["strategy_behavior_id"]
@@ -259,6 +321,8 @@ def run_reflection(
     stop_path: Path,
     command_builder: ReflectionCommandBuilder | None = None,
 ) -> dict[str, Any]:
+    assert task.method is not None
+    task.method.require_component("reflect", "reflect.evidence-v1")
     basis = _basis(task, manifest, request, result)
     context = _research_context(experiment)
     basis["context_refs"] = {
@@ -278,7 +342,8 @@ def run_reflection(
             raise StateError("saved reflection basis changed")
         return validated
 
-    attempt = _next_attempt(experiment / "reflection" / "attempts")
+    reflection_root = experiment / "reflection"
+    attempt = _next_attempt(reflection_root / "attempts")
     scratch = attempt / "output"
     scratch.mkdir(parents=True, exist_ok=True)
     if not manifest.public_telemetry:
@@ -295,7 +360,13 @@ def run_reflection(
         write_json_once(published, value)
         return value
 
-    schema = reflection_schema(version=2)
+    history_ids = tuple(entry["entry_id"] for entry in load_ledger(experiment.parent.parent))
+    schema = reflection_schema(
+        version=3,
+        metric_names=tuple(manifest.public_telemetry),
+        strategy_behavior_id=request["strategy_behavior_id"],
+        history_entry_ids=history_ids,
+    )
     schema_path = scratch / "reflection.schema.json"
     write_json_once(schema_path, schema)
     prompt = (
@@ -329,20 +400,36 @@ def run_reflection(
         history_paths.extend(
             Path(path) for path in context["supporting_artifacts"].values()
         )
-        command = research_command(
-            worktree=candidate_worktree,
-            scratch=scratch,
-            output_schema=schema_path,
-            prompt=prompt,
-            read_paths=(champion_worktree, *history_paths),
-            output_name="assessment.public.json",
-            model=task.reflection_model,
-            reasoning_effort=task.reflection_reasoning_effort,
-            writable_worktree=False,
+        assert task.method is not None
+        agent = select_agent(
+            task.method,
+            component="reflect",
+            lifecycle=f"reflection:{experiment.name}",
+            root=reflection_root,
         )
-        environment = sanitized_environment(
-            codex_home=Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))),
+        read_paths = (champion_worktree, *history_paths)
+        command = agent_command(
+            agent,
+            AgentSessionRequest(
+                worktree=candidate_worktree,
+                scratch=scratch,
+                output_schema=schema_path,
+                prompt=prompt,
+                read_paths=read_paths,
+                output_name="assessment.public.json",
+                writable_worktree=False,
+            ),
+        )
+        environment = agent_environment(
+            agent,
+            credential_home=Path(
+                os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
+            ),
             writable_home=scratch,
+        )
+        write_json_once(
+            attempt / "agent.public.json",
+            agent_provenance(agent, lifecycle=f"reflection:{experiment.name}"),
         )
     else:
         command = command_builder(candidate_worktree, scratch, schema_path, prompt)
@@ -373,17 +460,18 @@ def run_reflection(
             (scratch / "assessment.public.json").read_text(encoding="utf-8")
         )
         assessment_version = assessment.get("schema_version")
-        if assessment_version not in {1, 2}:
+        if assessment_version not in {1, 2, 3}:
             raise StateError("reflection schema version is unsupported")
         Draft202012Validator(
-            reflection_schema(version=assessment_version)
+            schema if assessment_version == 3 else reflection_schema(version=assessment_version)
         ).validate(assessment)
-        names = [item["metric"] for item in assessment["metric_assessments"]]
-        if len(names) != len(set(names)) or set(names) != set(manifest.public_telemetry):
-            raise StateError("reflection must assess every telemetry metric exactly once")
+        if assessment_version != 3:
+            names = [item["metric"] for item in assessment["metric_assessments"]]
+            if len(names) != len(set(names)) or set(names) != set(manifest.public_telemetry):
+                raise StateError("reflection must assess every telemetry metric exactly once")
         if assessment["strategy_behavior"]["id"] != request["strategy_behavior_id"]:
             raise StateError("reflection strategy behavior does not match the request")
-        if assessment_version == 2:
+        if assessment_version in {2, 3}:
             citation_ids = [item["entry_id"] for item in assessment["history_citations"]]
             known_ids = {
                 entry["entry_id"] for entry in load_ledger(experiment.parent.parent)
@@ -423,7 +511,7 @@ def run_reflection(
         )
         raise StateError(f"post-trial reflection failed: {error}") from error
     value = {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": "COMPLETE",
         "warning": None,
         "basis": basis,

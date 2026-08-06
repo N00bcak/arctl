@@ -27,6 +27,11 @@ def _experiment_directories(task: LocatedTask) -> list[Path]:
     )
 
 
+def _latest_agent_process(root: Path, legacy: Path) -> Path:
+    attempts = sorted((root / "attempts").glob("[0-9]" * 4))
+    return attempts[-1] / "process" if attempts else legacy
+
+
 def _public_result(task: LocatedTask, directory: Path) -> dict[str, Any] | None:
     path = directory / "result.public.json"
     if not path.is_file():
@@ -237,11 +242,25 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
                 else directories[-1] / "reflection"
             )
             if reflection_failed
-            else str(strategy_failures[-1].parent / "process")
+            else str(
+                _latest_agent_process(
+                    strategy_failures[-1].parent,
+                    strategy_failures[-1].parent / "process",
+                )
+            )
             if strategy_failed
-            else str(attempts[-1] / "planning" / "process")
+            else str(
+                _latest_agent_process(
+                    attempts[-1] / "planning", attempts[-1] / "planning" / "process"
+                )
+            )
             if planning_failed
-            else str(attempts[-1] / "process" / "implementation")
+            else str(
+                _latest_agent_process(
+                    attempts[-1] / "implementation",
+                    attempts[-1] / "process" / "implementation",
+                )
+            )
             if implementation_failed
             else str(attempts[-1] / "process")
             if search_research_failed

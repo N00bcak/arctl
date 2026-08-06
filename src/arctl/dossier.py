@@ -286,11 +286,20 @@ def _documents(
         )
     else:
         assessment = reflection.get("assessment", {})
+        metric_assessments = assessment.get("metric_assessments", [])
+        if isinstance(metric_assessments, Mapping):
+            metric_items = (
+                {"metric": name, **item}
+                for name, item in metric_assessments.items()
+                if isinstance(item, Mapping)
+            )
+        else:
+            metric_items = metric_assessments
         metric_lines = [
             f"- **{safe_text(item.get('metric', ''))} — "
             f"{safe_text(item.get('finding', ''))}:** "
             f"{safe_text(item.get('rationale', ''))}"
-            for item in assessment.get("metric_assessments", [])
+            for item in metric_items
         ]
         mechanism = assessment.get("mechanism", {})
         implementation = assessment.get("implementation", {})

@@ -10,6 +10,7 @@ from typing import Any, Literal, Mapping, Sequence
 
 from .errors import ValidationError
 from .manifest import TelemetryMetric
+from .methods import MethodConfig, legacy_method, parse_method
 
 ComparisonKind = Literal["primary", "suspect"]
 
@@ -39,6 +40,9 @@ _ENVIRONMENT_PROBE_FIELDS = {
     "command",
     "backed_by",
 }
+_ENVIRONMENT_V4_FIELDS = {"codebases", "probes"}
+_ENVIRONMENT_CODEBASE_FIELDS = {"id", "description", "repo", "commit", "include"}
+_ENVIRONMENT_V4_PROBE_FIELDS = {"id", "description", "command", "backed_by"}
 _EVALUATOR_FIELDS = {"repo", "commit"}
 _EVIDENCE_FIELDS = {
     "schema_version",
@@ -132,6 +136,7 @@ class EnvironmentSource:
     include: tuple[str, ...] = ()
     command: tuple[str, ...] = ()
     backed_by: tuple[str, ...] = ()
+    commit: str | None = None
 
 
 @dataclass(frozen=True)
@@ -218,6 +223,70 @@ def _environment_sources(value: Any, *, repo: Path) -> tuple[EnvironmentSource, 
     return tuple(sources)
 
 
+def _environment_references(value: Any) -> tuple[EnvironmentSource, ...]:
+    if not isinstance(value, Mapping):
+        raise ValidationError("environment must be an object")
+    _require_exact_fields(value, _ENVIRONMENT_V4_FIELDS, "environment")
+    codebases = value["codebases"]
+    probes = value["probes"]
+    if not isinstance(codebases, list) or not codebases:
+        raise ValidationError("environment.codebases must be a non-empty list")
+    if not isinstance(probes, list):
+        raise ValidationError("environment.probes must be a list")
+    sources: list[EnvironmentSource] = []
+    identifiers: set[str] = set()
+    for index, raw in enumerate(codebases):
+        label = f"environment.codebases[{index}]"
+        if not isinstance(raw, Mapping):
+            raise ValidationError(f"{label} must be an object")
+        _require_exact_fields(raw, _ENVIRONMENT_CODEBASE_FIELDS, label)
+        identifier = _string(raw["id"], f"{label}.id")
+        source_repo = Path(_string(raw["repo"], f"{label}.repo"))
+        if not source_repo.is_absolute():
+            raise ValidationError(f"{label}.repo must be absolute")
+        include = _string_list(raw["include"], f"{label}.include")
+        if not include or any(
+            Path(pattern).is_absolute() or ".." in Path(pattern).parts
+            for pattern in include
+        ):
+            raise ValidationError(f"{label}.include must stay within its codebase")
+        if identifier in identifiers:
+            raise ValidationError(f"duplicate environment source id: {identifier}")
+        identifiers.add(identifier)
+        sources.append(
+            EnvironmentSource(
+                identifier=identifier,
+                kind="implementation",
+                description=_string(raw["description"], f"{label}.description"),
+                path=source_repo,
+                include=include,
+                commit=_string(raw["commit"], f"{label}.commit"),
+            )
+        )
+    for index, raw in enumerate(probes):
+        label = f"environment.probes[{index}]"
+        if not isinstance(raw, Mapping):
+            raise ValidationError(f"{label} must be an object")
+        _require_exact_fields(raw, _ENVIRONMENT_V4_PROBE_FIELDS, label)
+        identifier = _string(raw["id"], f"{label}.id")
+        backed_by = _string_list(raw["backed_by"], f"{label}.backed_by")
+        if not backed_by or not set(backed_by) <= identifiers:
+            raise ValidationError(f"{label}.backed_by names an unknown codebase")
+        if identifier in identifiers:
+            raise ValidationError(f"duplicate environment source id: {identifier}")
+        identifiers.add(identifier)
+        sources.append(
+            EnvironmentSource(
+                identifier=identifier,
+                kind="probe",
+                description=_string(raw["description"], f"{label}.description"),
+                command=_command(raw["command"], f"{label}.command"),
+                backed_by=backed_by,
+            )
+        )
+    return tuple(sources)
+
+
 @dataclass(frozen=True)
 class TaskConfig:
     task_id: str
@@ -240,6 +309,7 @@ class TaskConfig:
     reflection_model: str = "gpt-5.6-sol"
     reflection_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] = "medium"
     candidate_review: CandidateReviewConfig | None = None
+    method: MethodConfig | None = None
     schema_version: int = 3
 
     @property
@@ -250,6 +320,8 @@ class TaskConfig:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> TaskConfig:
+        if value.get("schema_version") == 4:
+            return _task_v4(value)
         actual = set(value)
         required = _TASK_FIELDS | {"strategy", "execution"}
         allowed = required | {"planning", "reflection", "candidate_review"}
@@ -307,6 +379,16 @@ class TaskConfig:
         reflection_effort = reflection["reasoning_effort"]
         if reflection_effort not in {"minimal", "low", "medium", "high", "xhigh"}:
             raise ValidationError("reflection.reasoning_effort is invalid")
+        method = legacy_method(
+            strategy_model=strategy_model,
+            strategy_effort=strategy_effort,
+            planning_model=planning_model,
+            planning_effort=planning_effort,
+            execution_model=execution_model,
+            execution_effort=execution_effort,
+            reflection_model=reflection_model,
+            reflection_effort=reflection_effort,
+        )
         return cls(
             task_id=validate_task_id(value["task_id"]),
             repo=repo,
@@ -332,8 +414,65 @@ class TaskConfig:
                 if "candidate_review" in value
                 else None
             ),
+            method=method,
             schema_version=schema_version,
         )
+
+
+def _task_v4(value: Mapping[str, Any]) -> TaskConfig:
+    required = _TASK_FIELDS | {"method"}
+    allowed = required | {"candidate_review"}
+    actual = set(value)
+    if actual != required and not ("candidate_review" in actual and actual == allowed):
+        missing = sorted(required - actual)
+        extra = sorted(actual - allowed)
+        raise ValidationError(f"task fields differ: missing={missing}, extra={extra}")
+    repo = Path(_string(value["repo"], "repo"))
+    if not repo.is_absolute():
+        raise ValidationError("repo must be absolute")
+    trials = value["trials"]
+    if trials != "auto" and (
+        isinstance(trials, bool) or not isinstance(trials, int) or trials <= 0
+    ):
+        raise ValidationError("trials must be 'auto' or a positive integer")
+    maximum = value["max_experiments"]
+    if maximum == "unlimited":
+        maximum = None
+    elif isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
+        raise ValidationError("max_experiments must be a positive integer or 'unlimited'")
+    method = parse_method(value["method"])
+    strategy = method.pool("strategize")[0]
+    planning = method.pool("plan")[0]
+    execution = method.pool("execute")[0]
+    reflection = method.pool("reflect")[0]
+    return TaskConfig(
+        task_id=validate_task_id(value["task_id"]),
+        repo=repo,
+        objective=_string(value["objective"], "objective"),
+        editable_paths=_string_list(value["editable_paths"], "editable_paths"),
+        denied_paths=_string_list(value["denied_paths"], "denied_paths"),
+        public_checks=_commands(value["public_checks"], "public_checks"),
+        public_probe=_command(value["public_probe"], "public_probe"),
+        environment_sources=_environment_references(value["environment"]),
+        evaluator=EvaluatorRef.from_mapping(value["evaluator"]),
+        trials=trials,
+        max_experiments=maximum,
+        strategy_model=strategy.model,
+        strategy_reasoning_effort=strategy.reasoning_effort,
+        planning_model=planning.model,
+        planning_reasoning_effort=planning.reasoning_effort,
+        execution_model=execution.model,
+        execution_reasoning_effort=execution.reasoning_effort,
+        reflection_model=reflection.model,
+        reflection_reasoning_effort=reflection.reasoning_effort,
+        candidate_review=(
+            _candidate_review(value["candidate_review"])
+            if "candidate_review" in value
+            else None
+        ),
+        method=method,
+        schema_version=4,
+    )
 
 
 def validate_task_id(value: Any) -> str:

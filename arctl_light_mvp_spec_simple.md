@@ -88,7 +88,7 @@ The evaluator must use each trial seed to control score-affecting task randomnes
 Research and subject sandboxes must not read the evaluator repo, path, commit, controller master seeds, private trial identities, schedules, answers, scores, or evidence. An evaluator may place a seed in subject-visible input only when that seed is a legitimate task observation; otherwise it materializes the case and keeps the generator seed private.
 
 ## 6. Fresh session rule
-Each strategy revision, comparative plan, implementation, review, repair, and reflection starts one new Codex session. Sessions are never resumed. Rejected pre-trial work remains outside official experiments.
+Each component-local agent seat starts one fresh backend session. Sessions are never resumed, and a seat never continues in another component. Rejected pre-trial work remains outside official experiments.
 Every controller-authored agent prompt is written once as `prompt.public.txt`, bounded by the global `MAX_AGENT_PROMPT_BYTES` limit (32 KiB), and streamed to `codex exec -` through standard input. The exactly-once process record stores the prompt path, byte count, and SHA-256 hash; recovery refuses a changed prompt. No complete exploration history is copied into a prompt.
 The session may read the public task, rules, allowed paths, a worktree of the champion, public tests, dev probes, the evaluator manifest's approved public statistic and subject-interface description, safe results from completed experiments, and the required experiment JSON format.
 The session may not read evaluator code or location, hidden cases or answers, official seeds or schedules, raw subject output, private evidence, private errors, or earlier Codex chat logs.
@@ -107,7 +107,7 @@ The session ends before candidate freeze and official test choice. It is never r
 ## 8. Task file
 Use one small YAML file that a human can read:
 ```yaml
-schema_version: 3
+schema_version: 4
 task_id: demo
 repo: /absolute/path/to/repo
 objective: Improve play across procedurally generated maps without breaking correctness.
@@ -116,32 +116,23 @@ denied_paths: [.git/**, pyproject.toml, uv.lock]
 public_checks: [[python, -m, pytest, -q]]
 public_probe: [python, tools/dev_benchmark.py]
 environment:
-  sources:
+  codebases:
     - id: environment-core
-      kind: implementation
       description: Transition, observation, action, and termination rules.
-      path: /absolute/path/to/environment
+      repo: /absolute/path/to/environment
+      commit: 0123456789abcdef0123456789abcdef01234567
       include: ["**/*.py"]
+  probes:
     - id: environment-probe
-      kind: probe
       description: Policy-free inspection of environment behavior.
       command: [python, tools/environment_probe.py]
       backed_by: [environment-core]
 evaluator:
   repo: /private/arctl-evaluators/demo
   commit: 7a95d61
-strategy:
-  model: gpt-5.6-sol
-  reasoning_effort: medium
-planning:
-  model: gpt-5.6-sol
-  reasoning_effort: medium
-execution:
-  model: gpt-5.6-terra
-  reasoning_effort: medium
-reflection:
-  model: gpt-5.6-sol
-  reasoning_effort: medium
+method:
+  profile: serial-v1  # or: serial-hotseat-v1
+  allow_unverified_isolation: false
 candidate_review:
   contract: Use only supplied observations; do not access privileged inputs or side channels.
   checks: [[python, tools/policy_guard.py]]
@@ -149,7 +140,7 @@ candidate_review:
 trials: auto
 max_experiments: 1000  # or: unlimited
 ```
-Strategy, planning, and reflection default to `gpt-5.6-sol` with `medium` reasoning. Implementation, review, and repair default to `gpt-5.6-terra` with `medium` reasoning. These assignments and every environment source are explicit and approval-locked. Existing task-v3 files without planning or reflection assignments inherit their strategy assignment. `max_experiments` accepts a positive integer or `unlimited`; new tasks default to 1000. File and directory sources are content-hashed, and source drift or overlap with editable, evaluator, or controller-private paths blocks execution. Optional `candidate_review` contains a contract, deterministic checks, and `repair_attempts: 0 | 1`; repeated violations become public research misses before experiment allocation or seed reservation. `trials` is `auto` or a positive integer, and `arctl init` uses `auto` by default.
+The method profile fixes compatible component implementations and component-local agent pools; optional `agents` and `overrides` may change backend, model, reasoning effort, and pool membership. `serial-v1` uses one agent per pool. `serial-hotseat-v1` uniformly selects one agent with replacement for each STRATEGIZE, PLAN, EXECUTE-substage, or REFLECT lifecycle, persists that choice, and reuses it during recovery. The default assignments remain Sol medium for strategy, planning, and reflection and Terra medium for execution. The resolved semantic method and every environment codebase commit are approval-locked. Approval snapshots selected Git blobs for read-only strategy inspection; later execution verifies the snapshot without depending on the source checkout. Existing task-v3 files retain their legacy assignments. `max_experiments` accepts a positive integer or `unlimited`; new tasks default to 1000. Optional `candidate_review` contains a contract, deterministic checks, and `repair_attempts: 0 | 1`; repeated violations become public research misses before experiment allocation or seed reservation. `trials` is `auto` or a positive integer, and `arctl init` uses `auto` by default. See `docs/research-methods.md` for hotseat, backend-certification, and future search invariants.
 
 All evaluator-manifest commands must be argument lists, not shell strings.
 Allowed full-argument placeholders:

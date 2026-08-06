@@ -15,13 +15,14 @@ from pathlib import Path
 from typing import Any, TextIO, Sequence
 
 from .errors import ArctlError, StateError, TransientDownstreamError
+from .git import resolve_commit
 from .models import validate_task_id
 from .registry import locate_task
 from .storage import TaskLock, atomic_write_text
 
 _TASK_TEMPLATE = """\
 # arctl task: edit the objective, paths, evaluator, and public commands, then approve.
-schema_version: 3
+schema_version: 4
 task_id: {task_id}
 repo: {repo}
 objective: Describe the improvement you want.
@@ -30,26 +31,19 @@ denied_paths: [.git/**, pyproject.toml, uv.lock]
 public_checks: [[python, -m, pytest, -q]]
 public_probe: [python, tools/dev_benchmark.py]
 environment:
-  sources:
-    - id: environment-docs
-      kind: documentation
-      description: Public rules and environment behavior.
-      path: ENVIRONMENT.md
+  codebases:
+    - id: environment-core
+      repo: {repo}
+      commit: {environment_commit}
+      include: [ENVIRONMENT.md]
+      description: Public environment implementation, interface, and rules.
+  probes: []
 evaluator:
   repo: /absolute/path/to/private/evaluator
   commit: REPLACE_WITH_COMMIT
-strategy:
-  model: gpt-5.6-sol
-  reasoning_effort: medium
-planning:
-  model: gpt-5.6-sol
-  reasoning_effort: medium
-execution:
-  model: gpt-5.6-terra
-  reasoning_effort: medium
-reflection:
-  model: gpt-5.6-sol
-  reasoning_effort: medium
+method:
+  profile: serial-v1
+  allow_unverified_isolation: false
 trials: auto
 max_experiments: 1000
 """
@@ -279,7 +273,9 @@ def _approval_table(payload: dict[str, Any]) -> str:
                 for metric in metrics
             )
     rows = [
+        ("Method", safe_terminal_text(summary.get("method", "serial-v1"))),
         ("Models", safe_terminal_text(summary["models"])),
+        ("Backends", safe_terminal_text(summary.get("backends", "codex-cli-v1 (verified)"))),
         ("Environment", safe_terminal_text(summary["environment"])),
         (
             "Editable paths",
@@ -756,6 +752,7 @@ def _init(repo_argument: Path, task_id: str | None, data_argument: Path | None) 
         _TASK_TEMPLATE.format(
             task_id=json.dumps(identifier),
             repo=json.dumps(str(repo)),
+            environment_commit=resolve_commit(repo, "HEAD"),
         ),
     )
     return _payload(
@@ -824,19 +821,27 @@ def _approve(
                 "evaluator_commit": preview.evaluator_commit,
                 "manifest_sha256": preview.manifest_hash,
                 "environment_sha256": dict(preview.environment_hashes),
+                "method_sha256": preview.method_hash,
+                "backend_approval_sha256": preview.backend_hash,
                 "confirmation_token": preview.confirmation_token,
             },
             "approval_summary": {
-                "models": (
-                    f"{located.config.strategy_model} "
-                    f"{located.config.strategy_reasoning_effort} (Strategy); "
-                    f"{located.config.planning_model} "
-                    f"{located.config.planning_reasoning_effort} (Planning); "
-                    f"{located.config.execution_model} "
-                    f"{located.config.execution_reasoning_effort} (Execution"
-                    + (" + review); " if located.config.candidate_review else "); ")
-                    + f"{located.config.reflection_model} "
-                    + f"{located.config.reflection_reasoning_effort} (Reflection)"
+                "method": (
+                    located.config.method.profile
+                    if located.config.method is not None
+                    else "serial-v1"
+                ),
+                "models": "; ".join(
+                    f"{component.title()}: "
+                    + ", ".join(
+                        f"{agent.name}={agent.model} {agent.reasoning_effort}"
+                        for agent in located.config.method.pool(component)
+                    )
+                    for component in ("strategize", "plan", "execute", "reflect")
+                ),
+                "backends": "; ".join(
+                    f"{name} ({details['certification']})"
+                    for name, details in preview.backend_attestations.items()
                 ),
                 "editable_paths": list(located.config.editable_paths),
                 "environment": ", ".join(

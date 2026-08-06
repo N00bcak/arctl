@@ -149,6 +149,36 @@ class ReflectionTests(unittest.TestCase):
             "revisit_after_better_evidence",
         )
 
+    def test_generated_schema_fixes_metrics_behavior_and_empty_history(self) -> None:
+        seen = {}
+
+        def builder(_worktree, scratch, schema, _prompt):
+            seen.update(json.loads(schema.read_text()))
+            value = assessment([])
+            value["schema_version"] = 3
+            value["metric_assessments"] = {
+                "errors": {
+                    "finding": "inconclusive",
+                    "rationale": "The aggregate does not isolate the mechanism.",
+                }
+            }
+            value["history_citations"] = []
+            return self.builder(value)(_worktree, scratch, schema, _prompt)
+
+        reflected = self.reflect(command_builder=builder)
+
+        self.assertEqual(reflected["schema_version"], 3)
+        properties = seen["properties"]
+        self.assertEqual(
+            properties["strategy_behavior"]["properties"]["id"]["const"],
+            "avoid-errors",
+        )
+        self.assertEqual(
+            set(properties["metric_assessments"]["properties"]), {"errors"}
+        )
+        self.assertEqual(properties["history_citations"]["maxItems"], 0)
+        self.assertEqual(self.reflect(), reflected)
+
     def test_version_two_reflection_cites_a_canonical_history_entry(self) -> None:
         entry = add_ledger_entry(
             self.experiment.parent.parent,

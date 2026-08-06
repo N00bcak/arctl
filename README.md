@@ -50,6 +50,7 @@ public checks and probes, but cannot read evaluator or task-private artifacts.
 Documentation:
 
 - [Current design and workflow diagrams](docs/design.md)
+- [Versioned research methods and agent backends](docs/research-methods.md)
 - [Complete CLI command reference](docs/cli-reference.md)
 - [Evaluator design boundary](docs/evaluator-design.md)
 - [Empirical validation protocols](docs/empirical-validation.md)

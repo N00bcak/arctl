@@ -55,7 +55,6 @@ from pathlib import Path
 scratch = Path(sys.argv[1])
 (scratch / 'review.public.json').write_text(json.dumps({
     'schema_version': 1,
-    'verdict': 'pass',
     'summary': 'The candidate obeys the supplied-observation contract.',
     'findings': [],
 }))
@@ -122,23 +121,18 @@ scratch = Path(sys.argv[1])
             (checks / "0001-retry-0001" / "process" / "result.json").is_file()
         )
 
-    def test_contradictory_pass_is_retried_as_reviewer_output_error(self) -> None:
+    def test_reviewer_schema_has_no_redundant_verdict(self) -> None:
         prompts: list[str] = []
 
-        def review(_worktree: Path, scratch: Path, _schema: Path, prompt: str):
+        def review(_worktree: Path, scratch: Path, schema: Path, prompt: str):
             prompts.append(prompt)
-            findings = (
-                [{"rule": "contract", "evidence": "Compliant.", "remediation": "None."}]
-                if len(prompts) == 1
-                else []
-            )
+            self.assertNotIn("verdict", json.loads(schema.read_text())["properties"])
             (scratch / "review.public.json").write_text(
                 json.dumps(
                     {
                         "schema_version": 1,
-                        "verdict": "pass",
                         "summary": "The candidate obeys the contract.",
-                        "findings": findings,
+                        "findings": [],
                     }
                 )
             )
@@ -157,10 +151,10 @@ scratch = Path(sys.argv[1])
         )
 
         assert result is not None
+        self.assertEqual(result["verdict"], "pass")
         self.assertEqual(result["findings"], [])
-        self.assertEqual(len(prompts), 2)
+        self.assertEqual(len(prompts), 1)
         self.assertIn("findings array is exclusively", prompts[0])
-        self.assertIn("previous review contradicted", prompts[1])
 
     def test_default_reviewer_reuses_ambient_authenticated_codex_home(self) -> None:
         seen_environment: list[dict[str, str]] = []
@@ -172,7 +166,6 @@ scratch = Path(sys.argv[1])
                     json.dumps(
                         {
                             "schema_version": 1,
-                            "verdict": "pass",
                             "summary": "The candidate obeys the contract.",
                             "findings": [],
                         }

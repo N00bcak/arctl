@@ -820,8 +820,14 @@ scratch = Path(sys.argv[1])
         runtime.mkdir()
         captured: dict = {}
 
-        def build_implementation_command(**arguments):
-            captured.update(arguments)
+        def build_implementation_command(agent, request):
+            captured.update(
+                {
+                    "model": agent.model,
+                    "read_paths": request.read_paths,
+                    "scratch": request.scratch,
+                }
+            )
             script = (
                 "import json,pathlib,sys;"
                 "pathlib.Path(sys.argv[1]).write_text(json.dumps({"
@@ -832,7 +838,7 @@ scratch = Path(sys.argv[1])
                 "python3",
                 "-c",
                 script,
-                str(arguments["scratch"] / "implementation.public.json"),
+                str(request.scratch / "implementation.public.json"),
             )
 
         with (
@@ -841,7 +847,7 @@ scratch = Path(sys.argv[1])
                 return_value=(runtime,),
             ),
             mock.patch(
-                "arctl.runner.research_command",
+                "arctl.runner.agent_command",
                 side_effect=build_implementation_command,
             ),
         ):
