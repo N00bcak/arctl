@@ -88,8 +88,10 @@ class MethodConfig:
         }
 
 
-def _defaults(profile: str) -> tuple[dict[str, AgentDefinition], dict[str, ComponentDefinition]]:
-    base = {
+def _defaults(
+    profile: str,
+) -> tuple[dict[str, AgentDefinition], dict[str, ComponentDefinition]]:
+    base: dict[str, tuple[str, ReasoningEffort]] = {
         "strategy": ("gpt-5.6-sol", "medium"),
         "planning": ("gpt-5.6-sol", "medium"),
         "execution": ("gpt-5.6-terra", "medium"),
@@ -109,9 +111,7 @@ def _defaults(profile: str) -> tuple[dict[str, AgentDefinition], dict[str, Compo
             names = (f"{stem}-a", f"{stem}-b")
         model, effort = base[stem]
         for name in names:
-            agents[name] = AgentDefinition(
-                name, "codex-cli-v1", model, effort  # type: ignore[arg-type]
-            )
+            agents[name] = AgentDefinition(name, "codex-cli-v1", model, effort)
         pools[component] = names
     components = {
         "search": ComponentDefinition("search.serial-champion-v1", ()),
@@ -182,7 +182,11 @@ def parse_method(value: Any) -> MethodConfig:
             raise ValidationError(f"method.overrides.{name}.agent_pool is invalid")
         if name in _AGENT_COMPONENTS:
             required = 2 if profile == "serial-hotseat-v1" else 1
-            invalid_size = len(pool) < 2 if profile == "serial-hotseat-v1" else len(pool) != 1
+            invalid_size = (
+                len(pool) < 2
+                if profile == "serial-hotseat-v1"
+                else len(pool) != 1
+            )
             if invalid_size or len(pool) != len(set(pool)):
                 raise ValidationError(
                     f"method.overrides.{name}.agent_pool requires {required} unique agent(s)"

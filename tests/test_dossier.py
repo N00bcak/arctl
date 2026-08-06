@@ -10,6 +10,7 @@ from arctl.dossier import ensure_experiment_dossier
 from arctl.models import TaskConfig
 
 from .helpers import valid_task
+from .test_manifest import valid_manifest
 
 
 def git(repo: Path, *arguments: str) -> str:
@@ -45,6 +46,16 @@ class DossierTests(unittest.TestCase):
             task = TaskConfig.from_mapping(raw_task)
             task_directory = root / "task"
             experiment = task_directory / "experiments" / "000001"
+            manifest = valid_manifest(telemetry=True)
+            manifest["public"]["telemetry"]["public_metric"] = (
+                manifest["public"]["telemetry"].pop("errors")
+            )
+            (task_directory / "evaluator.manifest.json").parent.mkdir(
+                parents=True, exist_ok=True
+            )
+            (task_directory / "evaluator.manifest.json").write_text(
+                json.dumps(manifest)
+            )
             (experiment / "process" / "public-check-0001").mkdir(parents=True)
             (experiment / "process" / "public-check-0001" / "result.json").write_text(
                 json.dumps({"schema_version": 1, "return_code": 0})
@@ -65,6 +76,48 @@ class DossierTests(unittest.TestCase):
                         "expected_telemetry": {"public_metric": "increase"},
                         "falsifiers": ["Effect is not positive."],
                         "lineage": {"kind": "new", "prior_entry_id": None},
+                    }
+                )
+            )
+            (experiment / "reflection.public.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 3,
+                        "status": "COMPLETE",
+                        "warning": None,
+                        "basis": {"strategy_behavior_id": "improve-score"},
+                        "assessment": {
+                            "summary": "The public metric supports the mechanism.",
+                            "strategy_behavior": {
+                                "id": "improve-score",
+                                "realization": "expressed",
+                                "evidence": [],
+                            },
+                            "metric_assessments": {
+                                "public_metric": {
+                                    "finding": "supports",
+                                    "rationale": "The candidate value increased.",
+                                }
+                            },
+                            "mechanism": {
+                                "status": "supported",
+                                "evidence": [],
+                                "missing_evidence": [],
+                            },
+                            "implementation": {
+                                "status": "no_specific_concern",
+                                "evidence": [],
+                                "concerns": [],
+                            },
+                            "policy_observations": [],
+                            "next_action": {
+                                "kind": "retain",
+                                "rationale": "The result supports retention.",
+                                "test": "Continue with another mechanism.",
+                            },
+                            "history_citations": [],
+                            "schema_version": 3,
+                        },
                     }
                 )
             )
@@ -123,6 +176,7 @@ class DossierTests(unittest.TestCase):
             self.assertNotIn("<img", rendered)
             self.assertIn("&lt;img", rendered)
             self.assertIn("public_metric", rendered)
+            self.assertIn("The candidate value increased", rendered)
             self.assertIn("-score = 1", rendered)
             self.assertIn("+score = 2", rendered)
 

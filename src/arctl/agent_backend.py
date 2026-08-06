@@ -4,14 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping, Sequence
+from typing import Callable
 
 from .errors import StateError, ValidationError
 from .methods import AgentDefinition, MethodConfig
 from .sandbox import research_command, sanitized_environment
-
-Certification = str
-
 
 @dataclass(frozen=True)
 class AgentSessionRequest:
@@ -29,7 +26,7 @@ class AgentSessionRequest:
 class BackendAdapter:
     identifier: str
     version: str
-    certification: Certification
+    certification: str
     conformance_suite: str
     capabilities: frozenset[str]
     command: Callable[[AgentDefinition, AgentSessionRequest], tuple[str, ...]]
@@ -117,15 +114,6 @@ def agent_provenance(agent: AgentDefinition, *, lifecycle: str) -> dict[str, obj
         "settings": {"reasoning_effort": agent.reasoning_effort},
         "capabilities": sorted(backend.capabilities),
     }
-
-
-def require_capabilities(agent: AgentDefinition, required: Sequence[str]) -> None:
-    backend = adapter_for(agent)
-    missing = set(required) - backend.capabilities
-    if missing:
-        raise StateError(
-            f"agent backend {agent.backend} lacks capabilities: {sorted(missing)}"
-        )
 
 
 def validate_method_backends(method: MethodConfig) -> dict[str, dict[str, object]]:

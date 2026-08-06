@@ -8,7 +8,7 @@ from pathlib import Path
 from arctl.errors import StateError
 from arctl.manifest import EvaluatorManifest
 from arctl.models import TaskConfig
-from arctl.reflection import run_reflection
+from arctl.reflection import run_reflection, validate_reflection
 from arctl.sandbox import MAX_AGENT_PROMPT_BYTES
 from arctl.search import add_ledger_entry
 
@@ -148,6 +148,18 @@ class ReflectionTests(unittest.TestCase):
             value["assessment"]["next_action"]["kind"],
             "revisit_after_better_evidence",
         )
+
+    def test_malformed_saved_complete_reflection_has_a_domain_error(self) -> None:
+        value = {
+            "schema_version": 3,
+            "status": "COMPLETE",
+            "warning": None,
+            "basis": {"strategy_behavior_id": "avoid-errors"},
+            "assessment": None,
+        }
+
+        with self.assertRaisesRegex(StateError, "saved complete reflection is invalid"):
+            validate_reflection(value, metric_names=("errors",))
 
     def test_generated_schema_fixes_metrics_behavior_and_empty_history(self) -> None:
         seen = {}

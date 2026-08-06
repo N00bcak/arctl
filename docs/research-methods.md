@@ -9,12 +9,12 @@ selects one compatible implementation and an agent pool per agent-driven
 component. `serial-v1` uses one agent per pool. `serial-hotseat-v1` uniformly
 selects one agent, with replacement, for each component lifecycle.
 
-The selected agent owns that whole lifecycle and the choice is persisted before
-the session starts. Recovery reuses the choice but starts a fresh process
-attempt. STRATEGIZE, PLAN, and REFLECT draw once per pass. EXECUTE draws
-independently for implementation, each review round, and each repair attempt.
-SEARCH and EVALUATE remain controller-owned. Hotseating never crosses a
-component boundary.
+A lifecycle is one complete stage pass, or one EXECUTE substage. Its selected
+agent is persisted before the session starts; recovery reuses that choice in a
+fresh process attempt. STRATEGIZE, PLAN, and REFLECT draw once per pass.
+Implementation, each review round, and each repair attempt draw independently
+from the EXECUTE pool. SEARCH and EVALUATE remain controller-owned. A draw
+never crosses a component boundary.
 
 ## Environment evidence
 

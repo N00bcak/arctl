@@ -1,26 +1,30 @@
 # `arctl` Light MVP Spec
+
 **Status:** build spec | **Language:** Python 3.11+ | **Platform:** Linux  
 **Needs:** Git, Codex CLI, Codex sandbox | **Use:** one repo, one task, one experiment at a time
 
 ## 1. Goal
 `arctl` runs a simple and honest auto-research loop for code.
-For each experiment:
-1. Start one fresh Codex session.
-2. Give it the current champion, the public task, and safe past results.
-3. Let it make one code change.
-4. Save the change as a Git commit.
-5. Test champion and candidate on the same private random-seed primary batch and, only when the approved evaluator flags an apparent win, one fresh suspect-test batch.
-6. Let controller code decide the result.
-7. Update the champion only when the candidate passes.
+It repeatedly:
+1. derives successful-policy behaviors from an approval-locked environment;
+2. plans one experiment against the current champion;
+3. implements and reviews that frozen brief;
+4. compares champion and candidate on one paired primary batch and, only when
+   the approved evaluator requests it, one fresh suspect batch;
+5. lets controller code decide and promote; and
+6. publishes an advisory reflection before continuing.
+
 > Git, Codex, and a small controller should be enough to run useful code experiments without letting the model control the test, the evidence, or the winner.
 `arctl` is not a general agent system, job scheduler, or new sandbox.
 
 ## 2. Core rules
 1. Git tracks the champion, candidates, history, and rollback.
-2. Codex provides fresh sessions and sandbox rules.
+2. A verified backend provides fresh sessions and sandbox rules; Codex is the
+   verified MVP adapter.
 3. The private evaluator and its manifest are locked before calibration or experiments start.
 4. Research and subject runs cannot read the evaluator.
-5. Each strategy revision, comparative plan, implementation, review, repair, and reflection uses one fresh Codex session. It is never resumed.
+5. Each strategy revision, plan, implementation, review, repair, and reflection
+   uses one fresh backend session. It is never resumed.
 6. Every evaluation uses one best-effort random-seed paired-trial protocol. A deterministic test is `trials: 1`.
 7. Every experiment uses one primary trial batch and, only when the approved evaluator flags an apparent win as suspect, at most one fresh suspect-test batch. A batch is chosen once and each subject runs it once. Batches are never redrawn, extended, or selectively retried.
 8. The model may suggest. Only `arctl` may test, decide, publish, or promote.
@@ -40,8 +44,18 @@ An official `Experiment` begins only after candidate search finds a novel candid
 Primary and suspect comparisons use the same commands, schemas, trial count, validation, storage shape, and crash rules. Their only behavioral difference is that a primary comparison may request a suspect comparison and a suspect comparison may not.
 
 ## 3. Scope
-Included: one trusted local Git repo; one active task and experiment; one approved task file, evaluator commit, and evaluator manifest; public strategy revisions, comparative plans, implementation reports, and a searchable exploration ledger; fresh Codex sessions; perpetual recoverable candidate search; allowed-path checks; public tests and dev probes; controller-made candidate commits; best-effort random-seed paired-trial evaluation; optional one-time trial-count calibration; one optional evaluator-triggered suspect test before promotion; saved experiment files; safe stop, crash recovery, status, history, inspect, and reports.
-Not included: parallel tasks or workers; subagents or resumed sessions; evaluator creation by the model; controller-defined task metrics or statistical methods; adaptive trial extension; search-wide multiple-testing correction or a harness-wide false-positive guarantee; enforced causal attribution of improvements (see [deferred attribution research](docs/deferred-attribution-research.md)); production branch changes; custom containers, VMs, workflow graphs, or plugins; protection from a hostile OS admin or sandbox escape.
+Included: one trusted local Git repo; one active task and experiment; approved
+task, method, environment, and evaluator inputs; public strategy and search
+history; fresh backend sessions; recoverable candidate search; allowed-path
+checks; controller-made candidate commits; paired evaluation; optional
+calibration and suspect testing; safe stop and recovery; and human-readable
+status, history, inspection, and reports.
+
+Not included: parallel workers, subagents, resumed sessions, model-authored
+evaluators, controller-defined statistics, adaptive trial extension,
+search-wide false-positive guarantees, production branch changes, custom
+isolation, or protection from a hostile administrator or sandbox escape.
+Causal attribution is [deferred](docs/deferred-attribution-research.md).
 
 ## 4. Trust and control
 Trusted: user, host OS, Git, `arctl`, approved Codex setup, and the approved evaluator commit and manifest.
@@ -88,18 +102,27 @@ The evaluator must use each trial seed to control score-affecting task randomnes
 Research and subject sandboxes must not read the evaluator repo, path, commit, controller master seeds, private trial identities, schedules, answers, scores, or evidence. An evaluator may place a seed in subject-visible input only when that seed is a legitimate task observation; otherwise it materializes the case and keeps the generator seed private.
 
 ## 6. Fresh session rule
-Each component-local agent seat starts one fresh backend session. Sessions are never resumed, and a seat never continues in another component. Rejected pre-trial work remains outside official experiments.
-Every controller-authored agent prompt is written once as `prompt.public.txt`, bounded by the global `MAX_AGENT_PROMPT_BYTES` limit (32 KiB), and streamed to `codex exec -` through standard input. The exactly-once process record stores the prompt path, byte count, and SHA-256 hash; recovery refuses a changed prompt. No complete exploration history is copied into a prompt.
-The session may read the public task, rules, allowed paths, a worktree of the champion, public tests, dev probes, the evaluator manifest's approved public statistic and subject-interface description, safe results from completed experiments, and the required experiment JSON format.
-The session may not read evaluator code or location, hidden cases or answers, official seeds or schedules, raw subject output, private evidence, private errors, or earlier Codex chat logs.
-The session ends before candidate freeze and official test choice. It is never resumed.
+Each component-local seat starts one fresh backend session and never continues
+in another component. Recovery starts a new process attempt with the same
+persisted seat selection. Rejected pre-trial work remains outside experiments.
+
+Every prompt is an immutable `prompt.public.txt`, limited by
+`MAX_AGENT_PROMPT_BYTES` (32 KiB) and hashed in its exactly-once process record.
+The Codex adapter streams it through standard input. No prompt contains the
+complete exploration history.
+
+Read access follows the component contract in Section 7. No agent session may
+read evaluator code or location, hidden cases or answers, official seeds or
+schedules, raw subject output, private evidence or errors, or earlier chat logs.
 
 ## 7. Sandbox profiles
 `arctl` uses the sandbox already provided by Codex.
 | Profile | Can use | Must not read | Network |
 |---|---|---|---|
-| `STRATEGY` | declared environment sources and environment-probe runtime, scratch | champion policy, experiment ledger, evaluator, statistics, telemetry | none |
-| `RESEARCH` | candidate worktree, public task data, scratch, read-only runtimes named by approved public checks and policy probe | evaluator, task data, private results, other experiments | none |
+| `STRATEGY` | environment snapshot, approved probes, scratch | champion, policy history, evaluator, statistics, telemetry | none |
+| `PLAN` | champion, current strategy, public exploration catalog and relevant entries, scratch | evaluator and private results | none |
+| `EXECUTE` | champion or candidate worktree, frozen brief, public tools, scratch | evaluator, private results, unrelated history | none |
+| `REFLECT` | champion, candidate, public result and relevant history, scratch | evaluator, seeds, raw subject output, private evidence | none |
 | `SUBJECT` | frozen code, runtime, public input, fresh output | evaluator, controller files, history | none |
 | `EVALUATOR` | evaluator commit, private case data, saved subject output | writable target repo, Git refs | none |
 `arctl doctor` must test file reads, file writes, network access, timeouts, and child-process cleanup before a task runs.
@@ -140,7 +163,22 @@ candidate_review:
 trials: auto
 max_experiments: 1000  # or: unlimited
 ```
-The method profile fixes compatible component implementations and component-local agent pools; optional `agents` and `overrides` may change backend, model, reasoning effort, and pool membership. `serial-v1` uses one agent per pool. `serial-hotseat-v1` uniformly selects one agent with replacement for each STRATEGIZE, PLAN, EXECUTE-substage, or REFLECT lifecycle, persists that choice, and reuses it during recovery. The default assignments remain Sol medium for strategy, planning, and reflection and Terra medium for execution. The resolved semantic method and every environment codebase commit are approval-locked. Approval snapshots selected Git blobs for read-only strategy inspection; later execution verifies the snapshot without depending on the source checkout. Existing task-v3 files retain their legacy assignments. `max_experiments` accepts a positive integer or `unlimited`; new tasks default to 1000. Optional `candidate_review` contains a contract, deterministic checks, and `repair_attempts: 0 | 1`; repeated violations become public research misses before experiment allocation or seed reservation. `trials` is `auto` or a positive integer, and `arctl init` uses `auto` by default. See `docs/research-methods.md` for hotseat, backend-certification, and future search invariants.
+The method profile fixes compatible components and component-local agent pools.
+Optional `agents` and `overrides` change backend, model, reasoning effort, or
+pool membership. `serial-v1` uses one agent per pool. `serial-hotseat-v1`
+selects uniformly with replacement for each STRATEGIZE, PLAN, EXECUTE-substage,
+or REFLECT lifecycle, persists the choice, and reuses it during recovery.
+
+Defaults are Sol medium for strategy, planning, and reflection and Terra medium
+for execution. Approval locks the resolved method and snapshots the selected
+Git blobs from every environment codebase. Task-v3 files retain their legacy
+assignments. See [research methods](docs/research-methods.md) for backend
+certification and future search invariants.
+
+`max_experiments` is a positive integer or `unlimited`; new tasks default to
+1000. `trials` is `auto` or a positive integer. Optional `candidate_review`
+allows `repair_attempts: 0 | 1`; repeated violations are public search misses
+and consume no experiment or official seed.
 
 All evaluator-manifest commands must be argument lists, not shell strings.
 Allowed full-argument placeholders:
@@ -246,7 +284,19 @@ For candidate discovery, a fresh read-only planner inspects the champion, curren
   }
 }
 ```
-The planner may exhaust every direction when evidence warrants it; this immediately returns control to the environment strategist and does not consume an experiment or seed. There is no scientific strike count or `SEARCH_STALLED` terminal state. A planner request specifies only a policy change within editable paths; trial counts, seeds, calibration, statistical thresholds, and evaluator behavior remain controller-owned. A separate fresh implementer receives the immutable request and may implement it or report infeasibility, but may not substitute another idea. `arctl` validates the request, links, implementation report, changed paths, and exact candidate novelty before the existing deterministic checks and semantic reviewer. Pre-trial misses are operational or methodological history, not empirical evidence that a mechanism is ineffective. Misses return to planning indefinitely until explicit stop, an operational failure, or an approved experiment limit. Every implementer starts from the latest accepted champion.
+The planner may exhaust every direction when evidence warrants it; this returns
+control to strategy without consuming an experiment or seed. There is no
+scientific strike count or `SEARCH_STALLED` state. A request specifies only a
+policy change; trial counts, seeds, thresholds, and evaluator behavior remain
+controller-owned. A fresh implementer starts from the latest champion and must
+implement the frozen brief or report infeasibility.
+
+`arctl` validates the request, links, report, changed paths, and candidate
+novelty before deterministic checks and semantic review. The reviewer returns
+a summary and actionable findings; the controller derives `pass` from an empty
+findings set and `fail` otherwise. Pre-trial misses are operational or
+methodological history, not evidence that a mechanism is ineffective. Search
+returns to planning until stopped, failed operationally, or limited.
 
 ### 10.3 Run one comparison
 `ComparisonRun(kind)` is the only official evaluation workflow:
@@ -290,7 +340,15 @@ The controller applies the same decision rule to either comparison:
 
 After a primary `ACCEPT` that requests a suspect test, the experiment is internally `PROVISIONAL`: keep the champion unchanged and run exactly one fresh `ComparisonRun(kind="suspect")` with non-overlapping seeds. Its decision becomes final and it cannot request another run. Otherwise the primary decision is final.
 
-Only a final `ACCEPT` may update the champion ref. The verdict and promotion are fixed before interpretation and cannot be changed by a model. When the manifest declares telemetry, `arctl` enters `REFLECTING` and launches one fresh, schema-constrained, read-only session over the public result, semantic telemetry, selected strategy behavior, viability and prior-evidence review, precommitted expectations and falsifiers, public checks, champion/candidate source, and the compact exploration catalog. The reflector searches that catalog, opens relevant canonical entries, and cites their entry IDs in its response. It must assess every metric, distinguish observation from inference, state when causes are not identifiable, judge whether the candidate expressed the selected behavior, criticize or reinterpret the policy mechanism, record policy-specific findings for later planners, assess implementation evidence, and recommend a nonbinding next research action. Its separate `reflection.public.json` is advisory and never changes `ACCEPT`, `ARCHIVE`, `REJECT`, or promotion.
+Only a final `ACCEPT` may update the champion. Verdict and promotion are fixed
+before interpretation. With telemetry, `arctl` starts one fresh read-only
+reflection over the public result, selected behavior and mechanism, champion,
+candidate, public checks, and compact exploration catalog. Reflection schema
+v3 fixes the behavior ID, exact telemetry fields, and valid history IDs; older
+published versions remain readable. The reflector must assess every metric,
+separate observation from inference, identify causal limits and implementation
+concerns, and recommend a nonbinding next action. It cannot change the verdict
+or promotion.
 
 If the manifest declares no telemetry, `arctl` skips the model session and publishes a persistent warning that causal reflection is unavailable. If a required reflection process or response fails, the valid verdict and promotion remain saved but the task becomes `REFLECTION_FAILED`; no later candidate search may start. A later explicit `run` makes a fresh reflection attempt before any research. There is no bypass. After reflection succeeds or is intentionally skipped, `arctl` marks the experiment complete, removes temporary worktrees, and gives the result plus reflection to later sessions. There is no controller-defined metric direction, minimum delta, or unit-specific threshold.
 

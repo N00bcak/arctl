@@ -30,6 +30,10 @@ reviews the uncommitted candidate diff. One configured fresh repair may address
 cited findings before checks and semantic review repeat. A repeated violation
 is recorded as a research miss and never reaches the evaluator.
 
+The reviewer reports only a summary and actionable findings. The controller
+derives `pass` from an empty findings set and `fail` otherwise, so the response
+cannot contain a contradictory verdict.
+
 This gate is deliberately outside the evaluator's mathematics. It helps govern
 cooperative research agents and provides auditable admission reasoning, but
 static and model review do not make arbitrary executable policy code safe
@@ -48,7 +52,7 @@ The author must also explain:
 - the direction-normalized effect and what a positive value means;
 - known uncontrolled variation and concrete mitigations;
 - why the fixed trial count or calibration criterion is adequate;
-- any suspect trigger, its approved reason codes, and the pathology it targets.
+- any suspect trigger, its approved reason codes, and the pathology it targets;
 - each public diagnostic's unit, scope, favorable direction, and whether it
   measures outcome, mechanism, safety, implementation, or uncertainty.
 
@@ -79,6 +83,10 @@ advisory: it can recommend retention, refinement, later review, implementation
 audit, or abandonment, but cannot change the verdict or promotion. If that
 required session fails, valid evidence is preserved and later research stops
 until a fresh reflection attempt succeeds.
+
+Reflection schema v3 fixes the selected behavior ID, history entry IDs, and
+exact telemetry field names in the model's output schema. Older published
+reflection versions remain readable.
 
 ## Reference conformance fixtures
 

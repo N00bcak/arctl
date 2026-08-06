@@ -279,7 +279,9 @@ def validate_planning(
     selection = value["selection"]
     if selection is None:
         if any(item["disposition"] != "exhausted" for item in directions):
-            raise ValidationError("planner may omit selection only when all directions are exhausted")
+            raise ValidationError(
+                "planner may omit selection only when all directions are exhausted"
+            )
         return None
     if selection not in expected:
         raise ValidationError("planner selected an unknown direction")
@@ -400,6 +402,22 @@ def _catalog_entry(task_directory: Path, entry: Mapping[str, Any]) -> dict[str, 
             "warning": reflection.get("warning"),
         }
         if isinstance(assessment, Mapping):
+            metric_assessments = assessment.get("metric_assessments", [])
+            if isinstance(metric_assessments, Mapping):
+                metric_findings = [
+                    {"metric": name, "finding": item.get("finding")}
+                    for name, item in metric_assessments.items()
+                    if isinstance(item, Mapping)
+                ]
+            else:
+                metric_findings = [
+                    {
+                        "metric": item.get("metric"),
+                        "finding": item.get("finding"),
+                    }
+                    for item in metric_assessments
+                    if isinstance(item, Mapping)
+                ]
             compact_reflection.update(
                 {
                     "summary": assessment.get("summary"),
@@ -418,22 +436,7 @@ def _catalog_entry(task_directory: Path, entry: Mapping[str, Any]) -> dict[str, 
                         if isinstance(assessment.get("implementation"), Mapping)
                         else None
                     ),
-                    "metric_findings": (
-                        [
-                            {"metric": name, "finding": item.get("finding")}
-                            for name, item in assessment.get("metric_assessments", {}).items()
-                            if isinstance(item, Mapping)
-                        ]
-                        if isinstance(assessment.get("metric_assessments"), Mapping)
-                        else [
-                            {
-                                "metric": item.get("metric"),
-                                "finding": item.get("finding"),
-                            }
-                            for item in assessment.get("metric_assessments", [])
-                            if isinstance(item, Mapping)
-                        ]
-                    ),
+                    "metric_findings": metric_findings,
                     "next_action": (
                         assessment.get("next_action", {}).get("kind")
                         if isinstance(assessment.get("next_action"), Mapping)

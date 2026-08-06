@@ -9,6 +9,7 @@ import re
 import shlex
 import shutil
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -111,7 +112,8 @@ def _public_check_lines(
         lines.append(f"- {_code(shlex.join(command))} — **{outcome}**")
     if not lines:
         lines.append(
-            f"- Public constraints: **{safe_text(result.get('constraints', {}).get('tests', 'unknown'))}**"
+            "- Public constraints: **"
+            f"{safe_text(result.get('constraints', {}).get('tests', 'unknown'))}**"
         )
     return lines
 

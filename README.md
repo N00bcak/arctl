@@ -19,13 +19,19 @@ stage timing. `status` names the experiment that promoted the current champion;
 root. Every published experiment receives a public-only Markdown dossier under
 the task’s `reports/experiments/` directory. Use `--json` for AI orchestration.
 
-Task-v3 approvals content-lock the public environment implementation,
-interface, documentation, and policy-free probes. A strategy session can read
-only those sources and derives high-level successful-policy behaviors from
-cited environment observations. A read-only planner compares every behavior
-against the latest accepted champion and freezes one experiment brief; a fresh
-implementer may only realize that brief. Evidence-backed exhaustion of every
-direction triggers another environment-strategy revision rather than stopping.
+Task-v4 approvals lock the public environment code, interface, documentation,
+policy-free probes, and research method. A strategy session reads only the
+environment snapshot and derives successful-policy behaviors from cited
+observations. A read-only planner compares those behaviors with the latest
+accepted champion and freezes one experiment brief; a fresh implementer may
+only realize that brief. Task-v3 files remain supported with their legacy
+single-agent assignments.
+
+`serial-v1` assigns one agent to each agent-driven component.
+`serial-hotseat-v1` instead draws from an approved component-local pool for
+each stage lifecycle and persists the draw for recovery. Exhausting every
+current direction refreshes the environment strategy rather than ending the
+search.
 
 Tasks may also require a pre-trial candidate review contract. Approval-locked
 deterministic checks catch obvious violations, then a fresh read-only execution
@@ -70,8 +76,8 @@ The suite creates temporary subject repositories and uses portable evaluator
 fixtures from `tests/fixtures/`. `test_tris/` is an ignored local lab and is
 not required to build, test, or install arctl.
 
-The two host-sandbox boundary tests are opt-in because they require a host
-that can create a Codex sandbox:
+Host-sandbox boundary tests are opt-in because they require a host that can
+create a Codex sandbox:
 
 ```bash
 ARCTL_HOST_SANDBOX_TEST=1 python -m unittest tests.test_sandbox_host -v

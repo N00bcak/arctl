@@ -63,21 +63,23 @@ candidate is promoted.
 flowchart LR
     H[Human approver] -->|locks exact bytes and commits| C[Trusted arctl controller]
     O[Human or AI operator] -->|CLI or JSON commands| C
-    C -->|public environment only| S[Strategy and reflection model]
-    C -->|champion worktree and public history| X[Execution model]
+    C -->|environment snapshot only| S[Strategy model]
+    C -->|champion and public history| P[Planning model]
+    C -->|frozen brief and champion| X[Implementation model]
     X -->|candidate edits in whitelist| C
     C -->|read-only candidate diff| R[Independent policy reviewer]
     C -->|private seeds and scoring inputs| E[Approved evaluator]
     C -->|public batch only| P1[Champion process]
     C -->|same public batch only| P2[Candidate process]
     E -->|aggregate evidence and allowlisted telemetry| C
+    C -->|candidate, champion, result, public history| F[Reflection model]
     C -->|public result, dossier, ledger| O
 
     classDef trusted fill:#d8f3dc,stroke:#2d6a4f,color:#000;
     classDef untrusted fill:#ffe8cc,stroke:#d9480f,color:#000;
     classDef private fill:#e7f5ff,stroke:#1864ab,color:#000;
     class C,H trusted;
-    class S,X,R,P1,P2 untrusted;
+    class S,P,X,R,F,P1,P2 untrusted;
     class E private;
 ```
 
@@ -92,8 +94,8 @@ flowchart LR
   references the chosen direction; it never restates or paraphrases the mechanism.
 - **Implementation** receives that frozen request and current code, not the growing
   research history.
-- **Review and reflection** are advisory methodology checks. Neither can alter
-  the evaluator's verdict.
+- **Review** controls pre-trial admission but cannot evaluate outcomes.
+  **Reflection** interprets completed evidence but cannot alter its verdict.
 
 ## Task lifecycle
 
@@ -122,15 +124,16 @@ pretend that an empty invocation tested a candidate.
 
 ## Approval and automatic calibration
 
-Approval locks the task file hash, evaluator commit, evaluator manifest hash,
-initial champion, and hashes of every declared environment source. Changing
-any of those inputs requires a new approval. Promotion may move the champion
-ref afterward; calibration remains bound to the initial approved champion.
+Approval locks the task file, resolved method, backend attestations, evaluator
+commit and manifest, initial champion, and every declared environment Git
+blob. Changing any semantic input requires a new approval. Promotion may move
+the champion ref afterward; calibration remains bound to the approved initial
+champion.
 
 ```mermaid
 flowchart TD
-    P[Parse task v3] --> V[Validate repositories, paths, commands, models, and manifest]
-    V --> ENV[Hash declared environment files and probe contracts]
+    P[Parse task v4 or compatible v3] --> V[Validate repositories, paths, method, and manifest]
+    V --> ENV[Snapshot environment Git blobs and probe contracts]
     ENV --> PREVIEW[Show models, paths, seeds, trials, telemetry, risks, token]
     PREVIEW -->|explicit human confirmation| LOCK[Write immutable approval records]
     LOCK --> T{trials}
@@ -289,6 +292,7 @@ TASK/
 ├── approval.json                     # hashes and initial champion
 ├── evaluator.commit
 ├── evaluator.manifest.json
+├── environment/                      # approval-locked Git-blob snapshots
 ├── trial-count.json                  # fixed count and calibration summary
 ├── calibration/                      # private requests, process records, outputs
 ├── strategy/
@@ -309,10 +313,12 @@ TASK/
 └── reports/experiments/000001/        # immutable public Markdown dossier
 ```
 
-Agent prompts are immutable `prompt.public.txt` artifacts. They are limited to
-32 KiB, hashed in the process reservation, and streamed to `codex exec -` over
-standard input. Growing history is retrieved from the catalog and canonical
-entries instead of being embedded in an argv argument or copied into each prompt.
+Agent selections, backend attestations, and session provenance are persisted
+beside their lifecycle artifacts. Prompts are immutable `prompt.public.txt`
+files, limited to 32 KiB and hashed before execution. The Codex adapter streams
+them over standard input; other adapters must preserve the same contract.
+Growing history stays in the catalog and canonical entries instead of being
+copied into each prompt.
 
 The dossier is derived, public-only, and readable by a human. Private
 reservations, seeds, cases, schedules, evaluator outputs, raw subject outputs,
@@ -330,6 +336,7 @@ and every `arctl COMMAND -h` screen.
 
 Related documents:
 
+- [Research methods and agent backends](research-methods.md)
 - [Evaluator design boundary](evaluator-design.md)
 - [Empirical validation protocols](empirical-validation.md)
 - [MVP specification](../arctl_light_mvp_spec_simple.md)

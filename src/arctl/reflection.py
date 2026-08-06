@@ -262,7 +262,9 @@ def validate_reflection(
         "assessment",
     }:
         raise StateError("saved reflection fields are invalid")
-    if value["schema_version"] not in {1, 2, 3} or not isinstance(value["basis"], Mapping):
+    if value["schema_version"] not in {1, 2, 3} or not isinstance(
+        value["basis"], Mapping
+    ):
         raise StateError("saved reflection values are invalid")
     if value["status"] == "SKIPPED_NO_TELEMETRY":
         if (
@@ -272,10 +274,11 @@ def validate_reflection(
         ):
             raise StateError("saved skipped reflection is invalid")
     elif value["status"] == "COMPLETE":
-        if value["warning"] is not None:
+        assessment = value["assessment"]
+        if value["warning"] is not None or not isinstance(assessment, Mapping):
             raise StateError("saved complete reflection is invalid")
         try:
-            assessment_version = value["assessment"].get("schema_version")
+            assessment_version = assessment.get("schema_version")
             if assessment_version not in {1, 2, 3}:
                 raise StateError("saved reflection assessment version is invalid")
             Draft202012Validator(
@@ -288,20 +291,24 @@ def validate_reflection(
                         else None
                     ),
                 )
-            ).validate(value["assessment"])
+            ).validate(assessment)
         except JsonSchemaError as error:
             raise StateError("saved reflection assessment is invalid") from error
-        assessments = value["assessment"]["metric_assessments"]
+        assessments = assessment["metric_assessments"]
         if assessment_version == 3:
             if set(assessments) != set(metric_names):
-                raise StateError("reflection must assess every telemetry metric exactly once")
+                raise StateError(
+                    "reflection must assess every telemetry metric exactly once"
+                )
         else:
             names = [item["metric"] for item in assessments]
             if len(names) != len(set(names)) or set(names) != set(metric_names):
-                raise StateError("reflection must assess every telemetry metric exactly once")
+                raise StateError(
+                    "reflection must assess every telemetry metric exactly once"
+                )
         if (
-            value["assessment"]["strategy_behavior"]["id"]
-            != value["basis"]["strategy_behavior_id"]
+            assessment["strategy_behavior"]["id"]
+            != value["basis"].get("strategy_behavior_id")
         ):
             raise StateError("reflection strategy behavior does not match the request")
     else:

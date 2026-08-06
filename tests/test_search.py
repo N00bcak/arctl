@@ -244,3 +244,36 @@ class ExplorationCatalogTests(unittest.TestCase):
                 ),
                 catalog,
             )
+
+    def test_catalog_compacts_metric_keyed_reflection(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            task = Path(temporary)
+            add_ledger_entry(
+                task,
+                {
+                    "source": "experiment:000001",
+                    "kind": "experiment",
+                    "message": "Completed.",
+                    "reflection": {
+                        "status": "COMPLETE",
+                        "warning": None,
+                        "assessment": {
+                            "summary": "The mechanism remains plausible.",
+                            "metric_assessments": {
+                                "errors": {
+                                    "finding": "supports",
+                                    "rationale": "Errors decreased.",
+                                }
+                            },
+                        },
+                    },
+                },
+            )
+
+            catalog = json.loads(
+                (task / "exploration" / "ledger.public.jsonl").read_text()
+            )
+            self.assertEqual(
+                catalog["reflection"]["metric_findings"],
+                [{"metric": "errors", "finding": "supports"}],
+            )
