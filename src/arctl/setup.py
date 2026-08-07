@@ -24,6 +24,7 @@ from .storage import atomic_write_json, atomic_write_text
 from .taskio import load_task
 
 SetupCommandBuilder = Callable[[Path, Path, Path, str], Sequence[str]]
+SetupProgress = Callable[[Mapping[str, Any]], None]
 
 QUESTION_IDS = (
     "objective",
@@ -38,6 +39,35 @@ QUESTION_IDS = (
     "runtime_budget",
     "evaluator_pattern",
 )
+QUESTION_GROUPS = {
+    "target": ("objective", "outcome"),
+    "trial_protocol": ("independent_trial", "hidden_data", "randomness"),
+    "constraints": ("hard_rules", "runtime_budget"),
+    "evaluator": ("telemetry", "evaluator_pattern"),
+}
+_SETUP_TEMPLATE = """# ARCTL setup
+
+<!-- Fill what you know. arctl will inspect the repository and ask only about
+material gaps or conflicts. Delete no headings; empty sections are allowed. -->
+
+## Goal and primary outcome
+
+## Policy boundary
+
+## Environment boundary
+
+## Trial protocol
+
+## Hidden information
+
+## Hard constraints
+
+## Telemetry
+
+## Runtime budget
+
+## Evaluator and success criterion
+"""
 _PLACEHOLDERS = {
     "SETUP_SUBJECT_COMMIT",
     "SETUP_ENVIRONMENT_COMMIT",
@@ -60,6 +90,11 @@ def _git(repo: Path, *arguments: str, check: bool = True) -> str:
 
 def _clean(repo: Path) -> bool:
     return not _git(repo, "status", "--porcelain", "--untracked-files=all")
+
+
+def _clean_except_brief(repo: Path) -> bool:
+    lines = _git(repo, "status", "--porcelain", "--untracked-files=all").splitlines()
+    return all(line[3:] == "ARCTL_SETUP.md" for line in lines)
 
 
 def _commit(repo: Path, message: str) -> str:
@@ -105,24 +140,93 @@ def discovery_schema() -> dict[str, Any]:
     question = _schema(
         {
             "id": {"type": "string", "enum": list(QUESTION_IDS)},
+            "proposed_answer": text,
+            "citations": {"type": "array", "items": citation},
+            "source": {
+                "type": "string",
+                "enum": ["setup brief", "repository", "proposal"],
+            },
+        }
+    )
+    clarification = _schema(
+        {
+            "id": {"type": "string", "enum": list(QUESTION_GROUPS)},
             "prompt": text,
             "why": text,
             "proposed_answer": text,
-            "citations": {"type": "array", "items": citation},
+            "affected_fields": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"type": "string", "enum": list(QUESTION_IDS)},
+            },
         }
     )
     return _schema(
         {
-            "schema_version": {"type": "integer", "const": 1},
+            "schema_version": {"type": "integer", "const": 2},
+            "brief_sha256": text,
             "summary": text,
-            "questions": {
+            "fields": {
                 "type": "array",
                 "minItems": len(QUESTION_IDS),
                 "maxItems": len(QUESTION_IDS),
                 "items": question,
             },
+            "open_questions": {
+                "type": "array",
+                "maxItems": len(QUESTION_GROUPS),
+                "items": clarification,
+            },
         }
     )
+
+
+def _brief(setup: Mapping[str, Any]) -> tuple[Path, str, str]:
+    subject = Path(setup["subject"])
+    workspace = Path(setup["workspace"])
+    subject_path = subject / "ARCTL_SETUP.md"
+    path = subject_path if subject_path.is_file() else workspace / "ARCTL_SETUP.md"
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    return path, text, hashlib.sha256(text.encode()).hexdigest()
+
+
+def setup_presentation(discovery: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the stable human/JSON view, including discovery-v1 consolidation."""
+    if discovery.get("schema_version") == 2:
+        return {
+            "proposal": list(discovery["fields"]),
+            "open_questions": list(discovery["open_questions"]),
+        }
+    fields = []
+    unresolved: set[str] = set()
+    markers = ("must confirm", "humans must", "should confirm", "need confirmation")
+    for item in discovery.get("questions", []):
+        fields.append({**item, "source": "repository"})
+        if any(marker in item["proposed_answer"].lower() for marker in markers):
+            unresolved.add(item["id"])
+    questions = []
+    by_id = {item["id"]: item for item in fields}
+    for group, members in QUESTION_GROUPS.items():
+        affected = [name for name in members if name in unresolved]
+        if not affected:
+            continue
+        first = by_id[affected[0]]
+        questions.append(
+            {
+                "id": group,
+                "prompt": f"Confirm the {group.replace('_', ' ')}.",
+                "why": "The earlier discovery marked these related details unresolved.",
+                "proposed_answer": first["proposed_answer"],
+                "affected_fields": affected,
+            }
+        )
+    return {"proposal": fields, "open_questions": questions}
+
+
+def brief_changed(setup: Mapping[str, Any], discovery: Mapping[str, Any]) -> bool:
+    return discovery.get("schema_version") == 2 and discovery.get(
+        "brief_sha256"
+    ) != _brief(setup)[2]
 
 
 def build_schema() -> dict[str, Any]:
@@ -258,12 +362,16 @@ def initialize_setup(
         _commit(subject, "Initialize research subject")
     elif not (subject / ".git").exists():
         raise StateError(f"target is not a Git worktree: {subject}")
-    if not _clean(subject):
-        raise StateError("setup requires a clean subject Git worktree")
+    if not _clean_except_brief(subject):
+        raise StateError("setup requires a clean subject Git worktree except ARCTL_SETUP.md")
     evaluator = workspace / "evaluator"
     environment = workspace / "environment"
     evaluator.mkdir()
     environment.mkdir()
+    if not (subject / "ARCTL_SETUP.md").is_file() and not (
+        workspace / "ARCTL_SETUP.md"
+    ).exists():
+        atomic_write_text(workspace / "ARCTL_SETUP.md", _SETUP_TEMPLATE)
     _git(evaluator, "init", "-q")
     _git(environment, "init", "-q")
     task_directory.mkdir(parents=True)
@@ -277,6 +385,11 @@ def initialize_setup(
         "environment": str(environment.resolve()),
         "evaluator": str(evaluator.resolve()),
         "new_repo": new_repo,
+        "setup_brief": str(
+            subject / "ARCTL_SETUP.md"
+            if (subject / "ARCTL_SETUP.md").is_file()
+            else workspace / "ARCTL_SETUP.md"
+        ),
         "state": "DISCOVERY_REQUIRED",
     }
     atomic_write_json(task_directory / "setup.json", record)
@@ -323,34 +436,75 @@ def discover_setup(
     *,
     command_builder: SetupCommandBuilder | None = None,
     offline: bool = False,
+    progress: SetupProgress | None = None,
 ) -> dict[str, Any]:
     subject = Path(setup["subject"])
+    brief_path, brief_text, brief_hash = _brief(setup)
     prompt = (
         "Analyze this public Python repository as a prospective arctl research "
-        "subject. Do not edit files or invent private evaluation data. Produce "
-        "exactly one question for every required id, with the best proposed answer "
-        "supported by repository citations. Distinguish the policy to improve from "
-        "the environment it acts in. Treat statistical independence, hidden data, "
-        "and evaluator choice as proposals requiring human confirmation. Return only "
-        "the required JSON. Required ids: "
-        + ", ".join(QUESTION_IDS)
+        "subject. Do not edit files or invent private evaluation data. The human "
+        "ARCTL_SETUP.md below is authoritative intent; use repository evidence to "
+        "complete it and identify only material missing, ambiguous, contradictory, "
+        "or infeasible decisions. Return exactly one canonical field for every "
+        "required id. A field source is 'setup brief' when explicitly supplied, "
+        "'repository' when directly derived, and 'proposal' otherwise. Return at "
+        "most one non-overlapping clarification in each group: target, trial_protocol, "
+        "constraints, evaluator. Pairing, independence, seed selection, and hidden "
+        "trials belong to the single trial_protocol clarification. Policy and "
+        "environment facts should normally be shown, not asked. Every field needs "
+        "repository citations when available. Return only JSON.\n\n"
+        + json.dumps(
+            {
+                "brief_path": str(brief_path),
+                "brief_sha256": brief_hash,
+                "brief": brief_text,
+                "required_ids": QUESTION_IDS,
+                "groups": QUESTION_GROUPS,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     )
     attempts = directory / "setup" / "discovery" / "attempts"
     attempt = 1 + len(tuple(attempts.glob("*"))) if attempts.is_dir() else 1
-    value = _agent_run(
-        root=attempts / f"{attempt:04d}",
-        worktree=subject,
-        schema_value=discovery_schema(),
-        output_name="discovery.public.json",
-        prompt=prompt,
-        writable_worktree=False,
-        command_builder=command_builder,
-        offline=offline,
-    )
-    ids = [item["id"] for item in value["questions"]]
+    if progress is not None:
+        progress({"stage": "brief + repository discovery", "status": "started"})
+    try:
+        value = _agent_run(
+            root=attempts / f"{attempt:04d}",
+            worktree=subject,
+            schema_value=discovery_schema(),
+            output_name="discovery.public.json",
+            prompt=prompt,
+            writable_worktree=False,
+            command_builder=command_builder,
+            offline=offline,
+        )
+    except Exception:
+        if progress is not None:
+            progress({"stage": "brief + repository discovery", "status": "failed"})
+        raise
+    ids = [item["id"] for item in value["fields"]]
     if sorted(ids) != sorted(QUESTION_IDS) or len(ids) != len(set(ids)):
-        raise StateError("setup discovery did not answer every required question once")
+        raise StateError("setup discovery did not describe every required field once")
+    if value["brief_sha256"] != brief_hash:
+        raise StateError("setup discovery returned the wrong brief hash")
+    seen_fields: set[str] = set()
+    seen_groups: set[str] = set()
+    for question in value["open_questions"]:
+        group = question["id"]
+        affected = set(question["affected_fields"])
+        if (
+            group in seen_groups
+            or affected & seen_fields
+            or not affected <= set(QUESTION_GROUPS[group])
+        ):
+            raise StateError("setup discovery produced overlapping clarifications")
+        seen_groups.add(group)
+        seen_fields.update(affected)
     atomic_write_json(directory / "setup" / "discovery.public.json", value)
+    if progress is not None:
+        progress({"stage": "brief + repository discovery", "status": "completed"})
     setup["state"] = "ANSWERS_REQUIRED"
     _save_setup(directory, setup)
     return value
@@ -360,15 +514,36 @@ def save_answers(
     directory: Path,
     setup: dict[str, Any],
     answers: Mapping[str, Any],
-) -> dict[str, str]:
-    if set(answers) != set(QUESTION_IDS) or any(
+    overrides: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    discovery = json.loads(
+        (directory / "setup" / "discovery.public.json").read_text(encoding="utf-8")
+    )
+    presentation = setup_presentation(discovery)
+    required = {item["id"] for item in presentation["open_questions"]}
+    if set(answers) == set(QUESTION_IDS):
+        overrides = answers
+        answers = {}
+        required = set()
+    if set(answers) != required or any(
         not isinstance(value, str) or not value.strip() for value in answers.values()
     ):
-        raise ValidationError("setup answers must provide every required question")
-    normalized = {name: answers[name].strip() for name in QUESTION_IDS}
+        raise ValidationError("setup answers must resolve every open clarification once")
+    overrides = {} if overrides is None else overrides
+    if not set(overrides) <= set(QUESTION_IDS) or any(
+        not isinstance(value, str) or not value.strip() for value in overrides.values()
+    ):
+        raise ValidationError("setup overrides name unknown or empty canonical fields")
+    normalized = {
+        "schema_version": 2,
+        "brief_sha256": discovery.get("brief_sha256"),
+        "proposal": presentation["proposal"],
+        "answers": {name: answers[name].strip() for name in sorted(answers)},
+        "overrides": {name: overrides[name].strip() for name in sorted(overrides)},
+    }
     atomic_write_json(
         directory / "setup" / "answers.public.json",
-        {"schema_version": 1, "answers": normalized},
+        normalized,
     )
     setup["state"] = "BUILD_REQUIRED"
     _save_setup(directory, setup)
@@ -433,6 +608,7 @@ def build_setup(
     offline: bool,
     command_builder: SetupCommandBuilder | None = None,
     review_command_builder: SetupCommandBuilder | None = None,
+    progress: SetupProgress | None = None,
 ) -> dict[str, Any]:
     subject = Path(setup["subject"])
     evaluator = Path(setup["evaluator"])
@@ -440,11 +616,11 @@ def build_setup(
     workspace = Path(setup["workspace"])
     branch = f"arctl/setup-{setup['task_id']}"
     current = _git(subject, "branch", "--show-current")
-    if current != branch and not _clean(subject):
-        raise StateError("setup requires a clean subject Git worktree")
-    answers = json.loads(
+    if current != branch and not _clean_except_brief(subject):
+        raise StateError("setup requires a clean subject Git worktree except ARCTL_SETUP.md")
+    requirements = json.loads(
         (directory / "setup" / "answers.public.json").read_text(encoding="utf-8")
-    )["answers"]
+    )
     if current != branch:
         if _git(subject, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}", check=False):
             raise StateError(f"setup branch already exists: {branch}")
@@ -479,25 +655,38 @@ def build_setup(
                 "evaluator": str(evaluator),
                 "python": str(workspace / ".venv" / "bin" / "python"),
                 "commit_placeholders": sorted(_PLACEHOLDERS),
-                "answers": answers,
+                "requirements": requirements,
                 "prior_review_findings": prior_findings,
             },
             sort_keys=True,
             separators=(",", ":"),
         )
     )
-    value = _agent_run(
-        root=attempts / f"{attempt:04d}",
-        worktree=subject,
-        schema_value=build_schema(),
-        output_name="build.public.json",
-        prompt=prompt,
-        writable_worktree=False,
-        read_paths=(environment, *_public_files(evaluator, exclude_private=True)),
-        command_builder=command_builder,
-        offline=offline,
+    if progress is not None:
+        progress({"stage": "generation", "status": "started"})
+    try:
+        value = _agent_run(
+            root=attempts / f"{attempt:04d}",
+            worktree=subject,
+            schema_value=build_schema(),
+            output_name="build.public.json",
+            prompt=prompt,
+            writable_worktree=False,
+            read_paths=(environment, *_public_files(evaluator, exclude_private=True)),
+            command_builder=command_builder,
+            offline=offline,
+        )
+    except Exception:
+        if progress is not None:
+            progress({"stage": "generation", "status": "failed"})
+        raise
+    if progress is not None:
+        progress({"stage": "generation", "status": "completed"})
+    _safe_files(
+        subject,
+        value["subject_files"],
+        forbidden_roots=frozenset({"ARCTL_SETUP.md"}),
     )
-    _safe_files(subject, value["subject_files"])
     _safe_files(environment, value["environment_files"])
     _safe_files(
         evaluator,
@@ -528,6 +717,8 @@ def build_setup(
     uv_environment = os.environ.copy()
     uv_environment["UV_CACHE_DIR"] = str(workspace / ".uv-cache")
     uv_environment["UV_PROJECT_ENVIRONMENT"] = str(workspace / ".venv")
+    if progress is not None:
+        progress({"stage": "dependencies", "status": "started"})
     completed = subprocess.run(
         sync,
         check=False,
@@ -536,9 +727,14 @@ def build_setup(
         env=uv_environment,
     )
     if completed.returncode:
+        if progress is not None:
+            progress({"stage": "dependencies", "status": "failed"})
         if offline:
             raise StateError("workspace dependencies are unavailable offline; rerun setup without --offline")
         raise StateError("uv failed to provision the workspace runtime: " + completed.stderr.strip())
+    if progress is not None:
+        progress({"stage": "dependencies", "status": "completed"})
+        progress({"stage": "task validation", "status": "started"})
     manifest_path = evaluator / "evaluator.manifest.json"
     try:
         manifest_value = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -548,6 +744,9 @@ def build_setup(
         raise StateError("generated task or evaluator manifest is invalid") from error
     if task.schema_version != 5 or task.repo.resolve() != subject.resolve():
         raise StateError("generated task does not describe this schema-v5 workspace")
+    if progress is not None:
+        progress({"stage": "task validation", "status": "completed"})
+        progress({"stage": "evaluator checks", "status": "started"})
     evaluator_tests = tuple(evaluator.glob("test_*.py"))
     if not evaluator_tests:
         raise StateError("generated evaluator must include public unittest coverage")
@@ -569,12 +768,16 @@ def build_setup(
     if evaluator_check.returncode:
         detail = evaluator_check.stderr.strip() or evaluator_check.stdout.strip()
         raise StateError(f"generated evaluator conformance checks failed: {detail}")
+    if progress is not None:
+        progress({"stage": "evaluator checks", "status": "completed"})
     forbidden_command_roots = (evaluator.resolve(), directory.resolve())
     for command in (*task.public_checks, task.public_probe):
         for argument in command:
             for forbidden in forbidden_command_roots:
                 if str(forbidden) in argument:
                     raise StateError("generated public command accesses evaluator or task storage")
+    if progress is not None:
+        progress({"stage": "public checks", "status": "started"})
     for label, command in (
         *(('public check', item) for item in task.public_checks),
         ("public probe", task.public_probe),
@@ -590,6 +793,8 @@ def build_setup(
         if completed.returncode:
             detail = completed.stderr.strip() or completed.stdout.strip()
             raise StateError(f"generated {label} failed: {detail}")
+    if progress is not None:
+        progress({"stage": "public checks", "status": "completed"})
     review_prompt = (
         "Review this generated arctl setup. Inspect the subject integration, public "
         "environment, evaluator code, manifest, task draft, and confirmed requirements. "
@@ -598,7 +803,7 @@ def build_setup(
         "An empty findings array means no supported defect was found. Return only JSON.\n\n"
         + json.dumps(
             {
-                "answers": answers,
+                "requirements": requirements,
                 "task_draft": str(directory / "task.draft.yaml"),
                 "subject": str(subject),
                 "environment": str(environment),
@@ -612,22 +817,31 @@ def build_setup(
     review_attempt = (
         1 + len(tuple(review_attempts.glob("*"))) if review_attempts.is_dir() else 1
     )
-    review = _agent_run(
-        root=review_attempts / f"{review_attempt:04d}",
-        worktree=subject,
-        schema_value=review_schema(),
-        output_name="review.public.json",
-        prompt=review_prompt,
-        writable_worktree=False,
-        read_paths=(
-            subject,
-            environment,
-            directory,
-            *_public_files(evaluator, exclude_private=True),
-        ),
-        command_builder=review_command_builder,
-        offline=offline,
-    )
+    if progress is not None:
+        progress({"stage": "setup review", "status": "started"})
+    try:
+        review = _agent_run(
+            root=review_attempts / f"{review_attempt:04d}",
+            worktree=subject,
+            schema_value=review_schema(),
+            output_name="review.public.json",
+            prompt=review_prompt,
+            writable_worktree=False,
+            read_paths=(
+                subject,
+                environment,
+                directory,
+                *_public_files(evaluator, exclude_private=True),
+            ),
+            command_builder=review_command_builder,
+            offline=offline,
+        )
+    except Exception:
+        if progress is not None:
+            progress({"stage": "setup review", "status": "failed"})
+        raise
+    if progress is not None:
+        progress({"stage": "setup review", "status": "completed"})
     readiness = {
         "schema_version": 1,
         "requirements": "ready",
@@ -703,9 +917,19 @@ def accept_setup(directory: Path, setup: dict[str, Any], token: str) -> TaskConf
     if (subject.resolve(), subject_commit) not in environment_locks:
         raise StateError("accepted task does not lock the subject interface source")
     setup["state"] = "READY_FOR_APPROVAL"
-    setup["evaluator_pattern"] = json.loads(
+    requirements = json.loads(
         (directory / "setup" / "answers.public.json").read_text(encoding="utf-8")
-    )["answers"]["evaluator_pattern"]
+    )
+    if requirements.get("schema_version") == 2:
+        proposed = {
+            item["id"]: item["proposed_answer"] for item in requirements["proposal"]
+        }
+        setup["evaluator_pattern"] = requirements["overrides"].get(
+            "evaluator_pattern",
+            requirements["answers"].get("evaluator", proposed["evaluator_pattern"]),
+        )
+    else:
+        setup["evaluator_pattern"] = requirements["answers"]["evaluator_pattern"]
     setup["subject_commit"] = subject_commit
     setup["environment_commit"] = environment_commit
     setup["evaluator_commit"] = evaluator_commit

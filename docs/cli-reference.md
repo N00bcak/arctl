@@ -106,11 +106,11 @@ positional arguments:
 options:
   -h, --help      show this help message and exit
   --json          emit one stable machine-readable JSON object
-  --answers FILE  JSON object mapping every returned setup question ID to an answer
+  --answers FILE  JSON answers for open clarification IDs plus optional canonical overrides
   --offline       disable setup-agent internet access and require cached uv dependencies
   --accept TOKEN  accept the verified setup trees and create their local Git commits
 
-AI operators should use --json, submit the returned question IDs with --answers,
+AI operators should use --json, resolve returned clarification IDs with --answers,
 and obtain permission before using --accept.
 ```
 

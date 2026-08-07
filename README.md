@@ -26,6 +26,10 @@ research boundary, then generates and reviews a subject adapter, public
 environment, evaluator, runtime, and task draft. It uses a local setup branch,
 never pushes, and commits generated repositories only after the setup token is
 accepted. Normal `approve` remains the separate scientific trust boundary.
+Put known requirements in `ARCTL_SETUP.md` at the subject root. When it is
+absent, `init` creates a visible template in the research workspace. Discovery
+shows one canonical proposal and asks only about material gaps or conflicts;
+related trial, pairing, seed, and hidden-data details form one clarification.
 Use `--answers FILE --json` for agent orchestration. Setup agents and uv may use
 the network by default; `--offline` disables agent internet access and requires
 cached dependencies. Manual task authoring remains supported with an explicit

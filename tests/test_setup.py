@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,8 @@ from arctl.setup import (
     initialize_setup,
     load_setup,
     save_answers,
+    setup_presentation,
+    brief_changed,
 )
 
 from .test_manifest import valid_manifest
@@ -77,13 +80,14 @@ class GuidedSetupTests(unittest.TestCase):
 
     def discovery(self) -> dict:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
+            "brief_sha256": hashlib.sha256(
+                (self.workspace / "ARCTL_SETUP.md").read_bytes()
+            ).hexdigest(),
             "summary": "The repository exposes one small policy.",
-            "questions": [
+            "fields": [
                 {
                     "id": identifier,
-                    "prompt": f"Confirm {identifier}.",
-                    "why": "The setup contract requires it.",
                     "proposed_answer": f"confirmed {identifier}",
                     "citations": [
                         {
@@ -92,9 +96,11 @@ class GuidedSetupTests(unittest.TestCase):
                             "finding": "The public README describes the policy.",
                         }
                     ],
+                    "source": "repository",
                 }
                 for identifier in QUESTION_IDS
             ],
+            "open_questions": [],
         }
 
     def build_value(self) -> dict:
@@ -166,16 +172,16 @@ class GuidedSetupTests(unittest.TestCase):
         }
 
     def test_complete_setup_accepts_reviewed_trees_and_writes_task_v5(self) -> None:
+        events: list[dict] = []
         discovered = discover_setup(
             self.directory,
             self.record,
             command_builder=output_builder("discovery.public.json", self.discovery()),
+            progress=lambda event: events.append(dict(event)),
         )
-        self.assertEqual(len(discovered["questions"]), len(QUESTION_IDS))
+        self.assertEqual(len(discovered["fields"]), len(QUESTION_IDS))
         _, record = load_setup(self.data, "demo")
-        answers = {
-            item["id"]: item["proposed_answer"] for item in discovered["questions"]
-        }
+        answers = {}
         save_answers(self.directory, record, answers)
         _, record = load_setup(self.data, "demo")
         readiness = build_setup(
@@ -187,6 +193,7 @@ class GuidedSetupTests(unittest.TestCase):
                 "review.public.json",
                 {"schema_version": 1, "summary": "No findings.", "findings": []},
             ),
+            progress=lambda event: events.append(dict(event)),
         )
         self.assertEqual(readiness["review"], "ready")
         self.assertEqual(git(self.subject, "branch", "--show-current"), "arctl/setup-demo")
@@ -195,6 +202,80 @@ class GuidedSetupTests(unittest.TestCase):
         self.assertEqual(task.schema_version, 5)
         self.assertEqual(task.evaluator.commit, git(Path(record["evaluator"]), "rev-parse", "HEAD"))
         self.assertTrue((self.directory / "task.yaml").is_file())
+        started = [event["stage"] for event in events if event["status"] == "started"]
+        self.assertEqual(
+            started,
+            [
+                "brief + repository discovery",
+                "generation",
+                "dependencies",
+                "task validation",
+                "evaluator checks",
+                "public checks",
+                "setup review",
+            ],
+        )
+
+    def test_init_creates_visible_setup_brief_without_modifying_subject(self) -> None:
+        brief = self.workspace / "ARCTL_SETUP.md"
+        self.assertTrue(brief.is_file())
+        self.assertIn("## Trial protocol", brief.read_text(encoding="utf-8"))
+        self.assertFalse((self.subject / "ARCTL_SETUP.md").exists())
+
+    def test_subject_brief_takes_precedence_and_changes_invalidate_discovery(self) -> None:
+        (self.subject / "ARCTL_SETUP.md").write_text(
+            "# ARCTL setup\n\n## Goal and primary outcome\nAccuracy.\n",
+            encoding="utf-8",
+        )
+        discovery = self.discovery()
+        self.assertTrue(brief_changed(self.record, discovery))
+
+    def test_open_questions_are_grouped_and_only_those_answers_are_required(self) -> None:
+        discovery = self.discovery()
+        discovery["open_questions"] = [
+            {
+                "id": "trial_protocol",
+                "prompt": "Confirm one trial protocol.",
+                "why": "The brief is incomplete.",
+                "proposed_answer": "Use paired independent episodes.",
+                "affected_fields": ["independent_trial", "hidden_data", "randomness"],
+            }
+        ]
+        discover_setup(
+            self.directory,
+            self.record,
+            command_builder=output_builder("discovery.public.json", discovery),
+        )
+        _, record = load_setup(self.data, "demo")
+        saved = save_answers(
+            self.directory,
+            record,
+            {"trial_protocol": "Use paired fresh episodes."},
+            {"runtime_budget": "Five minutes per batch."},
+        )
+        self.assertEqual(set(saved["answers"]), {"trial_protocol"})
+        self.assertEqual(set(saved["overrides"]), {"runtime_budget"})
+
+    def test_v1_discovery_consolidates_repeated_pairing_questions(self) -> None:
+        old = {
+            "schema_version": 1,
+            "summary": "old",
+            "questions": [
+                {
+                    "id": identifier,
+                    "prompt": f"Confirm {identifier}",
+                    "why": "old contract",
+                    "proposed_answer": "Humans must confirm paired trials.",
+                    "citations": [],
+                }
+                for identifier in QUESTION_IDS
+            ],
+        }
+        presentation = setup_presentation(old)
+        groups = [item["id"] for item in presentation["open_questions"]]
+        self.assertEqual(
+            groups, ["target", "trial_protocol", "constraints", "evaluator"]
+        )
 
     def test_acceptance_rejects_changes_after_review(self) -> None:
         discover_setup(

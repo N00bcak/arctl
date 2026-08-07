@@ -12,6 +12,7 @@ from unittest import mock
 
 from arctl.cli import (
     _ProgressView,
+    _SetupProgressView,
     _emit,
     _invoked_program,
     _progress,
@@ -730,6 +731,33 @@ class CliTests(unittest.TestCase):
         labels = [_ProgressView._stage_label(event) for event in events]
         self.assertEqual(labels[6], "evaluator prepare")
         self.assertEqual(labels[7], "subject batch 1/2")
+
+    def test_setup_progress_is_visible_and_timed(self) -> None:
+        output = io.StringIO()
+        view = _SetupProgressView(output, interactive=False)
+        view({"stage": "repository discovery", "status": "started"})
+        view({"stage": "repository discovery", "status": "completed"})
+        view.close()
+        rendered = output.getvalue()
+        self.assertIn("› repository discovery", rendered)
+        self.assertIn("✓ repository discovery", rendered)
+
+    def test_setup_error_prints_cause_log_and_retry(self) -> None:
+        payload = {
+            "state": "ERROR",
+            "success": False,
+            "message": "Failed: Codex rejected the setup prompt.",
+            "next_command": "arctl setup demo",
+            "log_path": "/tmp/demo/setup",
+            "evidence_valid": True,
+        }
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            _emit(payload, as_json=False)
+        rendered = output.getvalue()
+        self.assertIn("Codex rejected", rendered)
+        self.assertIn("Details: /tmp/demo/setup", rendered)
+        self.assertIn("Retry: arctl setup demo", rendered)
 
     def test_human_status_discloses_ceiling_fallback(self) -> None:
         payload = {

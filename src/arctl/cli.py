@@ -13,13 +13,13 @@ import textwrap
 import threading
 import time
 from pathlib import Path
-from typing import Any, TextIO, Sequence
+from typing import Any, Callable, TextIO, Sequence
 
 from .errors import ArctlError, StateError, TransientDownstreamError
 from .git import resolve_commit
 from .models import validate_task_id
 from .registry import locate_task
-from .storage import TaskLock, atomic_write_text
+from .storage import TaskLock, atomic_write_json, atomic_write_text
 
 _TASK_TEMPLATE = """\
 # arctl task: edit the objective, paths, evaluator, and public commands, then approve.
@@ -349,6 +349,28 @@ def _approval_table(payload: dict[str, Any]) -> str:
     )
 
 
+def _setup_proposal_table(proposal: Sequence[dict[str, Any]]) -> str:
+    from tabulate import tabulate
+
+    from .dossier import safe_terminal_text
+
+    rows = [
+        (
+            item["id"].replace("_", " ").title(),
+            safe_terminal_text(item["proposed_answer"], limit=170),
+            item.get("source", "repository"),
+        )
+        for item in proposal
+    ]
+    return tabulate(
+        rows,
+        headers=("Setup item", "Proposal", "Source"),
+        tablefmt="simple_grid",
+        disable_numparse=True,
+        maxcolwidths=(22, 90, 12),
+    )
+
+
 def _emit_human(
     payload: dict[str, Any],
     *,
@@ -379,6 +401,11 @@ def _emit_human(
             )
         if payload["log_path"] is not None:
             print(f"Details: {payload['log_path']}", file=sys.stderr)
+        if (
+            isinstance(payload.get("next_command"), str)
+            and " setup" in payload["next_command"]
+        ):
+            print("Retry: " + payload["next_command"], file=sys.stderr)
     elif "status" in payload:
         status = payload["status"]
         print(_status_table(payload))
@@ -475,16 +502,10 @@ def _emit_human(
             print(f"- {entry['entry_id']} · {outcome} · {safe_terminal_text(str(detail))}")
     elif state == "SETUP_ANSWERS_REQUIRED":
         print(payload["message"])
-        for item in payload["questions"]:
+        print(_setup_proposal_table(payload["proposal"]))
+        for item in payload["open_questions"]:
             print(f"\n{item['id']}: {safe_terminal_text(item['prompt'])}")
             print("  Proposed: " + safe_terminal_text(item["proposed_answer"], limit=240))
-            for citation in item["citations"][:3]:
-                print(
-                    "  Evidence: "
-                    + safe_terminal_text(citation["path"])
-                    + ":"
-                    + safe_terminal_text(citation["location"])
-                )
     elif state in {"READY_FOR_SETUP_ACCEPTANCE", "REVIEW_FAILED"}:
         from tabulate import tabulate
 
@@ -772,6 +793,17 @@ class _ProgressView:
         return label
 
 
+class _SetupProgressView(_ProgressView):
+    """Render the pre-approval setup lifecycle with live elapsed time."""
+
+    def __call__(self, event: dict[str, Any]) -> None:
+        with self._lock:
+            if event["status"] == "started":
+                self._start(event["stage"])
+            else:
+                self._finish("failed" if event["status"] == "failed" else "complete")
+
+
 def _progress(event: dict[str, Any]) -> None:
     """Compatibility helper for direct callers and focused rendering tests."""
     view = _ProgressView(interactive=False)
@@ -912,9 +944,13 @@ def _init(
         action_required=True,
         allowed_actions=("setup",),
         next_command=f"arctl setup {identifier}",
-        message=f"Created Python research workspace {record['workspace']}.",
+        message=(
+            f"Created Python research workspace {record['workspace']}. "
+            f"Review {record['setup_brief']}, then run setup."
+        ),
         artifacts=(
             {"kind": "workspace", "path": record["workspace"]},
+            {"kind": "setup_brief", "path": record["setup_brief"]},
             {"kind": "setup", "path": str(data_root / "tasks" / identifier)},
         ),
     )
@@ -928,47 +964,101 @@ def _setup(
     offline: bool,
     acceptance: str | None,
     interactive: bool,
+    progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     from .setup import (
         accept_setup,
+        brief_changed,
         build_setup,
         discover_setup,
         load_setup,
         save_answers,
+        setup_presentation,
     )
 
     directory, record = load_setup(data_root, task_id)
     identifier = record["task_id"]
     state = record["state"]
     discovery: dict[str, Any] | None = None
+    discovery_path = directory / "setup" / "discovery.public.json"
+    if state in {
+        "ANSWERS_REQUIRED",
+        "BUILD_REQUIRED",
+        "REVIEW_FAILED",
+        "READY_FOR_SETUP_ACCEPTANCE",
+    } and discovery_path.is_file():
+        discovery = json.loads(discovery_path.read_text(encoding="utf-8"))
+        if brief_changed(record, discovery):
+            record["state"] = "DISCOVERY_REQUIRED"
+            atomic_write_json(directory / "setup.json", record)
+            state = "DISCOVERY_REQUIRED"
     if state == "DISCOVERY_REQUIRED":
-        discovery = discover_setup(directory, record, offline=offline)
+        discovery = discover_setup(
+            directory,
+            record,
+            offline=offline,
+            progress=progress,
+        )
         record = json.loads((directory / "setup.json").read_text())
         state = record["state"]
+    presentation = setup_presentation(discovery) if discovery is not None else None
     if state == "ANSWERS_REQUIRED" and answers_path is not None:
+        if progress is not None:
+            progress({"stage": "requirement confirmation", "status": "started"})
         try:
             raw_answers = json.loads(answers_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
             raise StateError("setup answers file is missing or invalid") from error
-        if isinstance(raw_answers, dict) and set(raw_answers) == {"answers"}:
-            raw_answers = raw_answers["answers"]
         if not isinstance(raw_answers, dict):
             raise StateError("setup answers file must contain one answers object")
-        save_answers(directory, record, raw_answers)
+        if set(raw_answers) <= {"answers", "overrides"}:
+            answers = raw_answers.get("answers", {})
+            overrides = raw_answers.get("overrides", {})
+        else:
+            answers = raw_answers
+            overrides = {}
+        if not isinstance(answers, dict) or not isinstance(overrides, dict):
+            raise StateError("setup answers and overrides must be JSON objects")
+        save_answers(directory, record, answers, overrides)
+        if progress is not None:
+            progress({"stage": "requirement confirmation", "status": "completed"})
         record = json.loads((directory / "setup.json").read_text())
         state = record["state"]
     elif state == "ANSWERS_REQUIRED" and interactive and sys.stdin.isatty():
         if discovery is None:
-            discovery = json.loads(
-                (directory / "setup" / "discovery.public.json").read_text()
-            )
+            discovery = json.loads(discovery_path.read_text())
+        presentation = setup_presentation(discovery)
+        if progress is not None:
+            progress({"stage": "requirement confirmation", "status": "started"})
+            progress({"stage": "requirement confirmation", "status": "completed"})
+        print("\nProposed setup")
+        print(_setup_proposal_table(presentation["proposal"]))
         answers: dict[str, str] = {}
-        for item in discovery["questions"]:
+        for item in presentation["open_questions"]:
             print(f"\n{item['prompt']}")
             print("Proposed: " + item["proposed_answer"])
             entered = input("Answer [Enter accepts proposal]: ").strip()
             answers[item["id"]] = entered or item["proposed_answer"]
-        save_answers(directory, record, answers)
+        overrides: dict[str, str] = {}
+        decision = input("\nUse this setup? [Y/edit/n]: ").strip().lower()
+        if decision in {"n", "no"}:
+            raise StateError("setup confirmation cancelled")
+        if decision in {"e", "edit"}:
+            proposal = presentation["proposal"]
+            while True:
+                for index, item in enumerate(proposal, 1):
+                    print(f"  {index}. {item['id'].replace('_', ' ')}")
+                selected = input("Field number to edit [Enter finishes]: ").strip()
+                if not selected:
+                    break
+                if not selected.isdecimal() or not 1 <= int(selected) <= len(proposal):
+                    print("Choose one listed field number.")
+                    continue
+                item = proposal[int(selected) - 1]
+                changed = input(f"{item['id']}: ").strip()
+                if changed:
+                    overrides[item["id"]] = changed
+        save_answers(directory, record, answers, overrides)
         record = json.loads((directory / "setup.json").read_text())
         state = record["state"]
     if state in {"BUILD_REQUIRED", "REVIEW_FAILED"}:
@@ -976,6 +1066,7 @@ def _setup(
             directory,
             record,
             offline=offline,
+            progress=progress,
         )
         record = json.loads((directory / "setup.json").read_text())
         state = record["state"]
@@ -1015,9 +1106,8 @@ def _setup(
         }
     if state == "ANSWERS_REQUIRED":
         if discovery is None:
-            discovery = json.loads(
-                (directory / "setup" / "discovery.public.json").read_text()
-            )
+            discovery = json.loads(discovery_path.read_text())
+        presentation = setup_presentation(discovery)
         return {
             **_payload(
                 success=True,
@@ -1029,10 +1119,20 @@ def _setup(
                 message="Confirm or revise the cited setup requirements.",
                 log_path=str(directory / "setup"),
             ),
-            "questions": discovery["questions"],
+            "proposal": presentation["proposal"],
+            "open_questions": presentation["open_questions"],
             "answer_schema": {
                 "type": "object",
-                "required": [item["id"] for item in discovery["questions"]],
+                "properties": {
+                    "answers": {
+                        "type": "object",
+                        "required": [
+                            item["id"] for item in presentation["open_questions"]
+                        ],
+                    },
+                    "overrides": {"type": "object"},
+                },
+                "required": ["answers"],
             },
         }
     if state == "READY_FOR_SETUP_ACCEPTANCE":
@@ -1715,7 +1815,7 @@ def build_parser() -> argparse.ArgumentParser:
         "discover, build, review, and accept a Python task workspace",
         "Run resumable pre-approval setup. Discovery is read-only; generated code and evaluator\n"
         "remain drafts until explicit setup acceptance and normal task approval.",
-        "AI operators should use --json, submit the returned question IDs with --answers,\n"
+        "AI operators should use --json, resolve returned clarification IDs with --answers,\n"
         "and obtain permission before using --accept.",
     )
     json_option(setup)
@@ -1724,7 +1824,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--answers",
         type=Path,
         metavar="FILE",
-        help="JSON object mapping every returned setup question ID to an answer",
+        help="JSON answers for open clarification IDs plus optional canonical overrides",
     )
     setup.add_argument(
         "--offline",
@@ -1895,6 +1995,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "run" and not arguments.json
         else None
     )
+    setup_progress = (
+        _SetupProgressView()
+        if arguments.command == "setup" and not arguments.json
+        else None
+    )
+    setup_events: list[dict[str, Any]] = []
     try:
         if arguments.command == "doctor":
             payload = _doctor()
@@ -1914,7 +2020,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 offline=arguments.offline,
                 acceptance=arguments.accept,
                 interactive=not arguments.json,
+                progress=(
+                    setup_progress
+                    if setup_progress is not None
+                    else lambda event: setup_events.append(dict(event))
+                ),
             )
+            if arguments.json:
+                payload["progress_events"] = setup_events
         elif arguments.command == "approve":
             payload = _approve(
                 data_root=_data_root(arguments.data),
@@ -1986,6 +2099,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.debug:
             if progress_view is not None:
                 progress_view.close(failed=True)
+            if setup_progress is not None:
+                setup_progress.close(failed=True)
             raise
         identifier = getattr(arguments, "task_id", None)
         log_path = (
@@ -2011,7 +2126,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             state="ERROR",
             task_id=identifier,
             action_required=True,
-            allowed_actions=("status", "run") if transient else ("status",),
+            allowed_actions=(
+                ("status", "run")
+                if transient
+                else (
+                    ("setup", "status")
+                    if arguments.command == "setup"
+                    else ("status",)
+                )
+            ),
             next_command=(
                 f"arctl run {identifier} --max-experiments 1"
                 if transient and identifier
@@ -2023,7 +2146,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else f"Failed: {error}."
             ),
             evidence_valid=True,
-            can_continue=transient is not None,
+            can_continue=transient is not None or arguments.command == "setup",
             log_path=transient.artifact_path if transient else log_path,
         )
         if transient is not None:
@@ -2038,6 +2161,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             }
     if progress_view is not None:
         progress_view.close(failed=not payload["success"])
+    if setup_progress is not None:
+        setup_progress.close(failed=not payload["success"])
+    if arguments.command == "setup" and arguments.json:
+        payload["progress_events"] = setup_events
     _rewrite_next_command(payload, program, arguments.data)
     _emit(
         payload,

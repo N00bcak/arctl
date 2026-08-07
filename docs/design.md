@@ -128,6 +128,12 @@ public trees are hashed after review; acceptance refuses changed trees, creates
 local commits, and never pushes. Existing repositories are changed only on an
 `arctl/setup-*` branch. The generated evaluator includes public protocol tests,
 but the human still owns the evaluator's mathematical validity at `approve`.
+Human intent comes from `ARCTL_SETUP.md` at the subject root or from the
+workspace template created by `init`. Discovery reconciles that brief with
+public code into one cited proposal. Repository-derived facts are review rows;
+only missing, ambiguous, contradictory, or infeasible decisions become at most
+four disjoint clarifications. Setup prints live discovery, generation,
+dependency, validation, check, and review stages with direct failure details.
 
 `max_experiments` is an approval-locked lifetime ceiling or `unlimited`. The
 `--max-experiments` option is only a smaller per-invocation bound. Reaching the
