@@ -5,19 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping
 
+from .components import resolve_component
 from .errors import ValidationError
 
 ReasoningEffort = Literal["minimal", "low", "medium", "high", "xhigh"]
 _EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
 _AGENT_COMPONENTS = {"strategize", "plan", "execute", "reflect"}
-_COMPONENT_IDS = {
-    "search": {"search.serial-champion-v1"},
-    "strategize": {"strategize.environment-v1"},
-    "plan": {"plan.comparative-v1"},
-    "execute": {"execute.worktree-v1"},
-    "evaluate": {"evaluate.paired-suspect-v1"},
-    "reflect": {"reflect.evidence-v1"},
-}
+_COMPONENT_NAMES = {"search", "strategize", "plan", "execute", "evaluate", "reflect"}
 
 
 @dataclass(frozen=True)
@@ -54,6 +48,7 @@ class MethodConfig:
             selected = self.components[component].identifier
         except KeyError as error:
             raise ValidationError(f"method has no {component} component") from error
+        resolve_component(component, selected)
         if selected != implementation:
             raise ValidationError(
                 f"component {component} requires an installed implementation: {selected}"
@@ -167,14 +162,13 @@ def parse_method(value: Any) -> MethodConfig:
             raise ValidationError("method agent names must be non-empty strings")
         agents[name] = _agent(name, raw)
     overrides = value.get("overrides", {})
-    if not isinstance(overrides, Mapping) or not set(overrides) <= set(_COMPONENT_IDS):
+    if not isinstance(overrides, Mapping) or not set(overrides) <= _COMPONENT_NAMES:
         raise ValidationError("method.overrides names an unknown component")
     for name, raw in overrides.items():
         if not isinstance(raw, Mapping) or set(raw) != {"component", "agent_pool"}:
             raise ValidationError(f"method.overrides.{name} fields are invalid")
         identifier = raw["component"]
-        if identifier not in _COMPONENT_IDS[name]:
-            raise ValidationError(f"method.overrides.{name}.component is incompatible")
+        resolve_component(name, identifier)
         pool = raw["agent_pool"]
         if not isinstance(pool, list) or any(
             not isinstance(item, str) or not item for item in pool

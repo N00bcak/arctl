@@ -77,6 +77,7 @@ class ProcessIntegrationTests(unittest.TestCase):
                 timeout_seconds=2,
             )
             self.assertEqual(result["return_code"], 0)
+            self.assertGreaterEqual(result["elapsed_seconds"], 0)
             self.assertEqual(read_valid_result(directory), result)
             self.assertEqual((directory / "stdout.bin").read_text(), "ok\n")
             with self.assertRaisesRegex(StateError, "cannot be rerun"):

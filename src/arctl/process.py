@@ -129,6 +129,7 @@ def run_once(
     process_directory = temporary_directory if temporary_directory is not None else cwd
     assert process_directory is not None
     process: subprocess.Popen[bytes] | None = None
+    monotonic_started = time.monotonic()
     gate_read: int | None = None
     gate_write: int | None = None
     try:
@@ -216,10 +217,11 @@ def run_once(
                 process.stderr.close()
 
         record = {
-            "schema_version": 1,
+            "schema_version": 2,
             "return_code": return_code,
             "stdout_bytes": stdout_path.stat().st_size,
             "stderr_bytes": stderr_path.stat().st_size,
+            "elapsed_seconds": time.monotonic() - monotonic_started,
         }
         atomic_write_json(result, record)
         return record
@@ -241,15 +243,24 @@ def read_valid_result(directory: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise StateError("process has no valid result") from error
-    expected = {"schema_version", "return_code", "stdout_bytes", "stderr_bytes"}
+    legacy = {"schema_version", "return_code", "stdout_bytes", "stderr_bytes"}
+    current = legacy | {"elapsed_seconds"}
     if (
         not isinstance(value, dict)
-        or set(value) != expected
-        or value["schema_version"] != 1
+        or set(value) not in (legacy, current)
+        or value["schema_version"] not in (1, 2)
+        or (value["schema_version"] == 1 and set(value) != legacy)
+        or (value["schema_version"] == 2 and set(value) != current)
         or any(
             isinstance(value[field], bool) or not isinstance(value[field], int)
             for field in ("return_code", "stdout_bytes", "stderr_bytes")
         )
+    ):
+        raise StateError("process has no valid result")
+    if value["schema_version"] == 2 and (
+        isinstance(value["elapsed_seconds"], bool)
+        or not isinstance(value["elapsed_seconds"], (int, float))
+        or value["elapsed_seconds"] < 0
     ):
         raise StateError("process has no valid result")
     return value

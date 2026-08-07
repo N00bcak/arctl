@@ -27,6 +27,7 @@ from .manifest import EvaluatorManifest
 from .models import ResearchRequest
 from .process import run_or_load_once
 from .registry import LocatedTask
+from .results import normalize_result_statuses
 from .sandbox import (
     agent_prompt_path,
     command_runtime_read_paths,
@@ -380,6 +381,9 @@ def _catalog_entry(task_directory: Path, entry: Mapping[str, Any]) -> dict[str, 
             "kind",
             "strategy_behavior_id",
             "decision",
+            "operational_status",
+            "scientific_status",
+            "reason_code",
             "rejection_code",
             "claim",
             "mechanism",
@@ -458,6 +462,7 @@ def _catalog_entry(task_directory: Path, entry: Mapping[str, Any]) -> dict[str, 
         if result_path.is_file():
             try:
                 result = json.loads(result_path.read_text(encoding="utf-8"))
+                result = normalize_result_statuses(result)
                 comparisons = result["evaluation"]["comparisons"]
             except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
                 raise StateError(f"published result is invalid: {result_path}") from error
@@ -465,6 +470,11 @@ def _catalog_entry(task_directory: Path, entry: Mapping[str, Any]) -> dict[str, 
                 comparison = comparisons[-1]
                 catalog["effect_estimate"] = comparison["effect_estimate"]
                 catalog["one_sided_lower_bound"] = comparison["one_sided_lower_bound"]
+            catalog.update(
+                operational_status=result["operational_status"],
+                scientific_status=result["scientific_status"],
+                reason_code=result["reason_code"],
+            )
     catalog["entry_path"] = str(
         Path("entries") / f"{entry['entry_id']}.public.json"
     )
@@ -595,6 +605,16 @@ def validate_research_links(
         for citation in request["evidence_review"]["citations"]
     ):
         raise ValidationError("research evidence review names an unknown ledger entry")
+    by_id = {entry["entry_id"]: entry for entry in ledger}
+    for citation in request["evidence_review"]["citations"]:
+        prior = by_id[citation["entry_id"]]
+        if (
+            prior.get("scientific_status") == "untested"
+            and citation["bearing"] != "unresolved"
+        ):
+            raise ValidationError(
+                "untested experiments cannot support or contradict performance"
+            )
 
 
 def ensure_strategy(

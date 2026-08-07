@@ -296,6 +296,7 @@ class TaskConfig:
     denied_paths: tuple[str, ...]
     public_checks: tuple[tuple[str, ...], ...]
     public_probe: tuple[str, ...]
+    public_probe_trial_equivalents: int | None
     environment_sources: tuple[EnvironmentSource, ...]
     evaluator: EvaluatorRef
     trials: Literal["auto"] | int
@@ -320,8 +321,8 @@ class TaskConfig:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> TaskConfig:
-        if value.get("schema_version") == 4:
-            return _task_v4(value)
+        if value.get("schema_version") in (4, 5):
+            return _task_modern(value)
         actual = set(value)
         required = _TASK_FIELDS | {"strategy", "execution"}
         allowed = required | {"planning", "reflection", "candidate_review"}
@@ -397,6 +398,7 @@ class TaskConfig:
             denied_paths=_string_list(value["denied_paths"], "denied_paths"),
             public_checks=_commands(value["public_checks"], "public_checks"),
             public_probe=_command(value["public_probe"], "public_probe"),
+            public_probe_trial_equivalents=None,
             environment_sources=_environment_sources(value["environment"], repo=repo),
             evaluator=EvaluatorRef.from_mapping(value["evaluator"]),
             trials=trials,
@@ -419,7 +421,7 @@ class TaskConfig:
         )
 
 
-def _task_v4(value: Mapping[str, Any]) -> TaskConfig:
+def _task_modern(value: Mapping[str, Any]) -> TaskConfig:
     required = _TASK_FIELDS | {"method"}
     allowed = required | {"candidate_review"}
     actual = set(value)
@@ -445,6 +447,23 @@ def _task_v4(value: Mapping[str, Any]) -> TaskConfig:
     planning = method.pool("plan")[0]
     execution = method.pool("execute")[0]
     reflection = method.pool("reflect")[0]
+    schema_version = value["schema_version"]
+    if schema_version == 5:
+        probe = value["public_probe"]
+        if not isinstance(probe, Mapping):
+            raise ValidationError("public_probe must be an object in task schema v5")
+        _require_exact_fields(probe, {"command", "trial_equivalents"}, "public_probe")
+        probe_command = _command(probe["command"], "public_probe.command")
+        trial_equivalents = probe["trial_equivalents"]
+        if (
+            isinstance(trial_equivalents, bool)
+            or not isinstance(trial_equivalents, int)
+            or trial_equivalents <= 0
+        ):
+            raise ValidationError("public_probe.trial_equivalents must be positive")
+    else:
+        probe_command = _command(value["public_probe"], "public_probe")
+        trial_equivalents = None
     return TaskConfig(
         task_id=validate_task_id(value["task_id"]),
         repo=repo,
@@ -452,7 +471,8 @@ def _task_v4(value: Mapping[str, Any]) -> TaskConfig:
         editable_paths=_string_list(value["editable_paths"], "editable_paths"),
         denied_paths=_string_list(value["denied_paths"], "denied_paths"),
         public_checks=_commands(value["public_checks"], "public_checks"),
-        public_probe=_command(value["public_probe"], "public_probe"),
+        public_probe=probe_command,
+        public_probe_trial_equivalents=trial_equivalents,
         environment_sources=_environment_references(value["environment"]),
         evaluator=EvaluatorRef.from_mapping(value["evaluator"]),
         trials=trials,
@@ -471,7 +491,7 @@ def _task_v4(value: Mapping[str, Any]) -> TaskConfig:
             else None
         ),
         method=method,
-        schema_version=4,
+        schema_version=schema_version,
     )
 
 

@@ -9,6 +9,10 @@ selects one compatible implementation and an agent pool per agent-driven
 component. `serial-v1` uses one agent per pool. `serial-hotseat-v1` uniformly
 selects one agent, with replacement, for each component lifecycle.
 
+Installed component IDs resolve through an internal registry that binds each
+ID to one stage, contract version, and trusted handler. Unknown or cross-stage
+IDs fail during task parsing. This is not third-party plugin execution.
+
 A lifecycle is one complete stage pass, or one EXECUTE substage. Its selected
 agent is persisted before the session starts; recovery reuses that choice in a
 fresh process attempt. STRATEGIZE, PLAN, and REFLECT draw once per pass.
@@ -57,3 +61,14 @@ but descendants are evaluated against the current official champion.
 EVALUATE may select another approved protocol implementation in the future,
 while the controller continues to own private seeds and data, evidence
 validation, budgets, and promotion.
+
+Task-v5 public probes declare how many paired trial-equivalents one probe represents.
+Before review, arctl times that approved probe and projects official runtime.
+Likely overruns are visible to the implementer, reviewer, and operator but do
+not reject the candidate or alter approved trials.
+
+Public results retain the promotion `decision` and add independent status axes.
+`operational_status` records whether execution completed; `scientific_status`
+records supported, contradicted, inconclusive, or untested evidence.
+Deterministic operational assessments explain scoreless failures without asking
+a model to interpret absent evidence.

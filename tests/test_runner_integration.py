@@ -19,6 +19,7 @@ from arctl.registry import LocatedTask
 from arctl.runner import (
     _compatibility_strategy_command,
     _default_research_command,
+    _run_compute_probe,
     _run_implementation,
     _run_research,
     _validate_implementation_report,
@@ -103,6 +104,40 @@ class RunnerIntegrationTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_compute_probe_warns_without_gating_the_candidate(self) -> None:
+        manifest, _ = load_manifest(self.task_directory / "evaluator.manifest.json")
+        task = LocatedTask(
+            self.task_directory,
+            replace(self.config, public_probe_trial_equivalents=1),
+        )
+        attempt = self.task_directory / "searches" / "000001" / "attempts" / "01"
+        with mock.patch(
+            "arctl.runner.run_or_load_once",
+            return_value={
+                "schema_version": 2,
+                "return_code": 0,
+                "stdout_bytes": 0,
+                "stderr_bytes": 0,
+                "elapsed_seconds": manifest.limits.timeout_seconds,
+            },
+        ):
+            report = _run_compute_probe(
+                task,
+                manifest,
+                attempt=attempt,
+                worktree=self.subject,
+                trial_count=4,
+                command_builder=lambda command, cwd, output: command,
+                stop_path=self.task_directory / "stop.requested",
+            )
+
+        self.assertEqual(report["risk"], "likely_over_budget")
+        self.assertTrue(report["advisory_only"])
+        self.assertEqual(
+            json.loads((attempt / "compute-probe.public.json").read_text()),
+            report,
+        )
 
     @staticmethod
     def unconfined_public(command, _cwd, _output):
@@ -440,6 +475,7 @@ scratch = Path(sys.argv[1])
                 "ready",
                 "strategy",
                 "search_attempt",
+                "compute_probe",
                 "experiment",
                 "candidate",
                 "public_checks",
@@ -649,7 +685,7 @@ scratch = Path(sys.argv[1])
             raise StateError("reflection backend failed")
 
         with mock.patch(
-            "arctl.runner.run_reflection",
+            "arctl.reflection.run_reflection",
             side_effect=fail_reflection,
         ):
             failed = run_task(
@@ -862,6 +898,7 @@ scratch = Path(sys.argv[1])
                 attempt,
                 self.subject,
                 {"claim": "test the runtime"},
+                trial_count=4,
                 command_builder=None,
                 stop_path=self.task_directory / "stop.requested",
             )

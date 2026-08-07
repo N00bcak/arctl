@@ -144,7 +144,7 @@ champion.
 
 ```mermaid
 flowchart TD
-    P[Parse task v4 or compatible v3] --> V[Validate repositories, paths, method, and manifest]
+    P[Parse task v5 or compatible v3/v4] --> V[Validate repositories, paths, method, and manifest]
     V --> ENV[Snapshot environment Git blobs and probe contracts]
     ENV --> PREVIEW[Show models, paths, seeds, trials, telemetry, risks, token]
     PREVIEW -->|explicit human confirmation| LOCK[Write immutable approval records]

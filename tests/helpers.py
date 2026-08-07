@@ -85,6 +85,16 @@ def valid_task_v4(*, hotseat: bool = False) -> dict[str, Any]:
     return value
 
 
+def valid_task_v5(*, hotseat: bool = False) -> dict[str, Any]:
+    value = valid_task_v4(hotseat=hotseat)
+    value["schema_version"] = 5
+    value["public_probe"] = {
+        "command": value["public_probe"],
+        "trial_equivalents": 3,
+    }
+    return value
+
+
 def valid_evidence(
     *,
     kind: str = "primary",

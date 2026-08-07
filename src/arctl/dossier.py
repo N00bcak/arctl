@@ -273,6 +273,23 @@ def _documents(
                 if result.get("failure_detail")
                 else []
             ),
+            *(
+                [
+                    "## Operational assessment",
+                    "",
+                    safe_text(result["operational_assessment"]["summary"]),
+                    "",
+                    safe_text(
+                        result["operational_assessment"]["scientific_interpretation"]
+                    ),
+                    "",
+                    "Next action: "
+                    + safe_text(result["operational_assessment"]["next_action"]),
+                    "",
+                ]
+                if result.get("operational_assessment")
+                else []
+            ),
             f"## Final decision\n\n**{decision}**",
             "",
             f"Champion after: {_code(str(result['champion_after'])[:12])}",

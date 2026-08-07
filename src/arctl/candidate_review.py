@@ -374,6 +374,7 @@ def _review_prompt(
     champion: str,
     request: Mapping[str, Any],
     implementation_report: Mapping[str, Any] | None,
+    compute_report: Mapping[str, Any] | None,
 ) -> str:
     assert task.config.candidate_review is not None
     packet = {
@@ -385,6 +386,7 @@ def _review_prompt(
         "subject_interface": subject_interface,
         "research_request": request,
         "implementation_audit": implementation_report,
+        "controller_compute_probe": compute_report,
     }
     return (
         "Independently review the uncommitted champion-to-candidate diff before any "
@@ -446,6 +448,7 @@ def review_candidate(
     request: Mapping[str, Any],
     stop_path: Path,
     implementation_report: Mapping[str, Any] | None = None,
+    compute_report: Mapping[str, Any] | None = None,
     review_command_builder: AgentCommandBuilder | None = None,
     repair_command_builder: AgentCommandBuilder | None = None,
     check_command_builder: CheckCommandBuilder | None = None,
@@ -475,6 +478,7 @@ def review_candidate(
                 champion=champion,
                 request=request,
                 implementation_report=implementation_report,
+                compute_report=compute_report,
             )
             raw = _run_agent(
                 task,

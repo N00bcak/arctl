@@ -8,10 +8,21 @@ from arctl.models import Evidence, ResearchRequest, TaskConfig
 from arctl.search import validate_research_links, validate_strategy_links
 from arctl.manifest import TelemetryMetric
 
-from .helpers import valid_evidence, valid_task, valid_task_v4
+from .helpers import valid_evidence, valid_task, valid_task_v4, valid_task_v5
 
 
 class TaskConfigTests(unittest.TestCase):
+    def test_v5_declares_public_probe_trial_equivalents(self) -> None:
+        task = TaskConfig.from_mapping(valid_task_v5())
+        self.assertEqual(task.schema_version, 5)
+        self.assertEqual(task.public_probe, ("python3", "tools/probe.py"))
+        self.assertEqual(task.public_probe_trial_equivalents, 3)
+
+        raw = valid_task_v5()
+        raw["public_probe"]["trial_equivalents"] = 0
+        with self.assertRaisesRegex(ValidationError, "trial_equivalents"):
+            TaskConfig.from_mapping(raw)
+
     def test_v4_resolves_serial_and_hotseat_method_profiles(self) -> None:
         serial = TaskConfig.from_mapping(valid_task_v4())
         self.assertEqual(serial.schema_version, 4)
@@ -379,6 +390,13 @@ class ResearchRequestTests(unittest.TestCase):
         request["evidence_review"]["citations"][0]["entry_id"] = "entry-999999"
         with self.assertRaisesRegex(ValidationError, "unknown ledger entry"):
             validate_research_links(request, strategy=strategy, ledger=ledger)
+
+        request["evidence_review"]["citations"][0]["entry_id"] = "entry-000001"
+        ledger[0]["scientific_status"] = "untested"
+        with self.assertRaisesRegex(ValidationError, "cannot support"):
+            validate_research_links(request, strategy=strategy, ledger=ledger)
+        request["evidence_review"]["citations"][0]["bearing"] = "unresolved"
+        validate_research_links(request, strategy=strategy, ledger=ledger)
 
 
 class StrategyContractTests(unittest.TestCase):

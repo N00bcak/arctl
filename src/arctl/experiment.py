@@ -26,8 +26,10 @@ from .models import Evidence, ResearchRequest, TaskConfig
 from .process import run_or_load_once
 from .results import (
     build_public_result,
+    operational_assessment,
     public_comparison,
     publish_telemetry,
+    result_statuses,
     resolve_outcome,
 )
 from .sandbox import (
@@ -522,6 +524,14 @@ def publish_candidate_rejection(
         "candidate": record.candidate,
         "champion_after": record.champion,
         "decision": Decision.REJECT.value,
+        "operational_status": "candidate_failed",
+        "scientific_status": "untested",
+        "reason_code": "public_checks_failed",
+        "operational_assessment": operational_assessment(
+            status="candidate_failed",
+            reason_code="public_checks_failed",
+            summary="The candidate failed required public checks before evaluation.",
+        ),
         "evaluation": {"statistic": None, "comparisons": []},
         "constraints": {"tests": "FAIL"},
         "telemetry": {},
@@ -594,6 +604,30 @@ def publish_comparison_failure(
         failure_detail = "The sandbox did not start the reserved comparison command."
     else:
         failure_detail = "The run was stopped after comparison reservation."
+    operational_status = (
+        "candidate_failed"
+        if source == "candidate"
+        else "stopped"
+        if source == "stop"
+        else "system_failed"
+    )
+    reason_code = {
+        "champion": "champion_execution_failed",
+        "evaluator": "evaluator_execution_failed",
+        "evidence": "evidence_invalid",
+        "sandbox": "sandbox_failed",
+        "stop": "stopped",
+    }.get(source, "candidate_execution_failed")
+    if source == "candidate" and cause is not None:
+        if "timed out" in cause.casefold():
+            reason_code = "candidate_timeout"
+        elif "was not written" in cause.casefold():
+            reason_code = "candidate_result_missing"
+    comparisons = [public_comparison(primary)] if primary is not None else []
+    _, scientific_status = result_statuses(
+        comparisons,
+        operational_status=operational_status,
+    )
     public = {
         "experiment_id": record.experiment_id,
         "hypothesis": request.claim,
@@ -601,11 +635,17 @@ def publish_comparison_failure(
         "candidate": record.candidate,
         "champion_after": record.champion,
         "decision": decision.value,
+        "operational_status": operational_status,
+        "scientific_status": scientific_status,
+        "reason_code": reason_code,
+        "operational_assessment": operational_assessment(
+            status=operational_status,
+            reason_code=reason_code,
+            summary=failure_detail,
+        ),
         "evaluation": {
             "statistic": manifest.public_statistic,
-            "comparisons": (
-                [public_comparison(primary)] if primary is not None else []
-            ),
+            "comparisons": comparisons,
         },
         "constraints": {"tests": "PASS"},
         "telemetry": publish_telemetry(primary.telemetry) if primary is not None else {},

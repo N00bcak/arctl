@@ -22,6 +22,7 @@ from .candidate_review import AgentCommandBuilder as ReviewCommandBuilder
 from .candidate_review import requirement_audit_schema, review_candidate
 from .comparison import ComparisonReservation, load_reservation, reserve_comparison
 from .comparison_run import CommandBuilder, ComparisonFailure, run_comparison
+from .components import invoke_component
 from .downstream import transient_process_error
 from .errors import (
     ArctlError,
@@ -56,20 +57,21 @@ from .git import (
 from .manifest import EvaluatorManifest
 from .models import Evidence, ResearchRequest
 from .process import run_or_load_once
-from .reflection import ReflectionCommandBuilder, run_reflection, validate_reflection
+from .reflection import ReflectionCommandBuilder, validate_reflection
 from .registry import LocatedTask
-from .results import validate_public_result
+from .results import normalize_result_statuses, validate_public_result
 from .sandbox import (
     agent_prompt_path,
     command_runtime_read_paths,
+    marked_command,
     research_command,
+    sandbox_command,
     sanitized_environment,
 )
 from .storage import atomic_write_text, write_json_once
 from .search import (
     AgentCommandBuilder,
     add_ledger_entry,
-    ensure_strategy,
     load_ledger,
     next_search_id,
     planning_schema,
@@ -85,6 +87,7 @@ from .trials import load_trial_count, load_trial_count_record
 ResearchCommandBuilder = Callable[[Path, Path, Path, str], Sequence[str]]
 PublicCheckCommandBuilder = Callable[[Sequence[str], Path, Path], Sequence[str]]
 ProgressCallback = Callable[[dict[str, Any]], None]
+COMPUTE_PROBE_HEADROOM = 0.8
 _DEFAULT_STRATEGY = object()
 
 
@@ -325,6 +328,7 @@ def _run_planning(
 ) -> dict[str, Any] | None:
     assert task.config.method is not None
     task.config.method.require_component("plan", "plan.comparative-v1")
+    rebuild_catalog(task.directory)
     strategy_files = sorted((task.directory / "strategy").glob("*.public.json"))
     strategy = json.loads(strategy_files[-1].read_text(encoding="utf-8"))
     ledger = load_ledger(task.directory)
@@ -372,7 +376,9 @@ def _run_planning(
         "Requests may specify only policy changes within editable paths: never prescribe "
         "trial counts, seeds, calibration, statistical thresholds, evaluator changes, "
         "or other controller-owned protocol. It is valid to exhaust every direction; "
-        "never invent a weak candidate merely to continue. After comparing all "
+        "never invent a weak candidate merely to continue. An untested experiment cannot "
+        "support or contradict performance and cannot by itself exhaust a performance "
+        "direction. After comparing all "
         "directions, select the best request or set selection to null when all are "
         "exhausted. A numeric-only change requires a deliberate public sweep. Do not "
         "edit, commit, or run hidden evaluation. Return only the required planning JSON."
@@ -518,6 +524,7 @@ def _run_implementation(
     worktree: Path,
     request: Mapping[str, Any],
     *,
+    trial_count: int,
     command_builder: ResearchCommandBuilder | None,
     stop_path: Path,
 ) -> dict[str, Any]:
@@ -554,6 +561,13 @@ def _run_implementation(
                     else None
                 ),
                 "subject_interface": manifest.subject_interface,
+                "compute_envelope": {
+                    "official_trials": trial_count,
+                    "timeout_seconds": manifest.limits.timeout_seconds,
+                    "public_probe": list(task.config.public_probe),
+                    "probe_trial_equivalents": task.config.public_probe_trial_equivalents,
+                    "advisory_only": True,
+                },
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -666,6 +680,115 @@ def _load_implementation_report(
         )
     except (OSError, json.JSONDecodeError, JsonSchemaError, ValidationError) as error:
         raise StateError("saved implementation report is invalid") from error
+
+
+def _run_compute_probe(
+    task: LocatedTask,
+    manifest: EvaluatorManifest,
+    *,
+    attempt: Path,
+    worktree: Path,
+    trial_count: int,
+    command_builder: PublicCheckCommandBuilder | None,
+    stop_path: Path,
+) -> dict[str, Any]:
+    published = attempt / "compute-probe.public.json"
+    if published.is_file():
+        try:
+            value = json.loads(published.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise StateError("saved compute probe is invalid") from error
+        fields = {
+            "schema_version",
+            "status",
+            "elapsed_seconds",
+            "trial_equivalents",
+            "official_trials",
+            "projected_seconds",
+            "timeout_seconds",
+            "headroom_fraction",
+            "risk",
+            "advisory_only",
+        }
+        if (
+            not isinstance(value, dict)
+            or set(value) != fields
+            or value["schema_version"] != 1
+            or value["status"] not in {"available", "unavailable"}
+            or value["risk"]
+            not in {"within_advisory_budget", "likely_over_budget", "unavailable"}
+            or value["official_trials"] != trial_count
+            or value["trial_equivalents"]
+            != task.config.public_probe_trial_equivalents
+            or value["timeout_seconds"] != manifest.limits.timeout_seconds
+            or value["headroom_fraction"] != COMPUTE_PROBE_HEADROOM
+            or value["advisory_only"] is not True
+        ):
+            raise StateError("saved compute probe is invalid")
+        return value
+    root = attempt / "compute-probe"
+    root.mkdir(parents=True, exist_ok=True)
+    marker = root / "execution.started"
+    if command_builder is None:
+        command = sandbox_command(
+            marked_command(task.config.public_probe, marker),
+            cwd=worktree,
+            read_paths=command_runtime_read_paths(task.config.public_probe),
+            write_paths=(worktree, root),
+            profile="arctl-research",
+        )
+        environment = sanitized_environment(
+            codex_home=root / "codex-home",
+            writable_home=root / "home",
+        )
+    else:
+        command = command_builder(task.config.public_probe, worktree, root)
+        environment = None
+    try:
+        process = run_or_load_once(
+            root / "process",
+            command,
+            timeout_seconds=manifest.limits.timeout_seconds,
+            max_output_bytes=manifest.limits.max_output_bytes,
+            cwd=worktree,
+            env=environment,
+            stop_path=stop_path,
+        )
+        elapsed = process.get("elapsed_seconds")
+        available = process["return_code"] == 0 and isinstance(elapsed, (int, float))
+    except StoppedError:
+        raise
+    except ProcessError:
+        elapsed = None
+        available = False
+    equivalents = task.config.public_probe_trial_equivalents
+    projected = (
+        float(elapsed) * trial_count / equivalents
+        if available and equivalents is not None
+        else None
+    )
+    risk = (
+        "likely_over_budget"
+        if projected is not None
+        and projected > manifest.limits.timeout_seconds * COMPUTE_PROBE_HEADROOM
+        else "within_advisory_budget"
+        if projected is not None
+        else "unavailable"
+    )
+    value = {
+        "schema_version": 1,
+        "status": "available" if available else "unavailable",
+        "elapsed_seconds": elapsed,
+        "trial_equivalents": equivalents,
+        "official_trials": trial_count,
+        "projected_seconds": projected,
+        "timeout_seconds": manifest.limits.timeout_seconds,
+        "headroom_fraction": COMPUTE_PROBE_HEADROOM,
+        "risk": risk,
+        "advisory_only": True,
+    }
+    write_json_once(published, value)
+    return value
 
 
 def _run_research(
@@ -790,6 +913,7 @@ def _candidate_search(
     manifest: EvaluatorManifest,
     *,
     champion: str,
+    trial_count: int,
     research_command_builder: ResearchCommandBuilder,
     planning_command_builder: AgentCommandBuilder | None,
     strategy_command_builder: AgentCommandBuilder | None,
@@ -804,6 +928,7 @@ def _candidate_search(
         task,
         manifest,
         champion=champion,
+        trial_count=trial_count,
         planning_command_builder=planning_command_builder,
         research_command_builder=research_command_builder,
         review_command_builder=review_command_builder,
@@ -818,6 +943,7 @@ def _candidate_search(
         task,
         manifest,
         champion=champion,
+        trial_count=trial_count,
         review_command_builder=review_command_builder,
         repair_command_builder=repair_command_builder,
         check_command_builder=check_command_builder,
@@ -831,7 +957,9 @@ def _candidate_search(
     strategy_worktree = task.directory / "worktrees" / f"search-{search_id:06d}-strategy"
     _checkout(task.config.repo, strategy_worktree, champion)
     try:
-        revision, strategy_value = ensure_strategy(
+        revision, strategy_value = invoke_component(
+            "strategize",
+            task.config.method.components["strategize"].identifier,
             task,
             strategy_worktree,
             manifest,
@@ -852,7 +980,9 @@ def _candidate_search(
         if attempt == 4 and not split_roles:
             _checkout(task.config.repo, strategy_worktree, champion)
             try:
-                revision, _ = ensure_strategy(
+                revision, _ = invoke_component(
+                    "strategize",
+                    task.config.method.components["strategize"].identifier,
                     task,
                     strategy_worktree,
                     manifest,
@@ -877,7 +1007,9 @@ def _candidate_search(
         try:
             if split_roles:
                 try:
-                    request = _run_planning(
+                    request = invoke_component(
+                        "plan",
+                        task.config.method.components["plan"].identifier,
                         task,
                         attempt_directory,
                         worktree,
@@ -921,7 +1053,9 @@ def _candidate_search(
                     while True:
                         _checkout(task.config.repo, strategy_worktree, champion)
                         try:
-                            revision, refreshed = ensure_strategy(
+                            revision, refreshed = invoke_component(
+                                "strategize",
+                                task.config.method.components["strategize"].identifier,
                                 task,
                                 strategy_worktree,
                                 manifest,
@@ -951,12 +1085,15 @@ def _candidate_search(
                         )
                     continue
                 try:
-                    implementation_report = _run_implementation(
+                    implementation_report = invoke_component(
+                        "execute",
+                        task.config.method.components["execute"].identifier,
                         task,
                         manifest,
                         attempt_directory,
                         worktree,
                         request,
+                        trial_count=trial_count,
                         command_builder=(
                             None
                             if research_command_builder is _default_research_command
@@ -999,6 +1136,16 @@ def _candidate_search(
                 )
             except ValidationError as error:
                 raise ResearchMiss("invalid_request", str(error)) from error
+            compute_report = _run_compute_probe(
+                task,
+                manifest,
+                attempt=attempt_directory,
+                worktree=worktree,
+                trial_count=trial_count,
+                command_builder=check_command_builder,
+                stop_path=stop_path,
+            )
+            _notify(progress, "compute_probe", report=compute_report)
             review_candidate(
                 task,
                 manifest,
@@ -1008,6 +1155,7 @@ def _candidate_search(
                 request=request,
                 stop_path=stop_path,
                 implementation_report=implementation_report,
+                compute_report=compute_report,
                 review_command_builder=review_command_builder,
                 repair_command_builder=repair_command_builder,
                 check_command_builder=check_command_builder,
@@ -1066,6 +1214,7 @@ def _recover_candidate_stage(
     manifest: EvaluatorManifest,
     *,
     champion: str,
+    trial_count: int,
     planning_command_builder: AgentCommandBuilder | None,
     research_command_builder: ResearchCommandBuilder,
     review_command_builder: ReviewCommandBuilder | None,
@@ -1105,7 +1254,9 @@ def _recover_candidate_stage(
                 if planning_failed and not (
                     attempt_directory / "request.public.json"
                 ).is_file():
-                    request = _run_planning(
+                    request = invoke_component(
+                        "plan",
+                        task.config.method.components["plan"].identifier,
                         task,
                         attempt_directory,
                         worktree,
@@ -1126,12 +1277,15 @@ def _recover_candidate_stage(
                 if not isinstance(request, dict):
                     raise StateError("recoverable candidate request is invalid")
                 try:
-                    implementation_report = _run_implementation(
+                    implementation_report = invoke_component(
+                        "execute",
+                        task.config.method.components["execute"].identifier,
                         task,
                         manifest,
                         attempt_directory,
                         worktree,
                         request,
+                        trial_count=trial_count,
                         command_builder=(
                             None
                             if research_command_builder is _default_research_command
@@ -1158,6 +1312,16 @@ def _recover_candidate_stage(
             validate_research_links(
                 request, strategy=strategy, ledger=load_ledger(task.directory)
             )
+            compute_report = _run_compute_probe(
+                task,
+                manifest,
+                attempt=attempt_directory,
+                worktree=worktree,
+                trial_count=trial_count,
+                command_builder=check_command_builder,
+                stop_path=stop_path,
+            )
+            _notify(progress, "compute_probe", report=compute_report)
             review_candidate(
                 task,
                 manifest,
@@ -1167,6 +1331,7 @@ def _recover_candidate_stage(
                 request=request,
                 stop_path=stop_path,
                 implementation_report=implementation_report,
+                compute_report=compute_report,
                 review_command_builder=review_command_builder,
                 repair_command_builder=repair_command_builder,
                 check_command_builder=check_command_builder,
@@ -1197,6 +1362,7 @@ def _recover_candidate_review(
     manifest: EvaluatorManifest,
     *,
     champion: str,
+    trial_count: int,
     review_command_builder: ReviewCommandBuilder | None,
     repair_command_builder: ReviewCommandBuilder | None,
     check_command_builder: PublicCheckCommandBuilder | None,
@@ -1267,6 +1433,16 @@ def _recover_candidate_review(
                 attempt=attempt,
                 attempts=6,
             )
+            compute_report = _run_compute_probe(
+                task,
+                manifest,
+                attempt=attempt_directory,
+                worktree=worktree,
+                trial_count=trial_count,
+                command_builder=check_command_builder,
+                stop_path=stop_path,
+            )
+            _notify(progress, "compute_probe", report=compute_report)
             review_candidate(
                 task,
                 manifest,
@@ -1278,6 +1454,7 @@ def _recover_candidate_review(
                 implementation_report=(
                     _load_implementation_report(attempt_directory)
                 ),
+                compute_report=compute_report,
                 review_command_builder=review_command_builder,
                 repair_command_builder=repair_command_builder,
                 check_command_builder=check_command_builder,
@@ -1318,6 +1495,7 @@ def _record_official_result(
     result: Mapping[str, Any],
     manifest: EvaluatorManifest,
 ) -> None:
+    result = normalize_result_statuses(result)
     request_path = (
         task.directory
         / "experiments"
@@ -1343,6 +1521,14 @@ def _record_official_result(
             "evidence_review": request.get("evidence_review"),
             "lineage": request.get("lineage"),
             "decision": result["decision"],
+            "operational_status": result["operational_status"],
+            "scientific_status": result["scientific_status"],
+            "reason_code": result["reason_code"],
+            **(
+                {"operational_assessment": result["operational_assessment"]}
+                if result.get("operational_assessment")
+                else {}
+            ),
             "changed_paths": list(
                 candidate_changed_paths(
                     task.config.repo, result["champion_before"], result["candidate"]
@@ -1570,7 +1756,10 @@ def _reflect_final_result(
     _checkout(task.config.repo, champion_worktree, record.champion)
     _checkout(task.config.repo, candidate_worktree, record.candidate)
     _notify(progress, "reflection", experiment_id=record.experiment_id)
-    run_reflection(
+    assert task.config.method is not None
+    invoke_component(
+        "reflect",
+        task.config.method.components["reflect"].identifier,
         task=task.config,
         experiment=experiment,
         manifest=manifest,
@@ -1857,10 +2046,14 @@ def run_task(
                 f"refs/arctl/{task.config.task_id}/champion",
             )
             try:
-                found = _candidate_search(
+                assert task.config.method is not None
+                found = invoke_component(
+                    "search",
+                    task.config.method.components["search"].identifier,
                     task,
                     manifest,
                     champion=champion,
+                    trial_count=trial_count,
                     research_command_builder=research_command_builder,
                     planning_command_builder=planning_command_builder,
                     strategy_command_builder=strategy_command_builder,  # type: ignore[arg-type]
@@ -1879,7 +2072,7 @@ def run_task(
                 break
             research_worktree, candidate, raw_request, search_attempt = found
             experiment, record = start_experiment(task.directory, champion)
-            if task.config.schema_version == 4:
+            if task.config.schema_version >= 4:
                 write_json_once(
                     experiment / "branch.public.json",
                     {
@@ -2016,7 +2209,10 @@ def run_task(
             trial_count=trial_count,
         )
         try:
-            primary = _run_reserved_comparison(
+            assert task.config.method is not None
+            primary = invoke_component(
+                "evaluate",
+                task.config.method.components["evaluate"].identifier,
                 task,
                 experiment,
                 kind="primary",
@@ -2062,7 +2258,9 @@ def run_task(
                     trial_count=trial_count,
                 )
                 try:
-                    suspect = _run_reserved_comparison(
+                    suspect = invoke_component(
+                        "evaluate",
+                        task.config.method.components["evaluate"].identifier,
                         task,
                         experiment,
                         kind="suspect",
@@ -2102,7 +2300,9 @@ def run_task(
                     experiment / "comparisons" / "suspect" / "reservation.private.json"
                 )
                 suspect = (
-                    _run_reserved_comparison(
+                    invoke_component(
+                        "evaluate",
+                        task.config.method.components["evaluate"].identifier,
                         task,
                         experiment,
                         kind="suspect",

@@ -130,14 +130,16 @@ schedules, raw subject output, private evidence or errors, or earlier chat logs.
 ## 8. Task file
 Use one small YAML file that a human can read:
 ```yaml
-schema_version: 4
+schema_version: 5
 task_id: demo
 repo: /absolute/path/to/repo
 objective: Improve play across procedurally generated maps without breaking correctness.
 editable_paths: [src/**, tests/**]
 denied_paths: [.git/**, pyproject.toml, uv.lock]
 public_checks: [[python, -m, pytest, -q]]
-public_probe: [python, tools/dev_benchmark.py]
+public_probe:
+  command: [python, tools/dev_benchmark.py]
+  trial_equivalents: 3
 environment:
   codebases:
     - id: environment-core
@@ -172,7 +174,10 @@ or REFLECT lifecycle, persists the choice, and reuses it during recovery.
 Defaults are Sol medium for strategy, planning, and reflection and Terra medium
 for execution. Approval locks the resolved method and snapshots the selected
 Git blobs from every environment codebase. Task-v3 files retain their legacy
-assignments. See [research methods](docs/research-methods.md) for backend
+assignments; task-v4 files retain their command-only public probe. Task-v5 uses
+`trial_equivalents` to declare how many paired trials the probe represents and
+project official runtime before review. The projection
+is advisory and never changes the approved evaluation rule. See [research methods](docs/research-methods.md) for backend
 certification and future search invariants.
 
 `max_experiments` is a positive integer or `unlimited`; new tasks default to

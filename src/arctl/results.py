@@ -3,14 +3,84 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from .decisions import Decision, decide
 from .errors import StateError, ValidationError
 from .manifest import TelemetryMetric
 from .models import Evidence, validate_telemetry
+
+_OPERATIONAL_STATUSES = {"completed", "candidate_failed", "system_failed", "stopped"}
+_SCIENTIFIC_STATUSES = {"supported", "contradicted", "inconclusive", "untested"}
+
+
+def result_statuses(
+    comparisons: Sequence[Mapping[str, Any]],
+    *,
+    operational_status: str = "completed",
+) -> tuple[str, str]:
+    """Return independent operational and scientific interpretations."""
+    if operational_status != "completed" or not comparisons:
+        return operational_status, "untested"
+    final = comparisons[-1]
+    estimate = float(final["effect_estimate"])
+    lower = float(final["one_sided_lower_bound"])
+    scientific = (
+        "contradicted"
+        if estimate <= 0
+        else "supported"
+        if lower > 0
+        else "inconclusive"
+    )
+    return operational_status, scientific
+
+
+def operational_assessment(
+    *,
+    status: str,
+    reason_code: str,
+    summary: str,
+) -> dict[str, Any]:
+    action = {
+        "candidate_failed": "audit_implementation",
+        "system_failed": "inspect_infrastructure",
+        "stopped": "resume_safely",
+    }.get(status, "inspect_result")
+    if reason_code == "candidate_timeout":
+        action = "optimize_implementation"
+    return {
+        "schema_version": 1,
+        "summary": summary,
+        "scientific_interpretation": (
+            "The approved comparison protocol did not complete; the mechanism remains untested."
+        ),
+        "next_action": action,
+    }
+
+
+def normalize_result_statuses(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Add derived axes to a legacy public result without mutating its artifact."""
+    normalized = dict(value)
+    if "operational_status" in normalized:
+        return normalized
+    failure = normalized.get("failure")
+    tests_failed = normalized.get("constraints", {}).get("tests") == "FAIL"
+    if failure == "candidate_execution" or tests_failed:
+        status = "candidate_failed"
+    elif failure == "system_execution":
+        status = "system_failed"
+    else:
+        status = "completed"
+    comparisons = normalized.get("evaluation", {}).get("comparisons", [])
+    operational, scientific = result_statuses(comparisons, operational_status=status)
+    normalized.update(
+        operational_status=operational,
+        scientific_status=scientific,
+        reason_code=("legacy_failure" if status != "completed" else "none"),
+    )
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -63,6 +133,7 @@ def build_public_result(
         (outcome.suspect,) if outcome.suspect is not None else ()
     )
     comparisons = [public_comparison(evidence) for evidence in evidence_items]
+    operational, scientific = result_statuses(comparisons)
     return {
         "experiment_id": experiment_id,
         "hypothesis": hypothesis,
@@ -70,6 +141,9 @@ def build_public_result(
         "candidate": candidate,
         "champion_after": champion_after,
         "decision": outcome.decision.value,
+        "operational_status": operational,
+        "scientific_status": scientific,
+        "reason_code": "none",
         "evaluation": {
             "statistic": statistic,
             "comparisons": comparisons,
@@ -119,10 +193,18 @@ def validate_public_result(
         "constraints",
         "telemetry",
     }
-    if not isinstance(value, Mapping) or set(value) not in (
-        base_fields,
-        base_fields | {"failure"},
-        base_fields | {"failure", "failure_detail"},
+    optional_fields = {
+        "failure",
+        "failure_detail",
+        "operational_status",
+        "scientific_status",
+        "reason_code",
+        "operational_assessment",
+    }
+    if (
+        not isinstance(value, Mapping)
+        or not base_fields <= set(value)
+        or not set(value) <= base_fields | optional_fields
     ):
         raise StateError("public result fields are invalid")
     identifier = value["experiment_id"]
@@ -152,6 +234,36 @@ def validate_public_result(
         or not value["failure_detail"]
     ):
         raise StateError("public result failure detail is invalid")
+    status_fields = {"operational_status", "scientific_status", "reason_code"}
+    if set(value) & status_fields and not status_fields <= set(value):
+        raise StateError("public result status fields are incomplete")
+    if status_fields <= set(value):
+        if (
+            value["operational_status"] not in _OPERATIONAL_STATUSES
+            or value["scientific_status"] not in _SCIENTIFIC_STATUSES
+            or not isinstance(value["reason_code"], str)
+            or not value["reason_code"]
+        ):
+            raise StateError("public result statuses are invalid")
+    if "operational_assessment" in value:
+        assessment = value["operational_assessment"]
+        if (
+            not isinstance(assessment, Mapping)
+            or set(assessment) != {
+                "schema_version",
+                "summary",
+                "scientific_interpretation",
+                "next_action",
+            }
+            or assessment["schema_version"] != 1
+            or any(
+                not isinstance(assessment[name], str) or not assessment[name]
+                for name in ("summary", "scientific_interpretation", "next_action")
+            )
+        ):
+            raise StateError("public operational assessment is invalid")
+        if not status_fields <= set(value):
+            raise StateError("public operational assessment requires statuses")
 
     constraints = value["constraints"]
     if (
@@ -179,6 +291,29 @@ def validate_public_result(
         )
     ):
         raise StateError("public result evaluation is invalid")
+    if status_fields <= set(value):
+        operational = value["operational_status"]
+        has_assessment = "operational_assessment" in value
+        if (
+            (operational == "completed") != (value["reason_code"] == "none")
+            or (constraints["tests"] == "FAIL" and operational != "candidate_failed")
+            or (
+                value.get("failure") == "candidate_execution"
+                and operational != "candidate_failed"
+            )
+            or (
+                value.get("failure") == "system_execution"
+                and operational not in {"system_failed", "stopped"}
+            )
+            or (operational != "completed") != has_assessment
+        ):
+            raise StateError("public result operational status is invalid")
+        expected = result_statuses(
+            value["evaluation"]["comparisons"],
+            operational_status=value["operational_status"],
+        )[1]
+        if value["scientific_status"] != expected:
+            raise StateError("public result scientific status is invalid")
     kinds: list[str] = []
     comparison_fields = {
         "kind",

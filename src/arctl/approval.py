@@ -231,8 +231,8 @@ def _snapshot_hashes(task_directory: Path, task: TaskConfig) -> dict[str, str]:
 
 
 def preview_approval(task_file: Path, task: TaskConfig) -> ApprovalPreview:
-    if task.schema_version not in (3, 4):
-        raise ValidationError("task must use schema v3 or v4")
+    if task.schema_version not in (3, 4, 5):
+        raise ValidationError("task must use schema v3, v4, or v5")
     target = task.repo.resolve()
     evaluator = task.evaluator.repo.resolve()
     if evaluator == target or target in evaluator.parents or evaluator in target.parents:
@@ -270,7 +270,7 @@ def preview_approval(task_file: Path, task: TaskConfig) -> ApprovalPreview:
                 backend_attestations, sort_keys=True, separators=(",", ":")
             ).encode()
         ).hexdigest()
-        if task.schema_version == 4
+        if task.schema_version >= 4
         else None
     )
     method_hash = (
@@ -335,7 +335,7 @@ def confirm_approval(
     )
     atomic_write_text(task_directory / "evaluator.commit", preview.evaluator_commit + "\n")
     atomic_write_bytes(task_directory / "evaluator.manifest.json", raw_manifest)
-    if task.schema_version == 4:
+    if task.schema_version >= 4:
         assert task.method is not None
         atomic_write_json(task_directory / "method.lock.json", task.method.to_lock())
         atomic_write_json(
@@ -374,14 +374,14 @@ def confirm_approval(
 
     freeze_fixed_trial_count(task_directory, task)
     record = {
-        "schema_version": 3 if task.schema_version == 4 else 2,
+        "schema_version": 3 if task.schema_version >= 4 else 2,
         "task_sha256": preview.task_hash,
         "evaluator_commit": preview.evaluator_commit,
         "manifest_sha256": preview.manifest_hash,
         "champion": champion,
         "environment_sha256": dict(preview.environment_hashes),
     }
-    if task.schema_version == 4:
+    if task.schema_version >= 4:
         record["method_sha256"] = preview.method_hash
         record["backend_approval_sha256"] = preview.backend_hash
     atomic_write_json(approval_path, record)
@@ -389,8 +389,8 @@ def confirm_approval(
 
 
 def verify_approval(task_directory: Path, task: TaskConfig) -> dict[str, str]:
-    if task.schema_version not in (3, 4):
-        raise StateError("task must use schema v3 or v4")
+    if task.schema_version not in (3, 4, 5):
+        raise StateError("task must use schema v3, v4, or v5")
     try:
         approval = json.loads((task_directory / "approval.json").read_text())
         task_hash = hashlib.sha256((task_directory / "task.yaml").read_bytes()).hexdigest()
@@ -408,7 +408,7 @@ def verify_approval(task_directory: Path, task: TaskConfig) -> dict[str, str]:
         "champion",
         "environment_sha256",
     }
-    if task.schema_version == 4:
+    if task.schema_version >= 4:
         expected_fields.add("method_sha256")
         expected_fields.add("backend_approval_sha256")
     if not isinstance(approval, dict) or set(approval) != expected_fields:
@@ -416,13 +416,13 @@ def verify_approval(task_directory: Path, task: TaskConfig) -> dict[str, str]:
     try:
         environment_hashes = (
             _snapshot_hashes(task_directory, task)
-            if task.schema_version == 4
+            if task.schema_version >= 4
             else environment_source_hashes(task, task_directory=task_directory)
         )
     except (OSError, ValidationError) as error:
         raise StateError("approved environment sources are invalid") from error
     if (
-        approval["schema_version"] != (3 if task.schema_version == 4 else 2)
+        approval["schema_version"] != (3 if task.schema_version >= 4 else 2)
         or approval["task_sha256"] != task_hash
         or approval["manifest_sha256"] != manifest_hash
         or approval["evaluator_commit"] != evaluator_commit
@@ -431,7 +431,7 @@ def verify_approval(task_directory: Path, task: TaskConfig) -> dict[str, str]:
         != environment_hashes
     ):
         raise StateError("approved task or evaluator artifacts changed")
-    if task.schema_version == 4:
+    if task.schema_version >= 4:
         assert task.method is not None
         try:
             method_bytes = (task_directory / "method.lock.json").read_bytes()

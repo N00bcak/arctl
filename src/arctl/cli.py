@@ -105,12 +105,16 @@ def _payload(
 
 def _result_line(result: dict[str, Any]) -> str:
     from .dossier import safe_terminal_text
+    from .results import normalize_result_statuses
 
+    result = normalize_result_statuses(result)
     comparisons = result.get("evaluation", {}).get("comparisons", [])
     final = comparisons[-1] if comparisons else {}
     if not final and result.get("failure_detail"):
         return (
-            f"{result['experiment_id']:>3}  {result['decision']:<7} · no score: "
+            f"{result['experiment_id']:>3}  {result['decision']:<7} · "
+            f"{result['operational_status']} / {result['scientific_status']} · "
+            "no score: "
             + safe_terminal_text(result["failure_detail"], limit=100)
         )
     measurement = (
@@ -201,6 +205,9 @@ def _status_table(payload: dict[str, Any]) -> str:
         rows.append(("Latest experiment", f"Expt #{status['experiment_id']}"))
     latest = status.get("last_result")
     if isinstance(latest, dict):
+        from .results import normalize_result_statuses
+
+        latest = normalize_result_statuses(latest)
         comparisons = latest.get("evaluation", {}).get("comparisons", [])
         final = comparisons[-1] if comparisons else None
         evidence = (
@@ -217,7 +224,9 @@ def _status_table(payload: dict[str, Any]) -> str:
         rows.append(
             (
                 "Latest result",
-                f"Expt #{latest['experiment_id']} · {latest['decision']}{evidence}\n"
+                f"Expt #{latest['experiment_id']} · {latest['decision']} · "
+                f"{latest['operational_status']} / {latest['scientific_status']}"
+                f"{evidence}\n"
                 + safe_terminal_text(latest["hypothesis"], limit=180),
             )
         )
@@ -250,6 +259,9 @@ def _report_table(report: dict[str, Any]) -> str:
 
     rows = []
     for result in report["results"]:
+        from .results import normalize_result_statuses
+
+        result = normalize_result_statuses(result)
         comparisons = result.get("evaluation", {}).get("comparisons", [])
         final = comparisons[-1] if comparisons else None
         evidence = (
@@ -267,6 +279,7 @@ def _report_table(report: dict[str, Any]) -> str:
             (
                 f"#{result['experiment_id']}",
                 result["decision"],
+                f"{result['operational_status']}\n{result['scientific_status']}",
                 evidence,
                 safe_terminal_text(result["hypothesis"]),
                 f"{result['experiment_id']:06d}",
@@ -274,10 +287,10 @@ def _report_table(report: dict[str, Any]) -> str:
         )
     return tabulate(
         rows,
-        headers=("Expt", "Decision", "Evidence", "Hypothesis", "Dossier"),
+        headers=("Expt", "Decision", "Outcome", "Evidence", "Hypothesis", "Dossier"),
         tablefmt="simple_grid",
         disable_numparse=True,
-        maxcolwidths=(4, 8, 28, 76, 8),
+        maxcolwidths=(4, 8, 16, 25, 60, 8),
     )
 
 
@@ -643,6 +656,15 @@ class _ProgressView:
                 self._finish("complete" if event["selected"] else "exhausted")
                 if event["selected"]:
                     self._start("implementation")
+            elif kind == "compute_probe":
+                report = event["report"]
+                if report["risk"] == "likely_over_budget":
+                    projected = self._duration(report["projected_seconds"])
+                    budget = self._duration(report["timeout_seconds"])
+                    self._line(
+                        f"    Compute warning: projected {projected} for a "
+                        f"{budget} evaluation budget (advisory)."
+                    )
             elif kind == "retry":
                 self._finish("failed")
                 delay = self._duration(event["delay_seconds"])

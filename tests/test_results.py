@@ -7,7 +7,14 @@ from arctl.decisions import Decision
 from arctl.errors import StateError
 from arctl.models import Evidence
 from arctl.manifest import TelemetryMetric
-from arctl.results import build_public_result, resolve_outcome, validate_public_result
+from arctl.results import (
+    build_public_result,
+    normalize_result_statuses,
+    operational_assessment,
+    resolve_outcome,
+    result_statuses,
+    validate_public_result,
+)
 
 from .helpers import valid_evidence
 
@@ -32,6 +39,37 @@ def parse(kind: str = "primary", **changes: object) -> Evidence:
 
 
 class ExperimentOutcomeTests(unittest.TestCase):
+    def test_outcome_axes_distinguish_evidence_from_execution(self) -> None:
+        comparison = {
+            "effect_estimate": 0.2,
+            "one_sided_lower_bound": -0.1,
+        }
+        self.assertEqual(result_statuses([comparison]), ("completed", "inconclusive"))
+        self.assertEqual(
+            result_statuses([], operational_status="candidate_failed"),
+            ("candidate_failed", "untested"),
+        )
+
+    def test_legacy_failure_statuses_are_derived_without_rewriting(self) -> None:
+        legacy = {
+            "failure": "candidate_execution",
+            "evaluation": {"comparisons": []},
+            "constraints": {"tests": "PASS"},
+        }
+        normalized = normalize_result_statuses(legacy)
+        self.assertNotIn("operational_status", legacy)
+        self.assertEqual(normalized["operational_status"], "candidate_failed")
+        self.assertEqual(normalized["scientific_status"], "untested")
+
+    def test_operational_assessment_is_deterministic(self) -> None:
+        assessment = operational_assessment(
+            status="candidate_failed",
+            reason_code="candidate_timeout",
+            summary="Candidate timed out.",
+        )
+        self.assertEqual(assessment["next_action"], "optimize_implementation")
+        self.assertIn("remains untested", assessment["scientific_interpretation"])
+
     def test_primary_trigger_holds_the_candidate_provisional(self) -> None:
         primary = parse(
             suspect_required=True,
@@ -93,6 +131,16 @@ class ExperimentOutcomeTests(unittest.TestCase):
             expected_statistic="expected score",
         )
         self.assertEqual(validated, public)
+
+        inconsistent = copy.deepcopy(public)
+        inconsistent["scientific_status"] = "contradicted"
+        with self.assertRaisesRegex(StateError, "scientific status"):
+            validate_public_result(
+                inconsistent,
+                allowed_telemetry={"errors": metric},
+                allowed_suspect_reasons=("timeout_shift",),
+                expected_statistic="expected score",
+            )
 
         mutations = (
             lambda value: value.__setitem__("private_seed", "secret"),

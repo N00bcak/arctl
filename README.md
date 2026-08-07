@@ -37,14 +37,15 @@ stage timing. `status` names the experiment that promoted the current champion;
 root. Every published experiment receives a public-only Markdown dossier under
 the task’s `reports/experiments/` directory. Use `--json` for AI orchestration.
 
-Task-v4 approvals lock the public environment code, interface, documentation,
+Task-v5 approvals lock the public environment code, interface, documentation,
 policy-free probes, and research method. A strategy session reads only the
 environment snapshot and derives successful-policy behaviors from cited
 observations. A read-only planner compares those behaviors with the latest
 accepted champion and freezes one experiment brief; a fresh implementer may
 only realize that brief. The implementer publishes a requirement-by-requirement
 audit and may claim completion only when every frozen obligation is verified.
-Task-v3 files remain supported with their legacy single-agent assignments.
+Its declared probe size also gives an advisory official-runtime projection
+before review. Task-v3/v4 files remain supported.
 
 `serial-v1` assigns one agent to each agent-driven component.
 `serial-hotseat-v1` instead draws from an approved component-local pool for
@@ -64,6 +65,10 @@ role, unit, and direction. After each valid verdict, a fresh read-only session
 uses those aggregates to assess the proposed mechanism and implementation and
 to recommend later research. This reflection is public and advisory; only the
 fixed statistical rule can decide or promote.
+
+Results retain the promotion decision and separately report operational and
+scientific status, so a scoreless implementation failure remains visibly
+untested rather than looking like negative evidence.
 
 Automatic trial sizing is a one-time controller-run champion pilot over an
 approved ladder. The evaluator calculates the task-specific diagnostic; arctl
