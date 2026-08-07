@@ -172,6 +172,7 @@ def _agent_run(
     writable_worktree: bool,
     read_paths: tuple[Path, ...] = (),
     command_builder: SetupCommandBuilder | None = None,
+    offline: bool = False,
 ) -> dict[str, Any]:
     scratch = root / "output"
     scratch.mkdir(parents=True, exist_ok=True)
@@ -191,6 +192,7 @@ def _agent_run(
                 output_name=output_name,
                 writable_worktree=writable_worktree,
                 read_paths=read_paths,
+                network_enabled=not offline,
             ),
         )
         environment = agent_environment(
@@ -210,9 +212,17 @@ def _agent_run(
         max_output_bytes=4_000_000,
         cwd=worktree,
         env=environment,
+        stdin_path=root / "prompt.public.txt" if command_builder is None else None,
     )
     if result["return_code"] != 0:
-        raise StateError(f"setup agent failed; inspect {root / 'process'}")
+        stderr_path = root / "process" / "stderr.bin"
+        detail = (
+            stderr_path.read_text(encoding="utf-8", errors="replace").strip()
+            if stderr_path.is_file()
+            else ""
+        )
+        suffix = f": {detail}" if detail else ""
+        raise StateError(f"setup agent failed{suffix}; inspect {root / 'process'}")
     try:
         value = json.loads((scratch / output_name).read_text(encoding="utf-8"))
         Draft202012Validator(schema_value).validate(value)
@@ -312,6 +322,7 @@ def discover_setup(
     setup: dict[str, Any],
     *,
     command_builder: SetupCommandBuilder | None = None,
+    offline: bool = False,
 ) -> dict[str, Any]:
     subject = Path(setup["subject"])
     prompt = (
@@ -324,14 +335,17 @@ def discover_setup(
         "the required JSON. Required ids: "
         + ", ".join(QUESTION_IDS)
     )
+    attempts = directory / "setup" / "discovery" / "attempts"
+    attempt = 1 + len(tuple(attempts.glob("*"))) if attempts.is_dir() else 1
     value = _agent_run(
-        root=directory / "setup" / "discovery",
+        root=attempts / f"{attempt:04d}",
         worktree=subject,
         schema_value=discovery_schema(),
         output_name="discovery.public.json",
         prompt=prompt,
         writable_worktree=False,
         command_builder=command_builder,
+        offline=offline,
     )
     ids = [item["id"] for item in value["questions"]]
     if sorted(ids) != sorted(QUESTION_IDS) or len(ids) != len(set(ids)):
@@ -416,7 +430,7 @@ def build_setup(
     directory: Path,
     setup: dict[str, Any],
     *,
-    allow_network: bool,
+    offline: bool,
     command_builder: SetupCommandBuilder | None = None,
     review_command_builder: SetupCommandBuilder | None = None,
 ) -> dict[str, Any]:
@@ -481,6 +495,7 @@ def build_setup(
         writable_worktree=False,
         read_paths=(environment, *_public_files(evaluator, exclude_private=True)),
         command_builder=command_builder,
+        offline=offline,
     )
     _safe_files(subject, value["subject_files"])
     _safe_files(environment, value["environment_files"])
@@ -508,7 +523,7 @@ def build_setup(
         "--project",
         str(workspace),
         "--no-install-project",
-        *(("--offline",) if not allow_network else ()),
+        *(("--offline",) if offline else ()),
     ]
     uv_environment = os.environ.copy()
     uv_environment["UV_CACHE_DIR"] = str(workspace / ".uv-cache")
@@ -521,8 +536,8 @@ def build_setup(
         env=uv_environment,
     )
     if completed.returncode:
-        if not allow_network:
-            raise StateError("workspace dependencies are unavailable offline; rerun setup with --allow-network")
+        if offline:
+            raise StateError("workspace dependencies are unavailable offline; rerun setup without --offline")
         raise StateError("uv failed to provision the workspace runtime: " + completed.stderr.strip())
     manifest_path = evaluator / "evaluator.manifest.json"
     try:
@@ -611,6 +626,7 @@ def build_setup(
             *_public_files(evaluator, exclude_private=True),
         ),
         command_builder=review_command_builder,
+        offline=offline,
     )
     readiness = {
         "schema_version": 1,

@@ -142,6 +142,7 @@ def research_command(
     reasoning_effort: str | None = None,
     writable_worktree: bool = True,
     read_worktree: bool = True,
+    network_enabled: bool = False,
 ) -> tuple[str, ...]:
     encoded_prompt = prompt.encode("utf-8")
     if len(encoded_prompt) > MAX_AGENT_PROMPT_BYTES:
@@ -185,7 +186,7 @@ def research_command(
         "--config",
         "approval_policy=\"never\"",
         "--config",
-        "web_search=\"disabled\"",
+        f"web_search={json.dumps('live' if network_enabled else 'disabled')}",
         "--config",
         _filesystem_override(
             profile,
@@ -198,7 +199,7 @@ def research_command(
             codex=codex,
         ),
         "--config",
-        f"permissions.{profile}.network.enabled=false",
+        f"permissions.{profile}.network.enabled={str(network_enabled).lower()}",
         "--disable",
         "multi_agent",
         "--disable",

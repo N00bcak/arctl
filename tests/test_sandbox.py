@@ -167,6 +167,21 @@ class SandboxCommandTests(unittest.TestCase):
                 "Make one improvement.",
             )
 
+    def test_setup_can_explicitly_enable_network_and_live_search(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            command = research_command(
+                worktree=root / "worktree",
+                scratch=root / "scratch",
+                output_schema=root / "schema.json",
+                prompt="inspect public documentation",
+                writable_worktree=False,
+                network_enabled=True,
+            )
+            joined = "\n".join(command)
+            self.assertIn("permissions.arctl-research.network.enabled=true", joined)
+            self.assertIn('web_search="live"', joined)
+
     def test_research_rejects_a_prompt_over_the_global_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

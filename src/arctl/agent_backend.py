@@ -20,6 +20,7 @@ class AgentSessionRequest:
     read_paths: tuple[Path, ...] = ()
     writable_worktree: bool = False
     read_worktree: bool = True
+    network_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,7 @@ def _codex_command(
         reasoning_effort=agent.reasoning_effort,
         writable_worktree=request.writable_worktree,
         read_worktree=request.read_worktree,
+        network_enabled=request.network_enabled,
     )
 
 

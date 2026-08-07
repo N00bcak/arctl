@@ -181,7 +181,7 @@ class GuidedSetupTests(unittest.TestCase):
         readiness = build_setup(
             self.directory,
             record,
-            allow_network=True,
+            offline=False,
             command_builder=output_builder("build.public.json", self.build_value()),
             review_command_builder=output_builder(
                 "review.public.json",
@@ -212,7 +212,7 @@ class GuidedSetupTests(unittest.TestCase):
         readiness = build_setup(
             self.directory,
             record,
-            allow_network=True,
+            offline=False,
             command_builder=output_builder("build.public.json", self.build_value()),
             review_command_builder=output_builder(
                 "review.public.json",
@@ -240,7 +240,7 @@ class GuidedSetupTests(unittest.TestCase):
         first = build_setup(
             self.directory,
             record,
-            allow_network=True,
+            offline=False,
             command_builder=output_builder("build.public.json", self.build_value()),
             review_command_builder=output_builder(
                 "review.public.json",
@@ -262,7 +262,7 @@ class GuidedSetupTests(unittest.TestCase):
         second = build_setup(
             self.directory,
             record,
-            allow_network=True,
+            offline=False,
             command_builder=output_builder("build.public.json", self.build_value()),
             review_command_builder=output_builder(
                 "review.public.json",

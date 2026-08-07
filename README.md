@@ -26,9 +26,10 @@ research boundary, then generates and reviews a subject adapter, public
 environment, evaluator, runtime, and task draft. It uses a local setup branch,
 never pushes, and commits generated repositories only after the setup token is
 accepted. Normal `approve` remains the separate scientific trust boundary.
-Use `--answers FILE --json` for agent orchestration and `--allow-network` only
-when uv must fetch declared dependencies. Manual task authoring remains
-supported with an explicit data root.
+Use `--answers FILE --json` for agent orchestration. Setup agents and uv may use
+the network by default; `--offline` disables agent internet access and requires
+cached dependencies. Manual task authoring remains supported with an explicit
+data root.
 
 Normal operation uses `run`, `status`, `stop`, `report`, and `inspect`.
 Interactive `run` shows the experiment FSM, comparison substages, and live

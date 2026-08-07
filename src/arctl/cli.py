@@ -925,7 +925,7 @@ def _setup(
     data_root: Path,
     task_id: str | None,
     answers_path: Path | None,
-    allow_network: bool,
+    offline: bool,
     acceptance: str | None,
     interactive: bool,
 ) -> dict[str, Any]:
@@ -942,7 +942,7 @@ def _setup(
     state = record["state"]
     discovery: dict[str, Any] | None = None
     if state == "DISCOVERY_REQUIRED":
-        discovery = discover_setup(directory, record)
+        discovery = discover_setup(directory, record, offline=offline)
         record = json.loads((directory / "setup.json").read_text())
         state = record["state"]
     if state == "ANSWERS_REQUIRED" and answers_path is not None:
@@ -975,7 +975,7 @@ def _setup(
         readiness = build_setup(
             directory,
             record,
-            allow_network=allow_network,
+            offline=offline,
         )
         record = json.loads((directory / "setup.json").read_text())
         state = record["state"]
@@ -1620,7 +1620,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  arctl doctor [--json]\n"
             "  arctl init (--repo PATH | --new-repo PATH) [--workspace PATH]\n"
             "             [--task-id TASK] [--json]\n"
-            "  arctl setup [TASK] [--answers FILE] [--allow-network]\n"
+            "  arctl setup [TASK] [--answers FILE] [--offline]\n"
             "                     [--accept TOKEN] [--json]\n"
             "  arctl approve [TASK] [--confirm TOKEN] [--json]\n"
             "  arctl run [TASK] [--max-experiments N] [--retries N]\n"
@@ -1727,9 +1727,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="JSON object mapping every returned setup question ID to an answer",
     )
     setup.add_argument(
-        "--allow-network",
+        "--offline",
         action="store_true",
-        help="allow uv to fetch declared Python dependencies during setup",
+        help="disable setup-agent internet access and require cached uv dependencies",
     )
     setup.add_argument(
         "--accept",
@@ -1911,7 +1911,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 data_root=_data_root(arguments.data),
                 task_id=arguments.task_id,
                 answers_path=arguments.answers,
-                allow_network=arguments.allow_network,
+                offline=arguments.offline,
                 acceptance=arguments.accept,
                 interactive=not arguments.json,
             )

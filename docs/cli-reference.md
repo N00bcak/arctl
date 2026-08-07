@@ -42,7 +42,7 @@ Complete command forms:
   arctl doctor [--json]
   arctl init (--repo PATH | --new-repo PATH) [--workspace PATH]
              [--task-id TASK] [--json]
-  arctl setup [TASK] [--answers FILE] [--allow-network]
+  arctl setup [TASK] [--answers FILE] [--offline]
                      [--accept TOKEN] [--json]
   arctl approve [TASK] [--confirm TOKEN] [--json]
   arctl run [TASK] [--max-experiments N] [--retries N]
@@ -95,20 +95,20 @@ Example:
 ## `arctl setup -h`
 
 ```text
-usage: arctl setup [-h] [--json] [--answers FILE] [--allow-network] [--accept TOKEN] [TASK]
+usage: arctl setup [-h] [--json] [--answers FILE] [--offline] [--accept TOKEN] [TASK]
 
 Run resumable pre-approval setup. Discovery is read-only; generated code and evaluator
 remain drafts until explicit setup acceptance and normal task approval.
 
 positional arguments:
-  TASK             task ID; omit when the current repository identifies exactly one task
+  TASK            task ID; omit when the current repository identifies exactly one task
 
 options:
-  -h, --help       show this help message and exit
-  --json           emit one stable machine-readable JSON object
-  --answers FILE   JSON object mapping every returned setup question ID to an answer
-  --allow-network  allow uv to fetch declared Python dependencies during setup
-  --accept TOKEN   accept the verified setup trees and create their local Git commits
+  -h, --help      show this help message and exit
+  --json          emit one stable machine-readable JSON object
+  --answers FILE  JSON object mapping every returned setup question ID to an answer
+  --offline       disable setup-agent internet access and require cached uv dependencies
+  --accept TOKEN  accept the verified setup trees and create their local Git commits
 
 AI operators should use --json, submit the returned question IDs with --answers,
 and obtain permission before using --accept.

@@ -461,7 +461,7 @@ Write files through a temporary file and rename so half-written files are not us
 ```bash
 arctl doctor
 arctl init (--repo PATH | --new-repo PATH) [--workspace PATH]
-arctl setup TASK_ID [--answers FILE] [--allow-network] [--accept TOKEN]
+arctl setup TASK_ID [--answers FILE] [--offline] [--accept TOKEN]
 arctl approve TASK_ID
 arctl run TASK_ID [--max-experiments N] [--retries N] [--retry-delay SECONDS]
 arctl status TASK_ID
