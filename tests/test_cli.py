@@ -17,6 +17,7 @@ from arctl.cli import (
     _progress,
     _rewrite_next_command,
     _run,
+    _status,
     build_parser,
     main,
     render_cli_reference,
@@ -121,6 +122,45 @@ class CliTests(unittest.TestCase):
             self.assertTrue(error["evidence_valid"])
             self.assertFalse(error["can_continue"])
             self.assertIn("log_path", error)
+
+    def test_guided_init_creates_visible_workspace_without_task_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "subject"
+            repo.mkdir()
+            self.initialize_repo(repo)
+            workspace = root / "subject-research"
+            data = workspace / ".arctl-data"
+
+            code, output = self.run_cli(
+                [
+                    "--data",
+                    str(data),
+                    "init",
+                    "--repo",
+                    str(repo),
+                    "--workspace",
+                    str(workspace),
+                    "--json",
+                ]
+            )
+
+            self.assertEqual(code, 0)
+            payload = json.loads(output)
+            self.assertEqual(payload["state"], "SETUP_DISCOVERY_REQUIRED")
+            self.assertTrue((workspace / "arctl.workspace.yaml").is_file())
+            self.assertTrue((data / "tasks" / "subject" / "setup.json").is_file())
+            configured = subprocess.run(
+                ["git", "-C", str(repo), "config", "--local", "--get", "arctl.dataRoot"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            self.assertEqual(configured, str(data))
+            status = _status(data, "subject")
+            self.assertEqual(status["state"], "SETUP_STATUS")
+            self.assertEqual(status["setup_state"], "DISCOVERY_REQUIRED")
+            self.assertEqual(status["allowed_actions"], ["setup"])
 
     def test_human_output_omits_machine_next_command(self) -> None:
         code, output = self.run_cli(["doctor"])

@@ -19,7 +19,8 @@ options:
 commands:
   COMMAND
     doctor    check Git, Codex, sandbox, runtime, network, and cleanup support
-    init      create an editable task draft for a subject repository
+    init      create a guided Python research workspace
+    setup     discover, build, review, and accept a Python task workspace
     approve   preview or confirm the task, evaluator, environment, and champion lock
     run       calibrate if needed, search for candidates, and run official experiments
     status    show the task's current controller state and resumability
@@ -31,7 +32,7 @@ commands:
 Typical workflow:
   arctl doctor
   arctl init --repo /path/to/subject
-  # edit the generated task.yaml
+  arctl setup TASK
   arctl approve TASK
   arctl approve TASK --confirm TOKEN
   arctl run TASK --max-experiments 3
@@ -39,7 +40,10 @@ Typical workflow:
 
 Complete command forms:
   arctl doctor [--json]
-  arctl init --repo PATH [--task-id TASK] [--json]
+  arctl init (--repo PATH | --new-repo PATH) [--workspace PATH]
+             [--task-id TASK] [--json]
+  arctl setup [TASK] [--answers FILE] [--allow-network]
+                     [--accept TOKEN] [--json]
   arctl approve [TASK] [--confirm TOKEN] [--json]
   arctl run [TASK] [--max-experiments N] [--retries N]
                     [--retry-delay SECONDS] [--json]
@@ -72,18 +76,42 @@ Run this after installation or when a sandbox/runtime preflight fails.
 ## `arctl init -h`
 
 ```text
-usage: arctl init [-h] [--json] --repo PATH [--task-id TASK]
+usage: arctl init [-h] [--json] [--repo PATH] [--new-repo PATH] [--workspace PATH] [--task-id TASK]
 
-Create TASK storage and a starter task.yaml. This does not approve or run research.
+Create visible setup storage for an existing or new Python subject repository.
 
 options:
-  -h, --help      show this help message and exit
-  --json          emit one stable machine-readable JSON object
-  --repo PATH     local Git worktree containing the policy to improve
-  --task-id TASK  task ID; defaults to the repository directory name
+  -h, --help        show this help message and exit
+  --json            emit one stable machine-readable JSON object
+  --repo PATH       existing clean local Git worktree containing the policy to improve
+  --new-repo PATH   create a visible workspace and new subject repository at PATH
+  --workspace PATH  workspace path; defaults to a visible sibling of an existing repo
+  --task-id TASK    task ID; defaults to the repository directory name
 
 Example:
   arctl init --repo . --task-id routing-policy
+```
+
+## `arctl setup -h`
+
+```text
+usage: arctl setup [-h] [--json] [--answers FILE] [--allow-network] [--accept TOKEN] [TASK]
+
+Run resumable pre-approval setup. Discovery is read-only; generated code and evaluator
+remain drafts until explicit setup acceptance and normal task approval.
+
+positional arguments:
+  TASK             task ID; omit when the current repository identifies exactly one task
+
+options:
+  -h, --help       show this help message and exit
+  --json           emit one stable machine-readable JSON object
+  --answers FILE   JSON object mapping every returned setup question ID to an answer
+  --allow-network  allow uv to fetch declared Python dependencies during setup
+  --accept TOKEN   accept the verified setup trees and create their local Git commits
+
+AI operators should use --json, submit the returned question IDs with --answers,
+and obtain permission before using --accept.
 ```
 
 ## `arctl approve -h`

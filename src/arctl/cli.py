@@ -7,6 +7,7 @@ import json
 import math
 import os
 import shlex
+import subprocess
 import sys
 import textwrap
 import threading
@@ -55,6 +56,19 @@ def _data_root(argument: Path | None) -> Path:
     configured = os.environ.get("ARCTL_DATA")
     if configured:
         return Path(configured).resolve()
+    current = Path.cwd().resolve()
+    for parent in (current, *current.parents):
+        local = parent / ".arctl-data"
+        if local.is_dir():
+            return local.resolve()
+    completed = subprocess.run(
+        ["git", "-C", str(current), "config", "--local", "--get", "arctl.dataRoot"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode == 0 and completed.stdout.strip():
+        return Path(completed.stdout.strip()).resolve()
     return Path.home() / ".local" / "share" / "arctl"
 
 
@@ -308,6 +322,11 @@ def _approval_table(payload: dict[str, Any]) -> str:
     ]
     if summary.get("candidate_review"):
         rows.insert(3, ("Policy guard", safe_terminal_text(summary["candidate_review"])))
+    if summary.get("evaluator_pattern"):
+        rows.insert(
+            4,
+            ("Evaluator pattern", safe_terminal_text(summary["evaluator_pattern"])),
+        )
     return tabulate(
         rows,
         headers=("Approval item", "Value"),
@@ -441,6 +460,49 @@ def _emit_human(
             detail = entry.get("claim") or entry.get("kind")
             outcome = entry.get("decision") or entry.get("rejection_code") or "saved"
             print(f"- {entry['entry_id']} · {outcome} · {safe_terminal_text(str(detail))}")
+    elif state == "SETUP_ANSWERS_REQUIRED":
+        print(payload["message"])
+        for item in payload["questions"]:
+            print(f"\n{item['id']}: {safe_terminal_text(item['prompt'])}")
+            print("  Proposed: " + safe_terminal_text(item["proposed_answer"], limit=240))
+            for citation in item["citations"][:3]:
+                print(
+                    "  Evidence: "
+                    + safe_terminal_text(citation["path"])
+                    + ":"
+                    + safe_terminal_text(citation["location"])
+                )
+    elif state in {"READY_FOR_SETUP_ACCEPTANCE", "REVIEW_FAILED"}:
+        from tabulate import tabulate
+
+        readiness = payload.get("readiness") or {}
+        rows = [
+            (name.replace("_", " ").title(), value)
+            for name, value in readiness.items()
+            if name
+            not in {"schema_version", "findings", "tree_hashes", "acceptance_token"}
+        ]
+        print(payload["message"])
+        print(tabulate(rows, headers=("Setup item", "State"), tablefmt="simple_grid"))
+        for finding in readiness.get("findings", []):
+            print("- " + safe_terminal_text(finding.get("message", ""), limit=180))
+        if state == "READY_FOR_SETUP_ACCEPTANCE":
+            print(f"Acceptance token: {payload['acceptance_token']}")
+            print(f"Accept command: {payload['next_command']}")
+    elif state in {"SETUP_DISCOVERY_REQUIRED", "READY_FOR_APPROVAL"}:
+        print(payload["message"])
+    elif state == "SETUP_STATUS":
+        from tabulate import tabulate
+
+        rows = [("Stage", payload["setup_state"])]
+        readiness = payload.get("readiness") or {}
+        rows.extend(
+            (name.replace("_", " ").title(), value)
+            for name, value in readiness.items()
+            if name not in {"schema_version", "findings", "tree_hashes", "acceptance_token"}
+        )
+        print(payload["message"])
+        print(tabulate(rows, headers=("Setup item", "State"), tablefmt="simple_grid"))
     elif state == "TASK_DRAFT":
         print(payload["message"])
         for artifact in payload["artifacts"]:
@@ -744,47 +806,245 @@ def _doctor() -> dict[str, Any]:
     }
 
 
-def _init(repo_argument: Path, task_id: str | None, data_argument: Path | None) -> dict[str, Any]:
-    repo = repo_argument.resolve()
-    if not (repo / ".git").exists():
-        raise StateError(f"target is not a Git worktree: {repo}")
-    identifier = task_id or repo.name
+def _init(
+    repo_argument: Path | None,
+    new_repo_argument: Path | None,
+    workspace_argument: Path | None,
+    task_id: str | None,
+    data_argument: Path | None,
+) -> dict[str, Any]:
+    from .setup import initialize_setup
+
+    if (repo_argument is None) == (new_repo_argument is None):
+        raise StateError("init requires exactly one of --repo or --new-repo")
+    if new_repo_argument is not None and workspace_argument is not None:
+        raise StateError("--workspace cannot be combined with --new-repo")
+    if (
+        data_argument is not None
+        and repo_argument is not None
+        and new_repo_argument is None
+        and workspace_argument is None
+    ):
+        repo = repo_argument.resolve()
+        if not (repo / ".git").exists():
+            raise StateError(f"target is not a Git worktree: {repo}")
+        identifier = task_id or repo.name
+        try:
+            validate_task_id(identifier)
+        except ArctlError as error:
+            raise StateError("task ID contains unsafe path or Git-ref characters") from error
+        task_directory = data_argument.resolve() / "tasks" / identifier
+        task_file = task_directory / "task.yaml"
+        if task_file.exists():
+            raise StateError(f"task already exists: {identifier}")
+        task_directory.mkdir(parents=True, exist_ok=False)
+        atomic_write_text(
+            task_file,
+            _TASK_TEMPLATE.format(
+                task_id=json.dumps(identifier),
+                repo=json.dumps(str(repo)),
+                environment_commit=resolve_commit(repo, "HEAD"),
+            ),
+        )
+        return _payload(
+            success=True,
+            state="TASK_DRAFT",
+            task_id=identifier,
+            action_required=True,
+            allowed_actions=("edit", "approve"),
+            next_command=f"arctl approve {identifier}",
+            message=f"Created starter task {identifier}; edit it before approval.",
+            artifacts=({"kind": "task", "path": str(task_file)},),
+        )
+    if new_repo_argument is not None:
+        workspace = new_repo_argument.resolve()
+        repo = None
+        identifier = task_id or workspace.name
+        new_repo = True
+    else:
+        assert repo_argument is not None
+        repo = repo_argument.resolve()
+        workspace = (
+            workspace_argument.resolve()
+            if workspace_argument is not None
+            else repo.parent / f"{repo.name}-research"
+        )
+        identifier = task_id or repo.name
+        new_repo = False
     try:
         validate_task_id(identifier)
-    except KeyboardInterrupt:
-        if arguments.command != "run":
-            raise
-        from .operations import request_stop
-
-        data_root = _data_root(arguments.data)
-        task = _located(data_root, arguments.task_id)
-        request_stop(task)
-        payload = _run(data_root, arguments.task_id, arguments.max_experiments)
     except ArctlError as error:
         raise StateError("task ID contains unsafe path or Git-ref characters") from error
-    task_directory = _data_root(data_argument) / "tasks" / identifier
-    task_file = task_directory / "task.yaml"
-    if task_file.exists():
-        raise StateError(f"task already exists: {identifier}")
-    task_directory.mkdir(parents=True, exist_ok=False)
-    atomic_write_text(
-        task_file,
-        _TASK_TEMPLATE.format(
-            task_id=json.dumps(identifier),
-            repo=json.dumps(str(repo)),
-            environment_commit=resolve_commit(repo, "HEAD"),
-        ),
+    data_root = data_argument.resolve() if data_argument is not None else workspace / ".arctl-data"
+    record = initialize_setup(
+        data_root=data_root,
+        workspace=workspace,
+        repo=repo,
+        new_repo=new_repo,
+        task_id=identifier,
     )
     return _payload(
         success=True,
-        state="TASK_DRAFT",
+        state="SETUP_DISCOVERY_REQUIRED",
         task_id=identifier,
         action_required=True,
-        allowed_actions=("edit", "approve"),
-        next_command=f"arctl approve {identifier}",
-        message=f"Created starter task {identifier}; edit it before approval.",
-        artifacts=({"kind": "task", "path": str(task_file)},),
+        allowed_actions=("setup",),
+        next_command=f"arctl setup {identifier}",
+        message=f"Created Python research workspace {record['workspace']}.",
+        artifacts=(
+            {"kind": "workspace", "path": record["workspace"]},
+            {"kind": "setup", "path": str(data_root / "tasks" / identifier)},
+        ),
     )
+
+
+def _setup(
+    *,
+    data_root: Path,
+    task_id: str | None,
+    answers_path: Path | None,
+    allow_network: bool,
+    acceptance: str | None,
+    interactive: bool,
+) -> dict[str, Any]:
+    from .setup import (
+        accept_setup,
+        build_setup,
+        discover_setup,
+        load_setup,
+        save_answers,
+    )
+
+    directory, record = load_setup(data_root, task_id)
+    identifier = record["task_id"]
+    state = record["state"]
+    discovery: dict[str, Any] | None = None
+    if state == "DISCOVERY_REQUIRED":
+        discovery = discover_setup(directory, record)
+        record = json.loads((directory / "setup.json").read_text())
+        state = record["state"]
+    if state == "ANSWERS_REQUIRED" and answers_path is not None:
+        try:
+            raw_answers = json.loads(answers_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise StateError("setup answers file is missing or invalid") from error
+        if isinstance(raw_answers, dict) and set(raw_answers) == {"answers"}:
+            raw_answers = raw_answers["answers"]
+        if not isinstance(raw_answers, dict):
+            raise StateError("setup answers file must contain one answers object")
+        save_answers(directory, record, raw_answers)
+        record = json.loads((directory / "setup.json").read_text())
+        state = record["state"]
+    elif state == "ANSWERS_REQUIRED" and interactive and sys.stdin.isatty():
+        if discovery is None:
+            discovery = json.loads(
+                (directory / "setup" / "discovery.public.json").read_text()
+            )
+        answers: dict[str, str] = {}
+        for item in discovery["questions"]:
+            print(f"\n{item['prompt']}")
+            print("Proposed: " + item["proposed_answer"])
+            entered = input("Answer [Enter accepts proposal]: ").strip()
+            answers[item["id"]] = entered or item["proposed_answer"]
+        save_answers(directory, record, answers)
+        record = json.loads((directory / "setup.json").read_text())
+        state = record["state"]
+    if state in {"BUILD_REQUIRED", "REVIEW_FAILED"}:
+        readiness = build_setup(
+            directory,
+            record,
+            allow_network=allow_network,
+        )
+        record = json.loads((directory / "setup.json").read_text())
+        state = record["state"]
+    else:
+        readiness_path = directory / "setup" / "readiness.public.json"
+        readiness = (
+            json.loads(readiness_path.read_text()) if readiness_path.is_file() else None
+        )
+    if (
+        state == "READY_FOR_SETUP_ACCEPTANCE"
+        and acceptance is None
+        and interactive
+        and sys.stdin.isatty()
+    ):
+        assert readiness is not None
+        if input("Accept and commit this verified setup? [y/N]: ").strip().lower() in {
+            "y",
+            "yes",
+        }:
+            acceptance = readiness["acceptance_token"]
+    if state == "READY_FOR_SETUP_ACCEPTANCE" and acceptance is not None:
+        task = accept_setup(directory, record, acceptance)
+        state = "READY_FOR_APPROVAL"
+        return {
+            **_payload(
+                success=True,
+                state=state,
+                task_id=identifier,
+                action_required=True,
+                allowed_actions=("approve",),
+                next_command=f"arctl approve {identifier}",
+                message="Setup accepted; the exact generated task is ready for approval.",
+                log_path=str(directory),
+            ),
+            "task": {"schema_version": task.schema_version, "repo": str(task.repo)},
+            "readiness": readiness,
+        }
+    if state == "ANSWERS_REQUIRED":
+        if discovery is None:
+            discovery = json.loads(
+                (directory / "setup" / "discovery.public.json").read_text()
+            )
+        return {
+            **_payload(
+                success=True,
+                state="SETUP_ANSWERS_REQUIRED",
+                task_id=identifier,
+                action_required=True,
+                allowed_actions=("setup",),
+                next_command=f"arctl setup {identifier} --answers ANSWERS.json",
+                message="Confirm or revise the cited setup requirements.",
+                log_path=str(directory / "setup"),
+            ),
+            "questions": discovery["questions"],
+            "answer_schema": {
+                "type": "object",
+                "required": [item["id"] for item in discovery["questions"]],
+            },
+        }
+    if state == "READY_FOR_SETUP_ACCEPTANCE":
+        assert readiness is not None
+        token = readiness["acceptance_token"]
+        return {
+            **_payload(
+                success=True,
+                state=state,
+                task_id=identifier,
+                action_required=True,
+                allowed_actions=("setup_accept",),
+                next_command=f"arctl setup {identifier} --accept {token}",
+                message="Generated workspace passed setup review and awaits acceptance.",
+                log_path=str(directory / "setup"),
+            ),
+            "readiness": readiness,
+            "acceptance_token": token,
+        }
+    return {
+        **_payload(
+            success=state != "REVIEW_FAILED",
+            state=state,
+            task_id=identifier,
+            action_required=True,
+            allowed_actions=("setup",),
+            next_command=f"arctl setup {identifier}",
+            message="Setup review found issues that must be corrected."
+            if state == "REVIEW_FAILED"
+            else "Setup is incomplete.",
+            log_path=str(directory / "setup"),
+        ),
+        "readiness": readiness,
+    }
 
 
 def _approve(
@@ -826,6 +1086,12 @@ def _approve(
             ]
             for direction in ("higher", "lower", "contextual")
         }
+        setup_path = located.directory / "setup.json"
+        setup_record = (
+            json.loads(setup_path.read_text(encoding="utf-8"))
+            if setup_path.is_file()
+            else {}
+        )
         return {
             **_payload(
                 success=True,
@@ -867,6 +1133,7 @@ def _approve(
                 "environment": ", ".join(
                     source.identifier for source in located.config.environment_sources
                 ),
+                "evaluator_pattern": setup_record.get("evaluator_pattern"),
                 "candidate_review": (
                     f"Reviewer + {len(located.config.candidate_review.checks)} "
                     f"tripwire(s); {located.config.candidate_review.repair_attempts} repair."
@@ -924,6 +1191,35 @@ def _located(data_root: Path, task_id: str | None):
 
 def _status(data_root: Path, task_id: str | None) -> dict[str, Any]:
     from .operations import task_status
+    from .setup import load_setup
+
+    try:
+        setup_directory, setup = load_setup(data_root, task_id)
+    except StateError:
+        setup_directory = None
+        setup = None
+    if setup is not None and not (setup_directory / "task.yaml").is_file():
+        identifier = setup["task_id"]
+        readiness_path = setup_directory / "setup" / "readiness.public.json"
+        readiness = (
+            json.loads(readiness_path.read_text(encoding="utf-8"))
+            if readiness_path.is_file()
+            else None
+        )
+        return {
+            **_payload(
+                success=True,
+                state="SETUP_STATUS",
+                task_id=identifier,
+                action_required=True,
+                allowed_actions=("setup",),
+                next_command=f"arctl setup {identifier}",
+                message=f"Task {identifier} setup is {setup['state']}.",
+                log_path=str(setup_directory / "setup"),
+            ),
+            "setup_state": setup["state"],
+            "readiness": readiness,
+        }
 
     task = _located(data_root, task_id)
     status = task_status(task)
@@ -1292,7 +1588,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Typical workflow:\n"
             "  arctl doctor\n"
             "  arctl init --repo /path/to/subject\n"
-            "  # edit the generated task.yaml\n"
+            "  arctl setup TASK\n"
             "  arctl approve TASK\n"
             "  arctl approve TASK --confirm TOKEN\n"
             "  arctl run TASK --max-experiments 3\n"
@@ -1300,7 +1596,10 @@ def build_parser() -> argparse.ArgumentParser:
             "\n"
             "Complete command forms:\n"
             "  arctl doctor [--json]\n"
-            "  arctl init --repo PATH [--task-id TASK] [--json]\n"
+            "  arctl init (--repo PATH | --new-repo PATH) [--workspace PATH]\n"
+            "             [--task-id TASK] [--json]\n"
+            "  arctl setup [TASK] [--answers FILE] [--allow-network]\n"
+            "                     [--accept TOKEN] [--json]\n"
             "  arctl approve [TASK] [--confirm TOKEN] [--json]\n"
             "  arctl run [TASK] [--max-experiments N] [--retries N]\n"
             "                    [--retry-delay SECONDS] [--json]\n"
@@ -1360,22 +1659,60 @@ def build_parser() -> argparse.ArgumentParser:
 
     init = command(
         "init",
-        "create an editable task draft for a subject repository",
-        "Create TASK storage and a starter task.yaml. This does not approve or run research.",
+        "create a guided Python research workspace",
+        "Create visible setup storage for an existing or new Python subject repository.",
         "Example:\n  arctl init --repo . --task-id routing-policy",
     )
     json_option(init)
     init.add_argument(
         "--repo",
         type=Path,
-        required=True,
         metavar="PATH",
-        help="local Git worktree containing the policy to improve",
+        help="existing clean local Git worktree containing the policy to improve",
+    )
+    init.add_argument(
+        "--new-repo",
+        type=Path,
+        metavar="PATH",
+        help="create a visible workspace and new subject repository at PATH",
+    )
+    init.add_argument(
+        "--workspace",
+        type=Path,
+        metavar="PATH",
+        help="workspace path; defaults to a visible sibling of an existing repo",
     )
     init.add_argument(
         "--task-id",
         metavar="TASK",
         help="task ID; defaults to the repository directory name",
+    )
+
+    setup = command(
+        "setup",
+        "discover, build, review, and accept a Python task workspace",
+        "Run resumable pre-approval setup. Discovery is read-only; generated code and evaluator\n"
+        "remain drafts until explicit setup acceptance and normal task approval.",
+        "AI operators should use --json, submit the returned question IDs with --answers,\n"
+        "and obtain permission before using --accept.",
+    )
+    json_option(setup)
+    task_argument(setup)
+    setup.add_argument(
+        "--answers",
+        type=Path,
+        metavar="FILE",
+        help="JSON object mapping every returned setup question ID to an answer",
+    )
+    setup.add_argument(
+        "--allow-network",
+        action="store_true",
+        help="allow uv to fetch declared Python dependencies during setup",
+    )
+    setup.add_argument(
+        "--accept",
+        metavar="TOKEN",
+        help="accept the verified setup trees and create their local Git commits",
     )
 
     approve = command(
@@ -1540,7 +1877,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "doctor":
             payload = _doctor()
         elif arguments.command == "init":
-            payload = _init(arguments.repo, arguments.task_id, arguments.data)
+            payload = _init(
+                arguments.repo,
+                arguments.new_repo,
+                arguments.workspace,
+                arguments.task_id,
+                arguments.data,
+            )
+        elif arguments.command == "setup":
+            payload = _setup(
+                data_root=_data_root(arguments.data),
+                task_id=arguments.task_id,
+                answers_path=arguments.answers,
+                allow_network=arguments.allow_network,
+                acceptance=arguments.accept,
+                interactive=not arguments.json,
+            )
         elif arguments.command == "approve":
             payload = _approve(
                 data_root=_data_root(arguments.data),
@@ -1623,6 +1975,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             next_command = "./install.sh"
         elif arguments.command == "init":
             next_command = "arctl doctor"
+        elif arguments.command == "setup":
+            next_command = f"arctl setup {identifier}" if identifier else "arctl setup"
         else:
             next_command = (
                 f"arctl status {identifier}" if identifier else "arctl status"

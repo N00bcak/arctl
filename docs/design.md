@@ -101,7 +101,12 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    D[TASK_DRAFT] -->|approval preview and human token| A[APPROVED]
+    I[Guided init] --> Q[Public discovery and cited questions]
+    Q --> B[Generate Python/uv workspace on local setup branch]
+    B --> R[Public checks and independent setup review]
+    R -->|findings| B
+    R -->|setup token accepted| D[TASK_DRAFT]
+    D -->|approval preview and human token| A[APPROVED]
     A -->|fixed trials| READY[READY]
     A -->|trials: auto| CAL[CALIBRATION_REQUIRED]
     CAL -->|pilot succeeds or ceiling fallback| READY
@@ -116,6 +121,13 @@ flowchart TD
     FAIL -->|safe recovery or retry| WORK
     STOP -->|explicit later run| WORK
 ```
+
+Guided setup is resumable pre-approval scaffolding, not research and not
+scientific approval. Its agents cannot read evaluator-private data. Generated
+public trees are hashed after review; acceptance refuses changed trees, creates
+local commits, and never pushes. Existing repositories are changed only on an
+`arctl/setup-*` branch. The generated evaluator includes public protocol tests,
+but the human still owns the evaluator's mathematical validity at `approve`.
 
 `max_experiments` is an approval-locked lifetime ceiling or `unlimited`. The
 `--max-experiments` option is only a smaller per-invocation bound. Reaching the

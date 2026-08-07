@@ -455,7 +455,8 @@ and prints the activation command. The script must be safe to rerun and must not
 Write files through a temporary file and rename so half-written files are not used. Only one `arctl` process may hold the task lock. SQLite may help with search and reports, but Git and these files stay the source of truth.
 ```bash
 arctl doctor
-arctl init --repo PATH
+arctl init (--repo PATH | --new-repo PATH) [--workspace PATH]
+arctl setup TASK_ID [--answers FILE] [--allow-network] [--accept TOKEN]
 arctl approve TASK_ID
 arctl run TASK_ID [--max-experiments N] [--retries N] [--retry-delay SECONDS]
 arctl status TASK_ID
@@ -464,13 +465,13 @@ arctl report TASK_ID
 arctl history TASK_ID [--query TEXT] [--path GLOB] [--decision VALUE]
 arctl inspect TASK_ID EXPERIMENT_ID
 ```
-`TASK_ID` and `EXPERIMENT_ID` may be omitted when the current repo and context identify exactly one target. `doctor` checks Git, Codex, sandbox rules, and runtime needs. `init` creates task storage and starter YAML with `trials: auto`. `approve` checks and locks the task file, evaluator commit, and manifest, then requires the trust-boundary confirmation from Section 9. `run` first calibrates when required, ensures a strategy, then plans, implements, and runs experiments until explicitly stopped, operationally blocked, or limited by an approved finite ceiling. `status` shows current strategy, planning, search, and experiment work. `history` searches the public exploration ledger. `stop` stops safely. `report` shows progress and aggregate results. `inspect` shows the safe artifact inventory and aggregate record; trusted humans audit private files with normal file tools.
+`TASK_ID` and `EXPERIMENT_ID` may be omitted when the current repo and context identify exactly one target. `doctor` checks Git, Codex, sandbox rules, and runtime needs. `init` creates a visible guided workspace. `setup` discovers cited requirements from public repository material, confirms them interactively or from JSON, generates a Python/uv subject adapter, public environment, evaluator, and task draft, and independently reviews their public contract. Setup agents cannot read hidden evaluator data. Existing subjects use a local setup branch; acceptance hashes and commits the reviewed trees but never pushes. Review findings may be repaired in later immutable attempts. This setup token confirms generated files only; `approve` remains the separate human trust boundary for the evaluator's mathematics and exact locked protocol. Manual task authoring remains supported. `run` first calibrates when required, ensures a strategy, then plans, implements, and runs experiments until explicitly stopped, operationally blocked, or limited by an approved finite ceiling. `status` shows setup or research work. `history` searches the public exploration ledger. `stop` stops safely. `report` shows progress and aggregate results. `inspect` shows the safe artifact inventory and aggregate record; trusted humans audit private files with normal file tools.
 
 The novice setup path is:
 ```text
 arctl doctor
 arctl init --repo .
-# edit the generated task file
+arctl setup
 arctl approve
 arctl run
 ```
@@ -488,12 +489,12 @@ The MVP is done when one toy repo and one real repo show:
 9. Only `arctl` decides: positive lower bound accepts, flagged acceptance waits for its suspect result, positive uncertainty archives, and non-positive effect rejects.
 10. Candidate failure gives `REJECT`, system or incoherent-evidence failure gives `INVALID`, and only final `ACCEPT` changes the champion.
 11. Later research sessions see only checked aggregate final results and advisory public reflections; private per-trial evidence remains auditable from the experiment folder and Git history.
-12. All nine commands infer unambiguous tasks, explain validity in human output, and provide schema-valid sanctioned `--json` output with a next command and without private evidence.
+12. All ten commands infer unambiguous tasks, explain validity in human output, and provide schema-valid sanctioned `--json` output with a next command and without private evidence.
 13. AI-operated approval reports that human permission is required; approval, status, stop, errors, and the novice setup path require no source reading.
 14. Semantic paired telemetry exposes both arms and a derived delta; required reflection cannot alter verdicts, blocks later research on failure, and explicitly reports causal evidence gaps.
 15. Strategy observations cite approval-locked environment sources and cannot read the champion; planners compare every behavior against the champion and freeze the mechanism before Terra-medium implementation and review, while Sol-medium reflection remains advisory.
-15. A real task runs several experiments without repeated approval, preserves failed ideas, and reports the best-effort and non-search-wide limits.
-16. `install.sh` creates a working local editable installation and exposes `arctl` without PyPI, `sudo`, or system-Python changes.
+16. A real task runs several experiments without repeated approval, preserves failed ideas, and reports the best-effort and non-search-wide limits.
+17. `install.sh` creates a working local editable installation and exposes `arctl` without PyPI, `sudo`, or system-Python changes.
 
 ## 15. Final rule
 When rules conflict:
