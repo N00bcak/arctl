@@ -30,6 +30,13 @@ Put known requirements in `ARCTL_SETUP.md` at the subject root. When it is
 absent, `init` creates a visible template in the research workspace. Discovery
 shows one canonical proposal and asks only about material gaps or conflicts;
 related trial, pairing, seed, and hidden-data details form one clarification.
+Controller-owned comparator freezing, seed non-reuse, decision mapping, and
+unscored operational failures are shown as fixed rules, never delegated back to
+the human. Setup provides no default for an unsupported numeric or statistical
+choice.
+The confirmation table is persisted as the canonical setup contract. Generated
+task and manifest values are typed and validated before dependency installation;
+one automatic repair receives exact validator errors before setup fails loudly.
 Use `--answers FILE --json` for agent orchestration. Setup agents and uv may use
 the network by default; `--offline` disables agent internet access and requires
 cached dependencies. Manual task authoring remains supported with an explicit

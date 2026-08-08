@@ -759,6 +759,14 @@ class CliTests(unittest.TestCase):
         self.assertIn("Details: /tmp/demo/setup", rendered)
         self.assertIn("Retry: arctl setup demo", rendered)
 
+    def test_setup_interrupt_is_concise_and_resumable(self) -> None:
+        with mock.patch("arctl.cli._setup", side_effect=KeyboardInterrupt):
+            code, output = self.run_cli(["setup", "demo", "--json"])
+        self.assertEqual(code, 0)
+        payload = json.loads(output)
+        self.assertEqual(payload["state"], "SETUP_STOPPED")
+        self.assertEqual(payload["allowed_actions"], ["setup", "status"])
+
     def test_human_status_discloses_ceiling_fallback(self) -> None:
         payload = {
             "schema_version": 1,

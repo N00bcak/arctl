@@ -8,11 +8,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import yaml
-
-from arctl.errors import StateError
+from arctl.errors import StateError, ValidationError
 from arctl.setup import (
     QUESTION_IDS,
+    SETUP_CONTROLLER_CONTRACT,
     accept_setup,
     build_setup,
     discover_setup,
@@ -149,7 +148,7 @@ class GuidedSetupTests(unittest.TestCase):
             "max_experiments": 10,
         }
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "summary": "Generated a minimal Python task.",
             "dependencies": [],
             "subject_files": [
@@ -160,15 +159,12 @@ class GuidedSetupTests(unittest.TestCase):
             ],
             "evaluator_files": [
                 {
-                    "path": "evaluator.manifest.json",
-                    "content": json.dumps(manifest),
-                },
-                {
                     "path": "test_evaluator.py",
                     "content": "import unittest\n\nclass EvaluatorContractTest(unittest.TestCase):\n    def test_protocol(self):\n        self.assertTrue(True)\n",
                 },
             ],
-            "task_yaml": yaml.safe_dump(task, sort_keys=False),
+            "task": task,
+            "evaluator_manifest": manifest,
         }
 
     def test_complete_setup_accepts_reviewed_trees_and_writes_task_v5(self) -> None:
@@ -208,8 +204,8 @@ class GuidedSetupTests(unittest.TestCase):
             [
                 "brief + repository discovery",
                 "generation",
-                "dependencies",
                 "task validation",
+                "dependencies",
                 "evaluator checks",
                 "public checks",
                 "setup review",
@@ -255,6 +251,46 @@ class GuidedSetupTests(unittest.TestCase):
         )
         self.assertEqual(set(saved["answers"]), {"trial_protocol"})
         self.assertEqual(set(saved["overrides"]), {"runtime_budget"})
+        resolved = json.loads(
+            (self.directory / "setup" / "resolved.public.json").read_text()
+        )
+        by_id = {item["id"]: item["resolved_answer"] for item in resolved["fields"]}
+        self.assertIn("Human clarification: Use paired fresh episodes.", by_id["randomness"])
+        self.assertEqual(by_id["runtime_budget"], "Five minutes per batch.")
+
+    def test_discovery_receives_fixed_controller_rules_and_no_guessing_instruction(self) -> None:
+        prompts: list[str] = []
+
+        def builder(worktree: Path, scratch: Path, schema: Path, prompt: str):
+            prompts.append(prompt)
+            return output_builder("discovery.public.json", self.discovery())(
+                worktree, scratch, schema, prompt
+            )
+
+        discover_setup(self.directory, self.record, command_builder=builder)
+        self.assertIn("controller_owned_contract", prompts[0])
+        self.assertIn("Do not invent numeric limits", prompts[0])
+        self.assertIn("Positive lower bound accepts", SETUP_CONTROLLER_CONTRACT["decision"])
+
+    def test_unsupported_clarification_has_no_acceptable_empty_default(self) -> None:
+        discovery = self.discovery()
+        discovery["open_questions"] = [
+            {
+                "id": "evaluator",
+                "prompt": "Which uncertainty method should be used?",
+                "why": "Neither brief nor repository specifies one.",
+                "proposed_answer": None,
+                "affected_fields": ["evaluator_pattern"],
+            }
+        ]
+        discover_setup(
+            self.directory,
+            self.record,
+            command_builder=output_builder("discovery.public.json", discovery),
+        )
+        _, record = load_setup(self.data, "demo")
+        with self.assertRaisesRegex(ValidationError, "every open clarification"):
+            save_answers(self.directory, record, {})
 
     def test_v1_discovery_consolidates_repeated_pairing_questions(self) -> None:
         old = {
@@ -355,3 +391,91 @@ class GuidedSetupTests(unittest.TestCase):
         self.assertEqual(
             sorted(path.name for path in attempts.iterdir()), ["0001", "0002"]
         )
+
+    def test_invalid_contract_is_repaired_once_before_dependencies(self) -> None:
+        discover_setup(
+            self.directory,
+            self.record,
+            command_builder=output_builder("discovery.public.json", self.discovery()),
+        )
+        _, record = load_setup(self.data, "demo")
+        save_answers(self.directory, record, {})
+        stale = Path(record["evaluator"]) / "manifest.json"
+        stale.write_text("{}\n", encoding="utf-8")
+        old_output = (
+            self.directory
+            / "setup"
+            / "build"
+            / "attempts"
+            / "0000"
+            / "output"
+        )
+        old_output.mkdir(parents=True)
+        (old_output / "build.public.json").write_text(
+            json.dumps({"evaluator_files": [{"path": "manifest.json"}]}),
+            encoding="utf-8",
+        )
+        values = [
+            {
+                **self.build_value(),
+                "task": {"schema_version": 5, "subject": {}},
+                "evaluator_manifest": {"schema_version": 3, "name": "obsolete"},
+            },
+            self.build_value(),
+        ]
+        prompts: list[str] = []
+
+        def builder(worktree: Path, scratch: Path, schema: Path, prompt: str):
+            prompts.append(prompt)
+            return output_builder("build.public.json", values.pop(0))(
+                worktree, scratch, schema, prompt
+            )
+
+        events: list[dict] = []
+        _, record = load_setup(self.data, "demo")
+        readiness = build_setup(
+            self.directory,
+            record,
+            offline=False,
+            command_builder=builder,
+            review_command_builder=output_builder(
+                "review.public.json",
+                {"schema_version": 1, "summary": "No findings.", "findings": []},
+            ),
+            progress=lambda event: events.append(dict(event)),
+        )
+        self.assertEqual(readiness["review"], "ready")
+        self.assertIn("task contract:", prompts[1])
+        self.assertIn("evaluator manifest contract:", prompts[1])
+        stages = [event["stage"] for event in events]
+        self.assertLess(stages.index("contract repair"), stages.index("dependencies"))
+        self.assertFalse(stale.exists())
+
+    def test_invalid_contract_after_repair_reports_exact_error(self) -> None:
+        discover_setup(
+            self.directory,
+            self.record,
+            command_builder=output_builder("discovery.public.json", self.discovery()),
+        )
+        _, record = load_setup(self.data, "demo")
+        save_answers(self.directory, record, {})
+        invalid = {
+            **self.build_value(),
+            "task": {},
+            "evaluator_manifest": {},
+        }
+        events: list[dict] = []
+        _, record = load_setup(self.data, "demo")
+        with self.assertRaisesRegex(
+            StateError,
+            "invalid after one repair: initial validation: task contract: "
+            "task fields differ.*repair: task contract:.*evaluator manifest contract",
+        ):
+            build_setup(
+                self.directory,
+                record,
+                offline=False,
+                command_builder=output_builder("build.public.json", invalid),
+                progress=lambda event: events.append(dict(event)),
+            )
+        self.assertNotIn("dependencies", [event["stage"] for event in events])

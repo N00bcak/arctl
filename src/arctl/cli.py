@@ -357,7 +357,9 @@ def _setup_proposal_table(proposal: Sequence[dict[str, Any]]) -> str:
     rows = [
         (
             item["id"].replace("_", " ").title(),
-            safe_terminal_text(item["proposed_answer"], limit=170),
+            safe_terminal_text(
+                item.get("resolved_answer", item["proposed_answer"]), limit=170
+            ),
             item.get("source", "repository"),
         )
         for item in proposal
@@ -505,7 +507,11 @@ def _emit_human(
         print(_setup_proposal_table(payload["proposal"]))
         for item in payload["open_questions"]:
             print(f"\n{item['id']}: {safe_terminal_text(item['prompt'])}")
-            print("  Proposed: " + safe_terminal_text(item["proposed_answer"], limit=240))
+            if item["proposed_answer"] is not None:
+                print(
+                    "  Proposed: "
+                    + safe_terminal_text(item["proposed_answer"], limit=240)
+                )
     elif state in {"READY_FOR_SETUP_ACCEPTANCE", "REVIEW_FAILED"}:
         from tabulate import tabulate
 
@@ -972,6 +978,7 @@ def _setup(
         build_setup,
         discover_setup,
         load_setup,
+        resolve_fields,
         save_answers,
         setup_presentation,
     )
@@ -1036,10 +1043,19 @@ def _setup(
         answers: dict[str, str] = {}
         for item in presentation["open_questions"]:
             print(f"\n{item['prompt']}")
-            print("Proposed: " + item["proposed_answer"])
-            entered = input("Answer [Enter accepts proposal]: ").strip()
-            answers[item["id"]] = entered or item["proposed_answer"]
+            proposed = item["proposed_answer"]
+            if proposed is not None:
+                print("Proposed: " + proposed)
+                entered = input("Answer [Enter accepts proposal]: ").strip()
+                answers[item["id"]] = entered or proposed
+            else:
+                entered = ""
+                while not entered:
+                    entered = input("Answer [required]: ").strip()
+                answers[item["id"]] = entered
         overrides: dict[str, str] = {}
+        print("\nResolved setup")
+        print(_setup_proposal_table(resolve_fields(presentation, answers, overrides)))
         decision = input("\nUse this setup? [Y/edit/n]: ").strip().lower()
         if decision in {"n", "no"}:
             raise StateError("setup confirmation cancelled")
@@ -1058,6 +1074,10 @@ def _setup(
                 changed = input(f"{item['id']}: ").strip()
                 if changed:
                     overrides[item["id"]] = changed
+            print("\nResolved setup")
+            print(_setup_proposal_table(resolve_fields(presentation, answers, overrides)))
+            if input("\nUse this setup? [Y/n]: ").strip().lower() in {"n", "no"}:
+                raise StateError("setup confirmation cancelled")
         save_answers(directory, record, answers, overrides)
         record = json.loads((directory / "setup.json").read_text())
         state = record["state"]
@@ -2079,22 +2099,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             raise StateError(f"unsupported command: {arguments.command}")
     except KeyboardInterrupt:
-        if arguments.command != "run":
+        if arguments.command == "setup":
+            identifier = arguments.task_id
+            payload = _payload(
+                success=True,
+                state="SETUP_STOPPED",
+                task_id=identifier,
+                action_required=True,
+                allowed_actions=("setup", "status"),
+                next_command=f"arctl setup {identifier}" if identifier else "arctl setup",
+                message="Setup stopped safely; no unanswered requirements were saved.",
+            )
+        elif arguments.command != "run":
             raise
-        from .operations import request_stop
+        else:
+            from .operations import request_stop
 
-        data_root = _data_root(arguments.data)
-        task = _located(data_root, arguments.task_id)
-        request_stop(task)
-        payload = _run(
-            data_root,
-            arguments.task_id,
-            arguments.max_experiments,
-            retries=arguments.retries,
-            retry_delay=arguments.retry_delay,
-            preflight=False,
-            progress=progress_view,
-        )
+            data_root = _data_root(arguments.data)
+            task = _located(data_root, arguments.task_id)
+            request_stop(task)
+            payload = _run(
+                data_root,
+                arguments.task_id,
+                arguments.max_experiments,
+                retries=arguments.retries,
+                retry_delay=arguments.retry_delay,
+                preflight=False,
+                progress=progress_view,
+            )
     except ArctlError as error:
         if arguments.debug:
             if progress_view is not None:

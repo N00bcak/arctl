@@ -134,6 +134,15 @@ public code into one cited proposal. Repository-derived facts are review rows;
 only missing, ambiguous, contradictory, or infeasible decisions become at most
 four disjoint clarifications. Setup prints live discovery, generation,
 dependency, validation, check, and review stages with direct failure details.
+Comparator freezing, paired-batch execution, seed non-reuse, calibration
+selection, promotion mapping, and unscored operational failures are
+controller-owned invariants rather than setup questions. Unsupported trial
+counts, confidence methods, thresholds, and resource limits receive no invented
+default.
+Confirmed answers resolve into one canonical public contract consumed by both
+generation and review. The controller serializes typed task and manifest values,
+validates them before provisioning dependencies, and permits one error-directed
+contract repair. Invalid retries preserve their immutable diagnostics.
 
 `max_experiments` is an approval-locked lifetime ceiling or `unlimited`. The
 `--max-experiments` option is only a smaller per-invocation bound. Reaching the
