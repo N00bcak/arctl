@@ -4,13 +4,31 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import secrets
+from pathlib import Path
 
-from .errors import ValidationError
+from .errors import StateError, ValidationError
 
 _VERSION = b"arctl-seed-v1"
 _PHASES = frozenset({"calibration", "primary", "suspect"})
 _SUBJECTS = frozenset({"champion", "candidate", "evaluator"})
+
+
+def load_setup_preflight_seeds(task_directory: Path) -> set[int]:
+    path = task_directory / "setup" / "preflight.public.json"
+    if not path.is_file():
+        return set()
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        seeds = value["seeds"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise StateError("saved setup preflight is invalid") from error
+    if not isinstance(seeds, list) or any(
+        isinstance(seed, bool) or not isinstance(seed, int) for seed in seeds
+    ):
+        raise StateError("saved setup preflight is invalid")
+    return set(seeds)
 
 
 def new_master_seed() -> bytes:

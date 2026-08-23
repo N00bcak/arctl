@@ -102,7 +102,7 @@ flowchart LR
 ```mermaid
 flowchart TD
     I[Guided init] --> Q[Public discovery and cited questions]
-    Q --> B[Generate Python/uv workspace on local setup branch]
+    Q --> B[Generate Python/uv workspace in isolated staging]
     B --> R[Public checks and independent setup review]
     R -->|findings| B
     R -->|setup token accepted| D[TASK_DRAFT]
@@ -126,23 +126,40 @@ Guided setup is resumable pre-approval scaffolding, not research and not
 scientific approval. Its agents cannot read evaluator-private data. Generated
 public trees are hashed after review; acceptance refuses changed trees, creates
 local commits, and never pushes. Existing repositories are changed only on an
-`arctl/setup-*` branch. The generated evaluator includes public protocol tests,
+`arctl/setup-*` branch. The setup agent implements typed subject, preparation,
+calibration, scoring, and telemetry hooks. Controller-owned entrypoints compile
+Python execution descriptors into the task-v5/manifest-v3 protocol and enforce
+the declared telemetry wire shapes. Unsupported process-resource guarantees
+remain advisory instead of becoming nullable evaluator metrics. The generated evaluator includes public hook tests,
 but the human still owns the evaluator's mathematical validity at `approve`.
 Human intent comes from `ARCTL_SETUP.md` at the subject root or from the
 workspace template created by `init`. Discovery reconciles that brief with
 public code into one cited proposal. Repository-derived facts are review rows;
-only missing, ambiguous, contradictory, or infeasible decisions become at most
-four disjoint clarifications. Setup prints live discovery, generation,
+only unresolved human goals and practical constraints become at most two
+clarifications. The specialist inspects environment code and recommends the
+sampling, randomness, calibration, uncertainty, and telemetry design rather
+than delegating those mechanics to the user. Setup prints live discovery,
+generation,
 dependency, validation, check, and review stages with direct failure details.
 Comparator freezing, paired-batch execution, seed non-reuse, calibration
 selection, promotion mapping, and unscored operational failures are
-controller-owned invariants rather than setup questions. Unsupported trial
-counts, confidence methods, thresholds, and resource limits receive no invented
-default.
+controller-owned invariants rather than setup questions. Unsupported operational
+guarantees require one explicit advisory-downgrade confirmation. Recommendations state
+their assumptions and use conservative conventional choices when evidence is
+incomplete.
 Confirmed answers resolve into one canonical public contract consumed by both
 generation and review. The controller serializes typed task and manifest values,
 validates them before provisioning dependencies, and permits one error-directed
 contract repair. Invalid retries preserve their immutable diagnostics.
+An unfinished contract repair resumes from the saved generation instead of
+rerunning the expensive generation stage.
+Generated tests, protocol hooks, public checks, and the public probe run as
+bounded managed process groups inside filesystem and network sandboxes. The
+setup token binds the staging trees, task draft, owned-file list, subject base,
+and review result. A later edit clears the token; the next `arctl setup` records
+the changes, reruns only their dependent checks plus setup review, and returns a
+replacement token. Acceptance requires an empty Git index and stages only
+reviewed owned paths.
 
 `max_experiments` is an approval-locked lifetime ceiling or `unlimited`. The
 `--max-experiments` option is only a smaller per-invocation bound. Reaching the

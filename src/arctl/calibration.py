@@ -26,7 +26,7 @@ from .sandbox import (
     sandbox_command,
     sanitized_environment,
 )
-from .seeds import derive_seed, new_master_seed
+from .seeds import derive_seed, load_setup_preflight_seeds, new_master_seed
 from .storage import write_json_once
 from .trials import freeze_automatic_trial_count, load_trial_count
 
@@ -35,6 +35,24 @@ CalibrationCommandBuilder = Callable[
     Sequence[str],
 ]
 CalibrationProgress = Callable[[dict[str, Any]], None]
+
+
+def _calibration_master(task_directory: Path, count: int) -> bytes:
+    excluded = load_setup_preflight_seeds(task_directory)
+    while True:
+        master = new_master_seed()
+        derived = {
+            derive_seed(
+                master,
+                experiment_id=0,
+                phase="calibration",
+                subject="evaluator",
+                trial=index,
+            )
+            for index in range(count)
+        }
+        if not derived & excluded:
+            return master
 
 
 def _sandboxed(
@@ -293,7 +311,7 @@ def _calibrate_controller_pilot(
     if reservation_path.exists():
         reservation = _load_object(reservation_path, "calibration reservation")
     else:
-        master = new_master_seed()
+        master = _calibration_master(task_directory, calibration.ceiling)
         reservation = {
             "schema_version": 2,
             "operation": "calibrate",
@@ -609,7 +627,7 @@ def calibrate_trial_count(
     if request_path.exists():
         request = _load_object(request_path, "calibration request")
     else:
-        master = new_master_seed()
+        master = _calibration_master(task_directory, ceiling)
         request = {
             "schema_version": 1,
             "operation": "calibrate",

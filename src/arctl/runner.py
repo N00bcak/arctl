@@ -81,6 +81,7 @@ from .search import (
     validate_research_links,
     validate_planning,
 )
+from .seeds import load_setup_preflight_seeds
 from .taskio import load_manifest
 from .trials import load_trial_count, load_trial_count_record
 
@@ -1665,7 +1666,7 @@ def _run_reserved_comparison(
 
 
 def _reserved_seeds(task_directory: Path, *, excluding: Path) -> set[int]:
-    seeds: set[int] = set()
+    seeds = load_setup_preflight_seeds(task_directory)
     calibration = task_directory / "calibration.private.json"
     if calibration.is_file():
         try:

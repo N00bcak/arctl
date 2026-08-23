@@ -357,9 +357,7 @@ def _setup_proposal_table(proposal: Sequence[dict[str, Any]]) -> str:
     rows = [
         (
             item["id"].replace("_", " ").title(),
-            safe_terminal_text(
-                item.get("resolved_answer", item["proposed_answer"]), limit=170
-            ),
+            safe_terminal_text(item.get("resolved_answer", item["proposed_answer"])),
             item.get("source", "repository"),
         )
         for item in proposal
@@ -512,7 +510,11 @@ def _emit_human(
                     "  Proposed: "
                     + safe_terminal_text(item["proposed_answer"], limit=240)
                 )
-    elif state in {"READY_FOR_SETUP_ACCEPTANCE", "REVIEW_FAILED"}:
+    elif state in {
+        "READY_FOR_SETUP_ACCEPTANCE",
+        "REVIEW_FAILED",
+        "EDIT_REVIEW_FAILED",
+    }:
         from tabulate import tabulate
 
         readiness = payload.get("readiness") or {}
@@ -520,7 +522,17 @@ def _emit_human(
             (name.replace("_", " ").title(), value)
             for name, value in readiness.items()
             if name
-            not in {"schema_version", "findings", "tree_hashes", "acceptance_token"}
+            not in {
+                "schema_version",
+                "findings",
+                "tree_hashes",
+                "acceptance_token",
+                "task_contract",
+                "task_draft_sha256",
+                "review_sha256",
+                "owned_files_sha256",
+                "reviewed_owned_paths",
+            }
         ]
         print(payload["message"])
         print(tabulate(rows, headers=("Setup item", "State"), tablefmt="simple_grid"))
@@ -539,7 +551,18 @@ def _emit_human(
         rows.extend(
             (name.replace("_", " ").title(), value)
             for name, value in readiness.items()
-            if name not in {"schema_version", "findings", "tree_hashes", "acceptance_token"}
+            if name
+            not in {
+                "schema_version",
+                "findings",
+                "tree_hashes",
+                "acceptance_token",
+                "task_contract",
+                "task_draft_sha256",
+                "review_sha256",
+                "owned_files_sha256",
+                "reviewed_owned_paths",
+            }
         )
         print(payload["message"])
         print(tabulate(rows, headers=("Setup item", "State"), tablefmt="simple_grid"))
@@ -978,6 +1001,7 @@ def _setup(
         build_setup,
         discover_setup,
         load_setup,
+        review_setup_edits,
         resolve_fields,
         save_answers,
         setup_presentation,
@@ -993,6 +1017,8 @@ def _setup(
         "BUILD_REQUIRED",
         "REVIEW_FAILED",
         "READY_FOR_SETUP_ACCEPTANCE",
+        "SETUP_EDIT_REVIEW_REQUIRED",
+        "EDIT_REVIEW_FAILED",
     } and discovery_path.is_file():
         discovery = json.loads(discovery_path.read_text(encoding="utf-8"))
         if brief_changed(record, discovery):
@@ -1040,6 +1066,14 @@ def _setup(
             progress({"stage": "requirement confirmation", "status": "completed"})
         print("\nProposed setup")
         print(_setup_proposal_table(presentation["proposal"]))
+        if presentation.get("capability_downgrades"):
+            print("\nAdvisory capability downgrades")
+            for downgrade in presentation["capability_downgrades"]:
+                print(
+                    f"- {downgrade['requested']} → "
+                    f"{downgrade['supported_equivalent']} "
+                    f"({downgrade['consequence']})"
+                )
         answers: dict[str, str] = {}
         for item in presentation["open_questions"]:
             print(f"\n{item['prompt']}")
@@ -1096,6 +1130,23 @@ def _setup(
             json.loads(readiness_path.read_text()) if readiness_path.is_file() else None
         )
     if (
+        state
+        in {
+            "READY_FOR_SETUP_ACCEPTANCE",
+            "SETUP_EDIT_REVIEW_REQUIRED",
+            "EDIT_REVIEW_FAILED",
+        }
+        and acceptance is None
+    ):
+        readiness = review_setup_edits(
+            directory,
+            record,
+            offline=offline,
+            progress=progress,
+        )
+        record = json.loads((directory / "setup.json").read_text())
+        state = record["state"]
+    if (
         state == "READY_FOR_SETUP_ACCEPTANCE"
         and acceptance is None
         and interactive
@@ -1141,6 +1192,7 @@ def _setup(
             ),
             "proposal": presentation["proposal"],
             "open_questions": presentation["open_questions"],
+            "capability_downgrades": presentation.get("capability_downgrades", []),
             "answer_schema": {
                 "type": "object",
                 "properties": {
@@ -1174,14 +1226,14 @@ def _setup(
         }
     return {
         **_payload(
-            success=state != "REVIEW_FAILED",
+            success=state not in {"REVIEW_FAILED", "EDIT_REVIEW_FAILED"},
             state=state,
             task_id=identifier,
             action_required=True,
             allowed_actions=("setup",),
             next_command=f"arctl setup {identifier}",
             message="Setup review found issues that must be corrected."
-            if state == "REVIEW_FAILED"
+            if state in {"REVIEW_FAILED", "EDIT_REVIEW_FAILED"}
             else "Setup is incomplete.",
             log_path=str(directory / "setup"),
         ),

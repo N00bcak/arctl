@@ -22,21 +22,36 @@ arctl run
 ```
 
 `setup` inspects only public repository material, asks for confirmation of the
-research boundary, then generates and reviews a subject adapter, public
-environment, evaluator, runtime, and task draft. It uses a local setup branch,
-never pushes, and commits generated repositories only after the setup token is
-accepted. Normal `approve` remains the separate scientific trust boundary.
+research boundary, then generates and reviews task-specific subject/evaluator
+hooks, a public environment, runtime, and task draft. Arctl owns the hook
+entrypoints, commands, paths, and JSON protocol. Generation and readiness checks
+run in isolated task-owned staging trees. Only setup-token acceptance creates or
+switches to the local setup branch, copies reviewed owned files, and commits;
+setup never pushes. Normal `approve` remains the separate scientific trust boundary.
 Put known requirements in `ARCTL_SETUP.md` at the subject root. When it is
 absent, `init` creates a visible template in the research workspace. Discovery
-shows one canonical proposal and asks only about material gaps or conflicts;
-related trial, pairing, seed, and hidden-data details form one clarification.
+shows one canonical proposal and asks only about unresolved goals or practical
+constraints. The setup specialist inspects the environment and owns
+recommendations for sampling, seeds, calibration, uncertainty, and telemetry.
 Controller-owned comparator freezing, seed non-reuse, decision mapping, and
 unscored operational failures are shown as fixed rules, never delegated back to
-the human. Setup provides no default for an unsupported numeric or statistical
-choice.
-The confirmation table is persisted as the canonical setup contract. Generated
-task and manifest values are typed and validated before dependency installation;
-one automatic repair receives exact validator errors before setup fails loudly.
+the human. Unsupported technical choices receive a conservative, explained
+recommendation rather than a statistics questionnaire.
+The confirmation table is persisted as the canonical setup contract. Requested
+guarantees that arctl cannot enforce are grouped into one explicit advisory
+downgrade confirmation. Generated hooks and typed task/evaluator designs are
+validated before dependency installation. Builders describe Python modules or
+relative scripts while arctl supplies the interpreter and working directory.
+Telemetry results must match their declared `{champion, candidate}` or `{value}`
+shape. One automatic repair receives all contract findings together. A
+ceiling-sized setup batch must then pass the real
+prepare, subject, calibration, scoring, evidence, and telemetry protocol. A
+failed repair or conformance run makes the next invocation generate afresh.
+The acceptance token also covers the task draft and owned-file list. If reviewed
+artifacts change, `arctl setup` records the edit, reruns the affected checks and
+setup review, and issues a new token. Acceptance stages only reviewed owned
+paths; unrelated unstaged files remain uncommitted and a non-empty index is
+rejected.
 Use `--answers FILE --json` for agent orchestration. Setup agents and uv may use
 the network by default; `--offline` disables agent internet access and requires
 cached dependencies. Manual task authoring remains supported with an explicit

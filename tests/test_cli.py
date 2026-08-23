@@ -18,6 +18,7 @@ from arctl.cli import (
     _progress,
     _rewrite_next_command,
     _run,
+    _setup_proposal_table,
     _status,
     build_parser,
     main,
@@ -741,6 +742,20 @@ class CliTests(unittest.TestCase):
         rendered = output.getvalue()
         self.assertIn("› repository discovery", rendered)
         self.assertIn("✓ repository discovery", rendered)
+
+    def test_setup_table_wraps_without_truncating_proposals(self) -> None:
+        ending = "END-OF-CONFIRMED-PROTOCOL"
+        rendered = _setup_proposal_table(
+            [
+                {
+                    "id": "trial_protocol",
+                    "proposed_answer": "detail " * 40 + ending,
+                    "source": "setup brief",
+                }
+            ]
+        )
+        self.assertIn(ending, rendered)
+        self.assertNotIn("…", rendered)
 
     def test_setup_error_prints_cause_log_and_retry(self) -> None:
         payload = {
