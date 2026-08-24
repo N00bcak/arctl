@@ -24,6 +24,16 @@ _FIELDS = {
     "suspect_test",
     "calibration",
 }
+_SETUP_CONTRACT_FIELDS = {
+    "environment_adapter",
+    "outcome",
+    "trial",
+    "hard_rules",
+    "runtime_limits",
+}
+_SETUP_ADAPTER_FIELDS = {"entrypoint", "interface"}
+_SETUP_OUTCOME_FIELDS = {"direction", "unit", "aggregation", "extraction"}
+_SETUP_TRIAL_FIELDS = {"termination", "horizon_unit"}
 _LIMIT_FIELDS = {"timeout_seconds", "max_output_bytes"}
 _SCHEMA_FIELDS = {"public_case", "subject_result"}
 _PUBLIC_FIELDS = {"statistic", "subject_interface", "telemetry"}
@@ -115,6 +125,64 @@ class TelemetryMetric:
     direction: str
 
 
+@dataclass(frozen=True)
+class SetupContract:
+    environment_adapter_entrypoint: str
+    environment_adapter_interface: str
+    outcome_direction: str
+    outcome_unit: str
+    outcome_aggregation: str
+    outcome_extraction: str
+    trial_termination: str
+    trial_horizon_unit: str
+    hard_rules: tuple[str, ...]
+    runtime_limits: tuple[str, ...]
+
+
+def _setup_contract(value: Any) -> SetupContract:
+    contract = _object(value, _SETUP_CONTRACT_FIELDS, "setup_contract")
+    adapter = _object(
+        contract["environment_adapter"],
+        _SETUP_ADAPTER_FIELDS,
+        "setup_contract.environment_adapter",
+    )
+    outcome = _object(
+        contract["outcome"], _SETUP_OUTCOME_FIELDS, "setup_contract.outcome"
+    )
+    trial = _object(
+        contract["trial"], _SETUP_TRIAL_FIELDS, "setup_contract.trial"
+    )
+    direction = outcome["direction"]
+    if direction not in {"higher", "lower"}:
+        raise ValidationError("setup_contract.outcome.direction is invalid")
+    return SetupContract(
+        environment_adapter_entrypoint=_text(
+            adapter["entrypoint"], "setup_contract.environment_adapter.entrypoint"
+        ),
+        environment_adapter_interface=_text(
+            adapter["interface"], "setup_contract.environment_adapter.interface"
+        ),
+        outcome_direction=direction,
+        outcome_unit=_text(outcome["unit"], "setup_contract.outcome.unit"),
+        outcome_aggregation=_text(
+            outcome["aggregation"], "setup_contract.outcome.aggregation"
+        ),
+        outcome_extraction=_text(
+            outcome["extraction"], "setup_contract.outcome.extraction"
+        ),
+        trial_termination=_text(
+            trial["termination"], "setup_contract.trial.termination"
+        ),
+        trial_horizon_unit=_text(
+            trial["horizon_unit"], "setup_contract.trial.horizon_unit"
+        ),
+        hard_rules=_string_tuple(contract["hard_rules"], "setup_contract.hard_rules"),
+        runtime_limits=_string_tuple(
+            contract["runtime_limits"], "setup_contract.runtime_limits"
+        ),
+    )
+
+
 def _telemetry_metrics(
     value: Any,
     *,
@@ -198,13 +266,17 @@ class EvaluatorManifest:
     suspect_trigger: str | None
     suspect_reason_codes: tuple[str, ...]
     calibration: CalibrationPolicy
+    setup_contract: SetupContract | None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> EvaluatorManifest:
-        root = _object(value, _FIELDS, "manifest")
-        schema_version = root["schema_version"]
-        if schema_version not in (1, 2, 3):
-            raise ValidationError("manifest.schema_version must equal 1, 2, or 3")
+        if not isinstance(value, Mapping):
+            raise ValidationError("manifest must be an object")
+        schema_version = value.get("schema_version")
+        if schema_version not in (1, 2, 3, 4):
+            raise ValidationError("manifest.schema_version must equal 1, 2, 3, or 4")
+        fields = _FIELDS | ({"setup_contract"} if schema_version == 4 else set())
+        root = _object(value, fields, "manifest")
 
         limits = _object(root["limits"], _LIMIT_FIELDS, "limits")
         schemas = _object(root["schemas"], _SCHEMA_FIELDS, "schemas")
@@ -397,6 +469,11 @@ class EvaluatorManifest:
                 diagnostic_units,
                 diagnostic_maximum,
                 schema_version >= 2 and calibration_supported,
+            ),
+            setup_contract=(
+                _setup_contract(root["setup_contract"])
+                if schema_version == 4
+                else None
             ),
         )
 

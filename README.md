@@ -15,47 +15,68 @@ arctl doctor
 Create a visible guided workspace around an existing Python repository:
 
 ```bash
-arctl init --repo .
+arctl init .
 arctl setup
 arctl approve
 arctl run
 ```
 
-`setup` inspects only public repository material, asks for confirmation of the
-research boundary, then generates and reviews task-specific subject/evaluator
-hooks, a public environment, runtime, and task draft. Arctl owns the hook
-entrypoints, commands, paths, and JSON protocol. Generation and readiness checks
-run in isolated task-owned staging trees. Only setup-token acceptance creates or
-switches to the local setup branch, copies reviewed owned files, and commits;
-setup never pushes. Normal `approve` remains the separate scientific trust boundary.
-Put known requirements in `ARCTL_SETUP.md` at the subject root. When it is
-absent, `init` creates a visible template in the research workspace. Discovery
-shows one canonical proposal and asks only about unresolved goals or practical
-constraints. The setup specialist inspects the environment and owns
-recommendations for sampling, seeds, calibration, uncertainty, and telemetry.
+`init` locally clones the supplied clean repository into
+`<name>-research/subject`, creates independent `environment` and `evaluator`
+repositories beside it, and leaves the source repository untouched. The shell
+workspace is not itself a Git repository. It prints an absolute, location-safe
+`setup` command. `setup` inspects only public repository material and presents
+up to three related, cited decisions at a time. Each decision uses explicit
+numbered choices (or a custom answer); silence never promotes an agent proposal.
+Only consequential choices are recorded as human-confirmed. Arctl derives the
+remaining setup with provenance, shows one compact complete-design summary, and
+requires authorization before generation. Every option displays the exact value
+that selecting it will persist.
+
+The builder writes normal files inside isolated task-owned staging repositories
+with network disabled and returns only a compact path/dependency report. A fresh
+reviewer covers intent fidelity, editable boundaries, dependencies, trial
+independence, scoring, seeds, and runtime before package provisioning. New direct
+dependencies are shown in the authorized design; transitive dependencies inherit
+that authorization. Direct URLs, VCS/local sources, and alternate sources require
+a distinct human decision. Provisioning uses a configured package index and the
+resolved lock is bound into setup acceptance.
+
+Controller conformance checks exercise seed-zero and same-reservation repeatability,
+sequential state isolation, identity scoring, evidence shape, and unscored failures.
+Declared conformance selectively enables different-seed variation and outcome-scoped
+arm-label effect reversal; environment roles or move order are never assumed to
+be symmetric. Only setup-token acceptance creates or switches to the local setup
+branch, copies reviewed owned files, and commits; setup never pushes. It then
+generates workspace-level `ARCTL_SETUP.md` as a readable output, not an input.
+Normal `approve` remains the separate scientific trust boundary. The setup
+specialist owns recommendations for sampling, seeds, calibration, uncertainty,
+and telemetry.
 Controller-owned comparator freezing, seed non-reuse, decision mapping, and
 unscored operational failures are shown as fixed rules, never delegated back to
 the human. Unsupported technical choices receive a conservative, explained
 recommendation rather than a statistics questionnaire.
-The confirmation table is persisted as the canonical setup contract. Requested
-guarantees that arctl cannot enforce are grouped into one explicit advisory
-downgrade confirmation. Generated hooks and typed task/evaluator designs are
-validated before dependency installation. Builders describe Python modules or
-relative scripts while arctl supplies the interpreter and working directory.
+The decision record and byte-exact authorized design snapshot are the canonical
+setup contracts. Objective, editable paths, environment adapter, outcome statistic,
+and finite trial horizon are typed rather than rediscovered by the builder. Requested
+guarantees that arctl cannot enforce require an explicit decision. Generated
+hooks and typed task/evaluator designs are validated and independently reviewed
+before dependency installation. Builders describe Python modules or relative
+scripts while arctl supplies the interpreter and working directory.
 Telemetry results must match their declared `{champion, candidate}` or `{value}`
 shape. One automatic repair receives all contract findings together. A
 ceiling-sized setup batch must then pass the real
 prepare, subject, calibration, scoring, evidence, and telemetry protocol. A
 failed repair or conformance run makes the next invocation generate afresh.
-The acceptance token also covers the task draft and owned-file list. If reviewed
-artifacts change, `arctl setup` records the edit, reruns the affected checks and
-setup review, and issues a new token. Acceptance stages only reviewed owned
-paths; unrelated unstaged files remain uncommitted and a non-empty index is
-rejected.
-Use `--answers FILE --json` for agent orchestration. Setup agents and uv may use
-the network by default; `--offline` disables agent internet access and requires
-cached dependencies. Manual task authoring remains supported with an explicit
-data root.
+The acceptance token also covers the authorization bundle, task draft, and
+owned-file list. If reviewed artifacts change, `arctl setup` records the edit,
+reruns the affected checks and setup review, and issues a new token. Acceptance
+stages only reviewed owned paths; unrelated unstaged files remain uncommitted
+and a non-empty index is rejected.
+Use `--answers FILE --json` for the revisioned non-interactive state machine.
+Inspection, building, and setup review are offline; `--offline` additionally
+requires cached dependencies. Manual task authoring remains available through
+`arctl task create SOURCE`.
 
 Normal operation uses `run`, `status`, `stop`, `report`, and `inspect`.
 Interactive `run` shows the experiment FSM, comparison substages, and live

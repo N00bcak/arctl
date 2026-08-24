@@ -105,6 +105,7 @@ def sandbox_command(
     write_paths: Sequence[Path],
     profile: str,
     codex: str = "codex",
+    network_enabled: bool = False,
 ) -> tuple[str, ...]:
     if not command:
         raise ValueError("sandboxed command must not be empty")
@@ -123,7 +124,7 @@ def sandbox_command(
             codex=codex,
         ),
         "--config",
-        f"permissions.{profile}.network.enabled=false",
+        f"permissions.{profile}.network.enabled={str(network_enabled).lower()}",
         "--",
         *command,
     )

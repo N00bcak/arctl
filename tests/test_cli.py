@@ -13,6 +13,7 @@ from unittest import mock
 from arctl.cli import (
     _ProgressView,
     _SetupProgressView,
+    _design_summary,
     _emit,
     _invoked_program,
     _progress,
@@ -57,6 +58,60 @@ class CliTests(unittest.TestCase):
             code = main(arguments)
         return code, output.getvalue()
 
+    def test_design_summary_displays_every_authorized_detail(self) -> None:
+        design = {
+            "summary": "Complete design.",
+            "objective": {"value": "Improve score."},
+            "policy": {
+                "editable_paths": [{"pattern": "src/**", "origin": "existing"}],
+                "rationale": "Keep evaluation fixed.",
+            },
+            "environment_adapter": {
+                "owner": "subject",
+                "source_path": "env.py",
+                "entrypoint": "env:run",
+                "interface": "Python callable",
+                "rationale": "Use the public adapter.",
+            },
+            "outcome": {
+                "statistic": "mean score",
+                "direction": "higher",
+                "unit": "points",
+                "aggregation": "paired mean",
+                "extraction": "read score from each result",
+                "result_path": ["metrics", "score"],
+            },
+            "trial": {
+                "unit": "one map",
+                "termination": "map completion",
+                "horizon": {"limit": 1000, "unit": "actions", "case_field": "max_actions"},
+                "seed_handling": "seed initializes the map",
+            },
+            "derived_setup": {
+                "evaluator_pattern": "paired comparison",
+                "hidden_data": "seeds",
+                "runtime_limits": ["60 seconds per process"],
+                "telemetry": [],
+                "hard_rules": ["Do not edit dynamics."],
+            },
+            "conformance": {
+                "seeded_variation": True,
+                "arm_symmetry": "antisymmetric",
+                "arm_symmetry_rationale": "Labels are exchangeable.",
+            },
+            "dependency_source_policy": {"index": "https://pypi.org/simple"},
+            "controller_contract": {"version": 1, "sha256": "a" * 64},
+            "direct_dependencies": [],
+        }
+        summary = _design_summary(design)
+        for expected in (
+            "Keep evaluation fixed.", "env.py", "Use the public adapter.",
+            "read score from each result", "metrics.score", "max_actions",
+            "seed initializes the map", "Do not edit dynamics.",
+            "60 seconds per process", "Labels are exchangeable.",
+        ):
+            self.assertIn(expected, summary)
+
     def test_init_creates_one_editable_task_and_json_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -67,8 +122,8 @@ class CliTests(unittest.TestCase):
                 [
                     "--data",
                     str(root / "data"),
-                    "init",
-                    "--repo",
+                    "task",
+                    "create",
                     str(repo),
                     "--json",
                 ]
@@ -111,8 +166,8 @@ class CliTests(unittest.TestCase):
                 [
                     "--data",
                     str(root / "data"),
-                    "init",
-                    "--repo",
+                    "task",
+                    "create",
                     str(repo),
                     "--json",
                 ]
@@ -139,7 +194,6 @@ class CliTests(unittest.TestCase):
                     "--data",
                     str(data),
                     "init",
-                    "--repo",
                     str(repo),
                     "--workspace",
                     str(workspace),
@@ -150,15 +204,34 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 0)
             payload = json.loads(output)
             self.assertEqual(payload["state"], "SETUP_DISCOVERY_REQUIRED")
+            self.assertEqual(payload["next_command"].count("--data"), 1)
+            self.assertIn(str(data.resolve()), payload["next_command"])
             self.assertTrue((workspace / "arctl.workspace.yaml").is_file())
             self.assertTrue((data / "tasks" / "subject" / "setup.json").is_file())
+            self.assertFalse((workspace / ".git").exists())
+            for name in ("subject", "environment", "evaluator"):
+                self.assertTrue((workspace / name / ".git").is_dir())
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "-C", str(workspace / "subject"), "rev-parse", "HEAD"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip(),
+                subprocess.run(
+                    ["git", "-C", str(repo), "rev-parse", "HEAD"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip(),
+            )
             configured = subprocess.run(
                 ["git", "-C", str(repo), "config", "--local", "--get", "arctl.dataRoot"],
-                check=True,
+                check=False,
                 capture_output=True,
                 text=True,
             ).stdout.strip()
-            self.assertEqual(configured, str(data))
+            self.assertEqual(configured, "")
             status = _status(data, "subject")
             self.assertEqual(status["state"], "SETUP_STATUS")
             self.assertEqual(status["setup_state"], "DISCOVERY_REQUIRED")
@@ -848,7 +921,7 @@ class CliTests(unittest.TestCase):
     def test_init_rejects_non_git_repo_and_unsafe_task_id(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            code, _ = self.run_cli(["--data", str(root / "data"), "init", "--repo", str(root)])
+            code, _ = self.run_cli(["--data", str(root / "data"), "init", str(root)])
             self.assertEqual(code, 1)
 
             repo = root / "repo"
@@ -859,7 +932,6 @@ class CliTests(unittest.TestCase):
                     "--data",
                     str(root / "data"),
                     "init",
-                    "--repo",
                     str(repo),
                     "--task-id",
                     "../escape",
@@ -875,7 +947,7 @@ class CliTests(unittest.TestCase):
             self.initialize_repo(repo)
             data = root / "data"
             code, _ = self.run_cli(
-                ["--data", str(data), "init", "--repo", str(repo), "--json"]
+                ["--data", str(data), "task", "create", str(repo), "--json"]
             )
             self.assertEqual(code, 0)
             code, output = self.run_cli(
@@ -912,7 +984,7 @@ class CliTests(unittest.TestCase):
             self.initialize_repo(repo)
             data = root / "data"
             self.run_cli(
-                ["--data", str(data), "init", "--repo", str(repo), "--json"]
+                ["--data", str(data), "task", "create", str(repo), "--json"]
             )
             recovered = {
                 "schema_version": 1,
@@ -953,7 +1025,7 @@ class CliTests(unittest.TestCase):
             self.initialize_repo(repo)
             data = root / "data"
             self.run_cli(
-                ["--data", str(data), "init", "--repo", str(repo), "--json"]
+                ["--data", str(data), "task", "create", str(repo), "--json"]
             )
             start_experiment(data / "tasks" / "subject", "a" * 40)
 
@@ -975,7 +1047,7 @@ class CliTests(unittest.TestCase):
             self.initialize_repo(repo)
             data = root / "data"
             self.run_cli(
-                ["--data", str(data), "init", "--repo", str(repo), "--json"]
+                ["--data", str(data), "task", "create", str(repo), "--json"]
             )
             with (
                 mock.patch(

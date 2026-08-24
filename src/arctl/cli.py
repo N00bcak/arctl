@@ -13,7 +13,7 @@ import textwrap
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, TextIO, Sequence
+from typing import Any, Callable, Mapping, TextIO, Sequence
 
 from .errors import ArctlError, StateError, TransientDownstreamError
 from .git import resolve_commit
@@ -58,6 +58,22 @@ def _data_root(argument: Path | None) -> Path:
         return Path(configured).resolve()
     current = Path.cwd().resolve()
     for parent in (current, *current.parents):
+        workspace = parent / "arctl.workspace.yaml"
+        if workspace.is_file():
+            try:
+                import yaml
+
+                value = yaml.safe_load(workspace.read_text(encoding="utf-8"))
+            except (OSError, yaml.YAMLError):
+                value = None
+            configured_root = value.get("data_root") if isinstance(value, dict) else None
+            if isinstance(configured_root, str) and configured_root:
+                configured_path = Path(configured_root)
+                return (
+                    configured_path.resolve()
+                    if configured_path.is_absolute()
+                    else (parent / configured_path).resolve()
+                )
         local = parent / ".arctl-data"
         if local.is_dir():
             return local.resolve()
@@ -315,6 +331,12 @@ def _approval_table(payload: dict[str, Any]) -> str:
                 for metric in metrics
             )
     rows = [
+        ("Objective", safe_terminal_text(summary.get("objective", "See approved task"))),
+        ("Outcome", safe_terminal_text(summary.get("outcome", "See evaluator manifest"))),
+        ("Trial unit", safe_terminal_text(summary.get("trial_unit", "See evaluator manifest"))),
+        ("Score", safe_terminal_text(summary.get("score", "See evaluator manifest"))),
+        ("Uncertainty", safe_terminal_text(summary.get("uncertainty", "See evaluator manifest"))),
+        ("Hidden data", safe_terminal_text(summary.get("hidden_data", "Evaluator-private"))),
         ("Method", safe_terminal_text(summary.get("method", "serial-v1"))),
         ("Models", safe_terminal_text(summary["models"])),
         ("Backends", safe_terminal_text(summary.get("backends", "codex-cli-v1 (verified)"))),
@@ -330,6 +352,9 @@ def _approval_table(payload: dict[str, Any]) -> str:
         ("Success criterion", safe_terminal_text(summary["success_criterion"])),
         ("Telemetry", "\n".join(telemetry) if telemetry else "None declared"),
         ("Variance risks", safe_terminal_text(summary["variance_risks"])),
+        ("Evaluator commit", safe_terminal_text(summary.get("evaluator_commit", "See token"))),
+        ("Repository commits", safe_terminal_text(summary.get("repository_commits", "See token"))),
+        ("Dependency lock", safe_terminal_text(summary.get("dependency_lock", "Not recorded"))),
         ("Approval token", safe_terminal_text(payload["approval"]["confirmation_token"])),
         ("Approval command", safe_terminal_text(payload["next_command"])),
     ]
@@ -541,7 +566,10 @@ def _emit_human(
         if state == "READY_FOR_SETUP_ACCEPTANCE":
             print(f"Acceptance token: {payload['acceptance_token']}")
             print(f"Accept command: {payload['next_command']}")
-    elif state in {"SETUP_DISCOVERY_REQUIRED", "READY_FOR_APPROVAL"}:
+    elif state == "SETUP_DISCOVERY_REQUIRED":
+        print(payload["message"])
+        print("Resume: " + payload["next_command"])
+    elif state == "READY_FOR_APPROVAL":
         print(payload["message"])
     elif state == "SETUP_STATUS":
         from tabulate import tabulate
@@ -859,7 +887,7 @@ def _rewrite_next_command(
     command = payload.get("next_command")
     if isinstance(command, str) and (command == "arctl" or command.startswith("arctl ")):
         prefix = program
-        if data_root is not None:
+        if data_root is not None and not command.startswith("arctl --data "):
             prefix += " --data " + shlex.quote(str(data_root))
         payload["next_command"] = prefix + command[5:]
 
@@ -882,78 +910,73 @@ def _doctor() -> dict[str, Any]:
             task_id=None,
             action_required=not success,
             allowed_actions=("install",) if not success else ("init",),
-            next_command="./install.sh" if not success else "arctl init --repo .",
+            next_command="./install.sh" if not success else "arctl init",
             message=message,
         ),
         "checks": checks,
     }
 
 
+def _create_task_draft(
+    repo_argument: Path,
+    task_id: str | None,
+    data_argument: Path | None,
+) -> dict[str, Any]:
+    repo = repo_argument.resolve()
+    completed = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--is-inside-work-tree"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode or completed.stdout.strip() != "true":
+        raise StateError(f"target is not a Git worktree: {repo}")
+    identifier = task_id or repo.name
+    try:
+        validate_task_id(identifier)
+    except ArctlError as error:
+        raise StateError("task ID contains unsafe path or Git-ref characters") from error
+    data_root = _data_root(data_argument)
+    task_directory = data_root / "tasks" / identifier
+    task_file = task_directory / "task.yaml"
+    if task_file.exists():
+        raise StateError(f"task already exists: {identifier}")
+    task_directory.mkdir(parents=True, exist_ok=False)
+    atomic_write_text(
+        task_file,
+        _TASK_TEMPLATE.format(
+            task_id=json.dumps(identifier),
+            repo=json.dumps(str(repo)),
+            environment_commit=resolve_commit(repo, "HEAD"),
+        ),
+    )
+    return _payload(
+        success=True,
+        state="TASK_DRAFT",
+        task_id=identifier,
+        action_required=True,
+        allowed_actions=("edit", "approve"),
+        next_command=f"arctl approve {identifier}",
+        message=f"Created starter task {identifier}; edit it before approval.",
+        artifacts=({"kind": "task", "path": str(task_file)},),
+    )
+
+
 def _init(
-    repo_argument: Path | None,
-    new_repo_argument: Path | None,
+    source_argument: Path,
     workspace_argument: Path | None,
     task_id: str | None,
     data_argument: Path | None,
 ) -> dict[str, Any]:
     from .setup import initialize_setup
 
-    if (repo_argument is None) == (new_repo_argument is None):
-        raise StateError("init requires exactly one of --repo or --new-repo")
-    if new_repo_argument is not None and workspace_argument is not None:
-        raise StateError("--workspace cannot be combined with --new-repo")
-    if (
-        data_argument is not None
-        and repo_argument is not None
-        and new_repo_argument is None
-        and workspace_argument is None
-    ):
-        repo = repo_argument.resolve()
-        if not (repo / ".git").exists():
-            raise StateError(f"target is not a Git worktree: {repo}")
-        identifier = task_id or repo.name
-        try:
-            validate_task_id(identifier)
-        except ArctlError as error:
-            raise StateError("task ID contains unsafe path or Git-ref characters") from error
-        task_directory = data_argument.resolve() / "tasks" / identifier
-        task_file = task_directory / "task.yaml"
-        if task_file.exists():
-            raise StateError(f"task already exists: {identifier}")
-        task_directory.mkdir(parents=True, exist_ok=False)
-        atomic_write_text(
-            task_file,
-            _TASK_TEMPLATE.format(
-                task_id=json.dumps(identifier),
-                repo=json.dumps(str(repo)),
-                environment_commit=resolve_commit(repo, "HEAD"),
-            ),
-        )
-        return _payload(
-            success=True,
-            state="TASK_DRAFT",
-            task_id=identifier,
-            action_required=True,
-            allowed_actions=("edit", "approve"),
-            next_command=f"arctl approve {identifier}",
-            message=f"Created starter task {identifier}; edit it before approval.",
-            artifacts=({"kind": "task", "path": str(task_file)},),
-        )
-    if new_repo_argument is not None:
-        workspace = new_repo_argument.resolve()
-        repo = None
-        identifier = task_id or workspace.name
-        new_repo = True
-    else:
-        assert repo_argument is not None
-        repo = repo_argument.resolve()
-        workspace = (
-            workspace_argument.resolve()
-            if workspace_argument is not None
-            else repo.parent / f"{repo.name}-research"
-        )
-        identifier = task_id or repo.name
-        new_repo = False
+    source = source_argument.resolve()
+    workspace = (
+        workspace_argument.resolve()
+        if workspace_argument is not None
+        else source.parent / f"{source.name}-research"
+    )
+    identifier = task_id or source.name
     try:
         validate_task_id(identifier)
     except ArctlError as error:
@@ -962,8 +985,7 @@ def _init(
     record = initialize_setup(
         data_root=data_root,
         workspace=workspace,
-        repo=repo,
-        new_repo=new_repo,
+        source_repo=source,
         task_id=identifier,
     )
     return _payload(
@@ -972,17 +994,145 @@ def _init(
         task_id=identifier,
         action_required=True,
         allowed_actions=("setup",),
-        next_command=f"arctl setup {identifier}",
+        next_command=f"arctl --data {shlex.quote(str(data_root.resolve()))} setup {identifier}",
         message=(
             f"Created Python research workspace {record['workspace']}. "
-            f"Review {record['setup_brief']}, then run setup."
+            "Run the printed setup command to begin guided repository inspection."
         ),
         artifacts=(
             {"kind": "workspace", "path": record["workspace"]},
-            {"kind": "setup_brief", "path": record["setup_brief"]},
             {"kind": "setup", "path": str(data_root / "tasks" / identifier)},
         ),
     )
+
+
+def _read_setup_submission(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise StateError("setup answers file is missing or invalid") from error
+    if not isinstance(value, dict):
+        raise StateError("setup answers file must contain one JSON object")
+    return value
+
+
+def _print_question_batch(batch: Mapping[str, Any]) -> dict[str, Any]:
+    from .dossier import safe_terminal_text
+
+    print("\n" + safe_terminal_text(batch["summary"]))
+    answers: dict[str, Any] = {}
+    for number, question in enumerate(batch["questions"], 1):
+        print(f"\n{number}. {safe_terminal_text(question['prompt'])}")
+        print("   " + safe_terminal_text(question["why"], limit=220))
+        for option_number, option in enumerate(question["options"], 1):
+            recommended = (
+                " (recommended)"
+                if option["id"] == question["recommended_option_id"]
+                else ""
+            )
+            print(
+                f"   {option_number}) {safe_terminal_text(option['label'])}{recommended}"
+            )
+            canonical = json.dumps(option["value"], ensure_ascii=False)
+            print("      Will save (JSON): " + safe_terminal_text(canonical))
+            print("      " + safe_terminal_text(option["consequence"], limit=220))
+            for citation in option["citations"]:
+                if citation["kind"] == "controller":
+                    evidence = f"[controller:{citation['rule_id']}] {citation['finding']}"
+                else:
+                    evidence = (
+                        f"[{citation['path']}:{citation['location']}] {citation['finding']}"
+                    )
+                print(
+                    "      "
+                    + safe_terminal_text(evidence, limit=240)
+                )
+        custom_number = len(question["options"]) + 1
+        print(f"   {custom_number}) Give a custom answer")
+        while True:
+            entered = input(f"Choose 1-{custom_number}: ").strip()
+            if entered.isdecimal() and 1 <= int(entered) <= custom_number:
+                break
+            print("Choose one listed number; an explicit choice is required.")
+        selected = int(entered)
+        if selected == custom_number:
+            custom = ""
+            while not custom:
+                custom = input("Custom answer: ").strip()
+            answers[question["id"]] = {"custom": custom}
+        else:
+            answers[question["id"]] = question["options"][selected - 1]["id"]
+    return {"revision": batch["revision"], "answers": answers}
+
+
+def _design_summary(design: Mapping[str, Any]) -> str:
+    from .dossier import safe_terminal_text
+
+    adapter = design["environment_adapter"]
+    outcome = design["outcome"]
+    trial = design["trial"]
+    lines = [
+        safe_terminal_text(design["summary"]),
+        "- Objective: " + safe_terminal_text(design["objective"]["value"]),
+        "- Editable paths: "
+        + ", ".join(
+            safe_terminal_text(f"{item['pattern']} ({item['origin']})")
+            for item in design["policy"]["editable_paths"]
+        ),
+        "- Policy rationale: " + safe_terminal_text(design["policy"]["rationale"]),
+        "- Environment: "
+        + safe_terminal_text(
+            f"{adapter['entrypoint']} [{adapter['interface']}; {adapter['owner']}]; "
+            f"source={adapter['source_path']}; rationale={adapter['rationale']}"
+        ),
+        "- Outcome: "
+        + safe_terminal_text(
+            f"{outcome['statistic']} ({outcome['direction']}; "
+            f"{outcome['aggregation']}; {outcome['unit']}); "
+            f"extraction={outcome['extraction']}; path={'.'.join(outcome['result_path'])}"
+        ),
+        "- Trial: "
+        + safe_terminal_text(
+            f"{trial['unit']}; {trial['termination']}; maximum "
+            f"{trial['horizon']['limit']} {trial['horizon']['unit']} in "
+            f"{trial['horizon']['case_field']}; seeds: {trial['seed_handling']}"
+        ),
+        "- Conformance: seeded variation="
+        f"{design['conformance']['seeded_variation']}; arm symmetry="
+        f"{design['conformance']['arm_symmetry']}; rationale="
+        + safe_terminal_text(design["conformance"]["arm_symmetry_rationale"]),
+        "- Package index: "
+        + safe_terminal_text(design["dependency_source_policy"]["index"]),
+        "- Controller contract: v"
+        f"{design['controller_contract']['version']} "
+        f"{design['controller_contract']['sha256'][:12]}",
+    ]
+    derived = design["derived_setup"]
+    lines.append(
+        "- Hard rules: "
+        + "; ".join(safe_terminal_text(rule) for rule in derived["hard_rules"])
+        if derived["hard_rules"]
+        else "- Hard rules: none"
+    )
+    lines.append(
+        "- Derived setup: "
+        + safe_terminal_text(
+            f"{derived['evaluator_pattern']}; hidden data: {derived['hidden_data']}; "
+            f"runtime: {', '.join(derived['runtime_limits'])}; "
+            f"telemetry: {', '.join(derived['telemetry']) or 'none'}"
+        )
+    )
+    dependencies = design.get("direct_dependencies", [])
+    if dependencies:
+        lines.append("- Direct dependencies:")
+        for dependency in dependencies:
+            lines.append(
+                "  - "
+                + safe_terminal_text(dependency["requirement"])
+                + f" ({dependency['origin']}): "
+                + safe_terminal_text(dependency["reason"], limit=180)
+            )
+    return "\n".join(lines)
 
 
 def _setup(
@@ -992,253 +1142,240 @@ def _setup(
     answers_path: Path | None,
     offline: bool,
     acceptance: str | None,
+    design_authorization: str | None,
     interactive: bool,
     progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     from .setup import (
         accept_setup,
-        brief_changed,
-        build_setup,
-        discover_setup,
+        build_setup_direct,
+        discover_setup_batch,
         load_setup,
         review_setup_edits,
-        resolve_fields,
-        save_answers,
-        setup_presentation,
+    )
+    from .setup_conversation import (
+        answer_batch,
+        authorize_design,
+        render_setup_note,
     )
 
     directory, record = load_setup(data_root, task_id)
+    if record.get("schema_version") != 2 or record.get("setup_contract") != "conversation-v2":
+        raise StateError(
+            "legacy guided-setup state is not supported; create a fresh workspace with arctl init; "
+            f"it was not changed (state: {directory / 'setup.json'})"
+        )
     identifier = record["task_id"]
-    state = record["state"]
-    discovery: dict[str, Any] | None = None
-    discovery_path = directory / "setup" / "discovery.public.json"
-    if state in {
-        "ANSWERS_REQUIRED",
-        "BUILD_REQUIRED",
-        "REVIEW_FAILED",
-        "READY_FOR_SETUP_ACCEPTANCE",
-        "SETUP_EDIT_REVIEW_REQUIRED",
-        "EDIT_REVIEW_FAILED",
-    } and discovery_path.is_file():
-        discovery = json.loads(discovery_path.read_text(encoding="utf-8"))
-        if brief_changed(record, discovery):
-            record["state"] = "DISCOVERY_REQUIRED"
-            atomic_write_json(directory / "setup.json", record)
-            state = "DISCOVERY_REQUIRED"
-    if state == "DISCOVERY_REQUIRED":
-        discovery = discover_setup(
-            directory,
-            record,
-            offline=offline,
-            progress=progress,
-        )
-        record = json.loads((directory / "setup.json").read_text())
+    submitted = _read_setup_submission(answers_path) if answers_path is not None else None
+    readiness: dict[str, Any] | None = None
+    automatic_repairs = 0
+
+    while True:
         state = record["state"]
-    presentation = setup_presentation(discovery) if discovery is not None else None
-    if state == "ANSWERS_REQUIRED" and answers_path is not None:
-        if progress is not None:
-            progress({"stage": "requirement confirmation", "status": "started"})
-        try:
-            raw_answers = json.loads(answers_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise StateError("setup answers file is missing or invalid") from error
-        if not isinstance(raw_answers, dict):
-            raise StateError("setup answers file must contain one answers object")
-        if set(raw_answers) <= {"answers", "overrides"}:
-            answers = raw_answers.get("answers", {})
-            overrides = raw_answers.get("overrides", {})
+        if state == "DISCOVERY_REQUIRED":
+            batch = discover_setup_batch(
+                directory,
+                record,
+                offline=offline,
+                progress=progress,
+            )
+            record = json.loads((directory / "setup.json").read_text(encoding="utf-8"))
+            state = record["state"]
         else:
-            answers = raw_answers
-            overrides = {}
-        if not isinstance(answers, dict) or not isinstance(overrides, dict):
-            raise StateError("setup answers and overrides must be JSON objects")
-        save_answers(directory, record, answers, overrides)
-        if progress is not None:
-            progress({"stage": "requirement confirmation", "status": "completed"})
-        record = json.loads((directory / "setup.json").read_text())
-        state = record["state"]
-    elif state == "ANSWERS_REQUIRED" and interactive and sys.stdin.isatty():
-        if discovery is None:
-            discovery = json.loads(discovery_path.read_text())
-        presentation = setup_presentation(discovery)
-        if progress is not None:
-            progress({"stage": "requirement confirmation", "status": "started"})
-            progress({"stage": "requirement confirmation", "status": "completed"})
-        print("\nProposed setup")
-        print(_setup_proposal_table(presentation["proposal"]))
-        if presentation.get("capability_downgrades"):
-            print("\nAdvisory capability downgrades")
-            for downgrade in presentation["capability_downgrades"]:
-                print(
-                    f"- {downgrade['requested']} → "
-                    f"{downgrade['supported_equivalent']} "
-                    f"({downgrade['consequence']})"
-                )
-        answers: dict[str, str] = {}
-        for item in presentation["open_questions"]:
-            print(f"\n{item['prompt']}")
-            proposed = item["proposed_answer"]
-            if proposed is not None:
-                print("Proposed: " + proposed)
-                entered = input("Answer [Enter accepts proposal]: ").strip()
-                answers[item["id"]] = entered or proposed
-            else:
-                entered = ""
-                while not entered:
-                    entered = input("Answer [required]: ").strip()
-                answers[item["id"]] = entered
-        overrides: dict[str, str] = {}
-        print("\nResolved setup")
-        print(_setup_proposal_table(resolve_fields(presentation, answers, overrides)))
-        decision = input("\nUse this setup? [Y/edit/n]: ").strip().lower()
-        if decision in {"n", "no"}:
-            raise StateError("setup confirmation cancelled")
-        if decision in {"e", "edit"}:
-            proposal = presentation["proposal"]
-            while True:
-                for index, item in enumerate(proposal, 1):
-                    print(f"  {index}. {item['id'].replace('_', ' ')}")
-                selected = input("Field number to edit [Enter finishes]: ").strip()
-                if not selected:
-                    break
-                if not selected.isdecimal() or not 1 <= int(selected) <= len(proposal):
-                    print("Choose one listed field number.")
+            batch_path = directory / "setup" / "question-batch.public.json"
+            batch = (
+                json.loads(batch_path.read_text(encoding="utf-8"))
+                if batch_path.is_file()
+                else None
+            )
+
+        if submitted is not None and state != "QUESTIONS_REQUIRED":
+            raise StateError("setup answers were supplied but no question batch is pending")
+        if design_authorization is not None and state != "DESIGN_AUTHORIZATION_REQUIRED":
+            raise StateError(
+                "setup design authorization was supplied but no design is awaiting it"
+            )
+
+        if state == "QUESTIONS_REQUIRED":
+            assert batch is not None
+            if submitted is not None:
+                answer_batch(directory, record, submitted)
+                submitted = None
+                record = json.loads((directory / "setup.json").read_text(encoding="utf-8"))
+                continue
+            if interactive and sys.stdin.isatty():
+                answer_batch(directory, record, _print_question_batch(batch))
+                record = json.loads((directory / "setup.json").read_text(encoding="utf-8"))
+                continue
+            return {
+                **_payload(
+                    success=True,
+                    state="SETUP_QUESTIONS_REQUIRED",
+                    task_id=identifier,
+                    action_required=True,
+                    allowed_actions=("setup_answer",),
+                    next_command=(
+                        f"arctl --data {shlex.quote(str(data_root))} setup {identifier} "
+                        "--answers ANSWERS.json"
+                    ),
+                    message="Answer the current cited setup decision batch.",
+                    log_path=str(directory / "setup"),
+                ),
+                "question_batch": batch,
+                "answer_schema": {
+                    "type": "object",
+                    "required": ["revision", "answers"],
+                    "properties": {
+                        "revision": {"const": batch["revision"]},
+                        "answers": {
+                            "type": "object",
+                            "required": [question["id"] for question in batch["questions"]],
+                        },
+                    },
+                },
+            }
+
+        if state == "DESIGN_AUTHORIZATION_REQUIRED":
+            design = json.loads(
+                (directory / "setup" / "design.public.json").read_text(encoding="utf-8")
+            )
+            token = record["design_authorization_token"]
+            if design_authorization is not None:
+                authorize_design(directory, record, design_authorization)
+                design_authorization = None
+                record = json.loads((directory / "setup.json").read_text(encoding="utf-8"))
+                continue
+            if interactive and sys.stdin.isatty():
+                print("\nAuthorized setup proposal\n" + _design_summary(design))
+                if input("\nUse this setup? [y/N]: ").strip().lower() in {"y", "yes"}:
+                    authorize_design(directory, record, token)
+                    record = json.loads((directory / "setup.json").read_text(encoding="utf-8"))
                     continue
-                item = proposal[int(selected) - 1]
-                changed = input(f"{item['id']}: ").strip()
-                if changed:
-                    overrides[item["id"]] = changed
-            print("\nResolved setup")
-            print(_setup_proposal_table(resolve_fields(presentation, answers, overrides)))
-            if input("\nUse this setup? [Y/n]: ").strip().lower() in {"n", "no"}:
-                raise StateError("setup confirmation cancelled")
-        save_answers(directory, record, answers, overrides)
-        record = json.loads((directory / "setup.json").read_text())
-        state = record["state"]
-    if state in {"BUILD_REQUIRED", "REVIEW_FAILED"}:
-        readiness = build_setup(
-            directory,
-            record,
-            offline=offline,
-            progress=progress,
-        )
-        record = json.loads((directory / "setup.json").read_text())
-        state = record["state"]
-    else:
-        readiness_path = directory / "setup" / "readiness.public.json"
-        readiness = (
-            json.loads(readiness_path.read_text()) if readiness_path.is_file() else None
-        )
-    if (
-        state
-        in {
+                raise StateError("setup design authorization cancelled")
+            return {
+                **_payload(
+                    success=True,
+                    state=state,
+                    task_id=identifier,
+                    action_required=True,
+                    allowed_actions=("setup_authorize",),
+                    next_command=(
+                        f"arctl --data {shlex.quote(str(data_root))} setup {identifier} "
+                        f"--authorize-design {token}"
+                    ),
+                    message="Review and authorize the complete derived setup design.",
+                    log_path=str(directory / "setup"),
+                ),
+                "design": design,
+                "design_authorization_token": token,
+            }
+
+        if state in {"BUILD_REQUIRED", "REVIEW_FAILED"}:
+            try:
+                readiness = build_setup_direct(
+                    directory,
+                    record,
+                    offline=offline,
+                    progress=progress,
+                )
+            except StateError:
+                record = json.loads(
+                    (directory / "setup.json").read_text(encoding="utf-8")
+                )
+                if record.get("state") == "DISCOVERY_REQUIRED":
+                    continue
+                if automatic_repairs < 1 and record.get("state") in {
+                    "BUILD_REQUIRED",
+                    "REVIEW_FAILED",
+                }:
+                    automatic_repairs += 1
+                    continue
+                raise
+            record = json.loads((directory / "setup.json").read_text(encoding="utf-8"))
+            state = record["state"]
+        else:
+            readiness_path = directory / "setup" / "readiness.public.json"
+            readiness = (
+                json.loads(readiness_path.read_text(encoding="utf-8"))
+                if readiness_path.is_file()
+                else None
+            )
+
+        if state in {
             "READY_FOR_SETUP_ACCEPTANCE",
             "SETUP_EDIT_REVIEW_REQUIRED",
             "EDIT_REVIEW_FAILED",
-        }
-        and acceptance is None
-    ):
-        readiness = review_setup_edits(
-            directory,
-            record,
-            offline=offline,
-            progress=progress,
-        )
-        record = json.loads((directory / "setup.json").read_text())
-        state = record["state"]
-    if (
-        state == "READY_FOR_SETUP_ACCEPTANCE"
-        and acceptance is None
-        and interactive
-        and sys.stdin.isatty()
-    ):
-        assert readiness is not None
-        if input("Accept and commit this verified setup? [y/N]: ").strip().lower() in {
-            "y",
-            "yes",
-        }:
-            acceptance = readiness["acceptance_token"]
-    if state == "READY_FOR_SETUP_ACCEPTANCE" and acceptance is not None:
-        task = accept_setup(directory, record, acceptance)
-        state = "READY_FOR_APPROVAL"
+        } and acceptance is None:
+            readiness = review_setup_edits(
+                directory, record, offline=offline, progress=progress
+            )
+            record = json.loads((directory / "setup.json").read_text(encoding="utf-8"))
+            state = record["state"]
+
+        if state == "READY_FOR_SETUP_ACCEPTANCE" and acceptance is None and interactive and sys.stdin.isatty():
+            assert readiness is not None
+            print("\nVerified setup is ready for acceptance.")
+            if input("Accept and commit this verified setup? [y/N]: ").strip().lower() in {"y", "yes"}:
+                acceptance = readiness["acceptance_token"]
+
+        if state == "READY_FOR_SETUP_ACCEPTANCE" and acceptance is not None:
+            note_path = Path(record["workspace"]) / "ARCTL_SETUP.md"
+            if note_path.exists():
+                raise StateError(
+                    f"setup summary output already exists and was not changed: {note_path}"
+                )
+            task = accept_setup(directory, record, acceptance)
+            note = render_setup_note(directory, record)
+            return {
+                **_payload(
+                    success=True,
+                    state="READY_FOR_APPROVAL",
+                    task_id=identifier,
+                    action_required=True,
+                    allowed_actions=("approve",),
+                    next_command=f"arctl approve {identifier}",
+                    message="Setup accepted; the scientific contract is ready for approval.",
+                    artifacts=({"kind": "setup_summary", "path": str(note)},),
+                    log_path=str(directory),
+                ),
+                "task": {"schema_version": task.schema_version, "repo": str(task.repo)},
+                "readiness": readiness,
+            }
+
+        if state == "READY_FOR_SETUP_ACCEPTANCE":
+            assert readiness is not None
+            token = readiness["acceptance_token"]
+            return {
+                **_payload(
+                    success=True,
+                    state=state,
+                    task_id=identifier,
+                    action_required=True,
+                    allowed_actions=("setup_accept",),
+                    next_command=(
+                        f"arctl --data {shlex.quote(str(data_root))} setup {identifier} "
+                        f"--accept {token}"
+                    ),
+                    message="Generated workspace passed verification and awaits acceptance.",
+                    log_path=str(directory / "setup"),
+                ),
+                "readiness": readiness,
+                "acceptance_token": token,
+            }
+
         return {
             **_payload(
-                success=True,
+                success=False,
                 state=state,
-                task_id=identifier,
-                action_required=True,
-                allowed_actions=("approve",),
-                next_command=f"arctl approve {identifier}",
-                message="Setup accepted; the exact generated task is ready for approval.",
-                log_path=str(directory),
-            ),
-            "task": {"schema_version": task.schema_version, "repo": str(task.repo)},
-            "readiness": readiness,
-        }
-    if state == "ANSWERS_REQUIRED":
-        if discovery is None:
-            discovery = json.loads(discovery_path.read_text())
-        presentation = setup_presentation(discovery)
-        return {
-            **_payload(
-                success=True,
-                state="SETUP_ANSWERS_REQUIRED",
                 task_id=identifier,
                 action_required=True,
                 allowed_actions=("setup",),
-                next_command=f"arctl setup {identifier} --answers ANSWERS.json",
-                message="Confirm or revise the cited setup requirements.",
-                log_path=str(directory / "setup"),
-            ),
-            "proposal": presentation["proposal"],
-            "open_questions": presentation["open_questions"],
-            "capability_downgrades": presentation.get("capability_downgrades", []),
-            "answer_schema": {
-                "type": "object",
-                "properties": {
-                    "answers": {
-                        "type": "object",
-                        "required": [
-                            item["id"] for item in presentation["open_questions"]
-                        ],
-                    },
-                    "overrides": {"type": "object"},
-                },
-                "required": ["answers"],
-            },
-        }
-    if state == "READY_FOR_SETUP_ACCEPTANCE":
-        assert readiness is not None
-        token = readiness["acceptance_token"]
-        return {
-            **_payload(
-                success=True,
-                state=state,
-                task_id=identifier,
-                action_required=True,
-                allowed_actions=("setup_accept",),
-                next_command=f"arctl setup {identifier} --accept {token}",
-                message="Generated workspace passed setup review and awaits acceptance.",
+                next_command=f"arctl --data {shlex.quote(str(data_root))} setup {identifier}",
+                message="Setup verification found issues that require another bounded repair.",
                 log_path=str(directory / "setup"),
             ),
             "readiness": readiness,
-            "acceptance_token": token,
         }
-    return {
-        **_payload(
-            success=state not in {"REVIEW_FAILED", "EDIT_REVIEW_FAILED"},
-            state=state,
-            task_id=identifier,
-            action_required=True,
-            allowed_actions=("setup",),
-            next_command=f"arctl setup {identifier}",
-            message="Setup review found issues that must be corrected."
-            if state in {"REVIEW_FAILED", "EDIT_REVIEW_FAILED"}
-            else "Setup is incomplete.",
-            log_path=str(directory / "setup"),
-        ),
-        "readiness": readiness,
-    }
 
 
 def _approve(
@@ -1286,6 +1423,18 @@ def _approve(
             if setup_path.is_file()
             else {}
         )
+        design_path = located.directory / "setup" / "authorized-design.public.json"
+        design = (
+            json.loads(design_path.read_text(encoding="utf-8"))
+            if design_path.is_file()
+            else {}
+        )
+        readiness_path = located.directory / "setup" / "readiness.public.json"
+        readiness = (
+            json.loads(readiness_path.read_text(encoding="utf-8"))
+            if readiness_path.is_file()
+            else {}
+        )
         return {
             **_payload(
                 success=True,
@@ -1306,6 +1455,17 @@ def _approve(
                 "confirmation_token": preview.confirmation_token,
             },
             "approval_summary": {
+                "objective": located.config.objective,
+                "outcome": design.get("outcome", {}).get(
+                    "statistic", manifest.public_statistic
+                ),
+                "trial_unit": manifest.trial_meaning,
+                "score": manifest.score_statistic,
+                "uncertainty": manifest.uncertainty_method,
+                "hidden_data": design.get("derived_setup", {}).get(
+                    "hidden_data",
+                    "Evaluator-hidden trial seeds and private scoring data.",
+                ),
                 "method": (
                     located.config.method.profile
                     if located.config.method is not None
@@ -1355,6 +1515,14 @@ def _approve(
                         or "none declared"
                     )
                     + "."
+                ),
+                "evaluator_commit": preview.evaluator_commit,
+                "repository_commits": "; ".join(
+                    f"{source.identifier}={source.commit}"
+                    for source in located.config.environment_sources
+                ),
+                "dependency_lock": readiness.get(
+                    "dependency_lock_sha256", "Not created by guided setup"
                 ),
             },
         }
@@ -1407,7 +1575,9 @@ def _status(data_root: Path, task_id: str | None) -> dict[str, Any]:
                 task_id=identifier,
                 action_required=True,
                 allowed_actions=("setup",),
-                next_command=f"arctl setup {identifier}",
+                next_command=(
+                    f"arctl --data {shlex.quote(str(data_root.resolve()))} setup {identifier}"
+                ),
                 message=f"Task {identifier} setup is {setup['state']}.",
                 log_path=str(setup_directory / "setup"),
             ),
@@ -1781,7 +1951,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Typical workflow:\n"
             "  arctl doctor\n"
-            "  arctl init --repo /path/to/subject\n"
+            "  arctl init /path/to/subject\n"
             "  arctl setup TASK\n"
             "  arctl approve TASK\n"
             "  arctl approve TASK --confirm TOKEN\n"
@@ -1790,8 +1960,9 @@ def build_parser() -> argparse.ArgumentParser:
             "\n"
             "Complete command forms:\n"
             "  arctl doctor [--json]\n"
-            "  arctl init (--repo PATH | --new-repo PATH) [--workspace PATH]\n"
+            "  arctl init [SOURCE] [--workspace PATH]\n"
             "             [--task-id TASK] [--json]\n"
+            "  arctl task create [SOURCE] [--task-id TASK] [--json]\n"
             "  arctl setup [TASK] [--answers FILE] [--offline]\n"
             "                     [--accept TOKEN] [--json]\n"
             "  arctl approve [TASK] [--confirm TOKEN] [--json]\n"
@@ -1854,21 +2025,18 @@ def build_parser() -> argparse.ArgumentParser:
     init = command(
         "init",
         "create a guided Python research workspace",
-        "Create visible setup storage for an existing or new Python subject repository.",
-        "Example:\n  arctl init --repo . --task-id routing-policy",
+        "Ingest an existing Git repository into a workspace with independent subject, "
+        "environment, and evaluator repositories.",
+        "Example:\n  arctl init . --task-id routing-policy",
     )
     json_option(init)
     init.add_argument(
-        "--repo",
+        "source",
+        nargs="?",
+        default=Path("."),
         type=Path,
-        metavar="PATH",
-        help="existing clean local Git worktree containing the policy to improve",
-    )
-    init.add_argument(
-        "--new-repo",
-        type=Path,
-        metavar="PATH",
-        help="create a visible workspace and new subject repository at PATH",
+        metavar="SOURCE",
+        help="clean source Git repository to ingest (default: current directory)",
     )
     init.add_argument(
         "--workspace",
@@ -1882,13 +2050,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="task ID; defaults to the repository directory name",
     )
 
+    task = command(
+        "task",
+        "manage explicitly authored task contracts",
+        "Create a manually editable task contract without guided workspace setup.",
+    )
+    task_commands = task.add_subparsers(dest="task_command", required=True, metavar="COMMAND")
+    task_create = task_commands.add_parser(
+        "create",
+        help="create a manually editable task.yaml",
+        description="Create a starter task.yaml for an existing Git repository.",
+        formatter_class=formatter,
+    )
+    json_option(task_create)
+    task_create.add_argument(
+        "source", nargs="?", default=Path("."), type=Path, metavar="SOURCE"
+    )
+    task_create.add_argument("--task-id", metavar="TASK")
+
     setup = command(
         "setup",
         "discover, build, review, and accept a Python task workspace",
-        "Run resumable pre-approval setup. Discovery is read-only; generated code and evaluator\n"
-        "remain drafts until explicit setup acceptance and normal task approval.",
-        "AI operators should use --json, resolve returned clarification IDs with --answers,\n"
-        "and obtain permission before using --accept.",
+        "Run resumable pre-approval setup. Public inspection returns up to three cited choices\n"
+        "per revision; generation is offline and reviewed before dependency provisioning.",
+        "AI operators should use --json, answer the exact returned revision with --answers,\n"
+        "authorize the summarized design, and obtain permission before using --accept.",
     )
     json_option(setup)
     task_argument(setup)
@@ -1901,12 +2087,17 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument(
         "--offline",
         action="store_true",
-        help="disable setup-agent internet access and require cached uv dependencies",
+        help="require cached dependencies; setup agents are always offline",
     )
     setup.add_argument(
         "--accept",
         metavar="TOKEN",
         help="accept the verified setup trees and create their local Git commits",
+    )
+    setup.add_argument(
+        "--authorize-design",
+        metavar="TOKEN",
+        help="authorize the exact summarized setup design returned by --json",
     )
 
     approve = command(
@@ -2078,9 +2269,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = _doctor()
         elif arguments.command == "init":
             payload = _init(
-                arguments.repo,
-                arguments.new_repo,
+                arguments.source,
                 arguments.workspace,
+                arguments.task_id,
+                arguments.data,
+            )
+        elif arguments.command == "task":
+            payload = _create_task_draft(
+                arguments.source,
                 arguments.task_id,
                 arguments.data,
             )
@@ -2091,6 +2287,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 answers_path=arguments.answers,
                 offline=arguments.offline,
                 acceptance=arguments.accept,
+                design_authorization=arguments.authorize_design,
                 interactive=not arguments.json,
                 progress=(
                     setup_progress
@@ -2153,13 +2350,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         if arguments.command == "setup":
             identifier = arguments.task_id
+            data_root = _data_root(arguments.data)
             payload = _payload(
                 success=True,
                 state="SETUP_STOPPED",
                 task_id=identifier,
                 action_required=True,
                 allowed_actions=("setup", "status"),
-                next_command=f"arctl setup {identifier}" if identifier else "arctl setup",
+                next_command=(
+                    f"arctl --data {shlex.quote(str(data_root))} setup {identifier}"
+                    if identifier
+                    else f"arctl --data {shlex.quote(str(data_root))} setup"
+                ),
                 message="Setup stopped safely; no unanswered requirements were saved.",
             )
         elif arguments.command != "run":
@@ -2197,7 +2399,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif arguments.command == "init":
             next_command = "arctl doctor"
         elif arguments.command == "setup":
-            next_command = f"arctl setup {identifier}" if identifier else "arctl setup"
+            root = _data_root(arguments.data)
+            next_command = (
+                f"arctl --data {shlex.quote(str(root))} setup {identifier}"
+                if identifier
+                else f"arctl --data {shlex.quote(str(root))} setup"
+            )
         else:
             next_command = (
                 f"arctl status {identifier}" if identifier else "arctl status"

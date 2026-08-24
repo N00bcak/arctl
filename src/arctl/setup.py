@@ -6,8 +6,10 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -36,6 +38,14 @@ from .sandbox import (
     sanitized_environment,
 )
 from .setup_protocol import EVALUATOR_ENTRYPOINT, SETUP_API_MODULE, SUBJECT_ENTRYPOINT
+from .setup_conversation import (
+    batch_schema,
+    finalize_design,
+    finalized_design_schema,
+    load_decisions,
+    save_batch,
+    validate_batch,
+)
 from .storage import atomic_write_json, atomic_write_text
 from .taskio import load_task
 
@@ -187,6 +197,7 @@ SETUP_BUILD_CONTRACT = {
             "variation",
             "suspect_test",
             "calibration",
+            "setup_contract",
         ],
         "limits": ["timeout_seconds", "max_output_bytes"],
         "schemas": ["public_case_json", "subject_result_json"],
@@ -210,6 +221,13 @@ SETUP_BUILD_CONTRACT = {
         "suspect_test": ["trigger", "reason_codes"],
         "calibration": ["supported", "policy", "ladder", "diagnostic"],
         "calibration_diagnostic": ["name", "units", "maximum"],
+        "setup_contract": [
+            "environment_adapter",
+            "outcome",
+            "trial",
+            "hard_rules",
+            "runtime_limits",
+        ],
     },
     "controller_owned": [
         "all commands and placeholders",
@@ -403,12 +421,9 @@ def discovery_schema() -> dict[str, Any]:
 
 
 def _brief(setup: Mapping[str, Any]) -> tuple[Path, str, str]:
-    subject = Path(setup["subject"])
     workspace = Path(setup["workspace"])
-    subject_path = subject / "ARCTL_SETUP.md"
-    path = subject_path if subject_path.is_file() else workspace / "ARCTL_SETUP.md"
-    text = path.read_text(encoding="utf-8") if path.is_file() else ""
-    return path, text, hashlib.sha256(text.encode()).hexdigest()
+    path = workspace / "ARCTL_SETUP.md"
+    return path, "", hashlib.sha256(b"").hexdigest()
 
 
 def setup_presentation(discovery: Mapping[str, Any]) -> dict[str, Any]:
@@ -571,6 +586,32 @@ def build_schema() -> dict[str, Any]:
             "maximum": {"type": "number", "minimum": 0},
         }
     )
+    setup_contract = _schema(
+        {
+            "environment_adapter": _schema(
+                {
+                    "entrypoint": text,
+                    "interface": text,
+                }
+            ),
+            "outcome": _schema(
+                {
+                    "direction": {"type": "string", "enum": ["higher", "lower"]},
+                    "unit": text,
+                    "aggregation": text,
+                    "extraction": text,
+                }
+            ),
+            "trial": _schema(
+                {
+                    "termination": text,
+                    "horizon_unit": text,
+                }
+            ),
+            "hard_rules": strings,
+            "runtime_limits": {"type": "array", "minItems": 1, "items": text},
+        }
+    )
     manifest = _schema(
         {
             "limits": _schema(
@@ -649,6 +690,7 @@ def build_schema() -> dict[str, Any]:
                     ),
                 ]
             },
+            "setup_contract": setup_contract,
         }
     )
     return _schema(
@@ -670,10 +712,31 @@ def build_schema() -> dict[str, Any]:
 
 def review_schema() -> dict[str, Any]:
     text = {"type": "string", "minLength": 1}
+    citation = _schema({"path": text, "location": text, "finding": text})
+    coverage = {
+        area: _schema(
+            {
+                "status": {"type": "string", "enum": ["pass", "fail", "not_applicable"]},
+                "summary": text,
+                "evidence": {"type": "array", "items": citation},
+            }
+        )
+        for area in (
+            "intent_fidelity",
+            "grounding",
+            "editable_boundary",
+            "dependencies",
+            "trial_independence",
+            "scoring_statistics",
+            "seed_handling",
+            "runtime_behavior",
+        )
+    }
     return _schema(
         {
-            "schema_version": {"type": "integer", "const": 1},
+            "schema_version": {"type": "integer", "const": 2},
             "summary": text,
+            "coverage": _schema(coverage),
             "findings": {
                 "type": "array",
                 "items": _schema(
@@ -686,6 +749,148 @@ def review_schema() -> dict[str, Any]:
             },
         }
     )
+
+
+def _validate_review_evidence(
+    review: Mapping[str, Any], *, roots: Sequence[Path]
+) -> None:
+    failed = False
+    for area, result in review["coverage"].items():
+        status = result["status"]
+        evidence = result["evidence"]
+        if status == "fail":
+            failed = True
+        if status != "not_applicable" and not evidence:
+            raise ValidationError(f"setup review area {area} requires evidence")
+        for citation in evidence:
+            raw = Path(citation["path"])
+            candidates = [raw] if raw.is_absolute() else [root / raw for root in roots]
+            existing = next(
+                (path for path in candidates if path.is_file() and not path.is_symlink()),
+                None,
+            )
+            if existing is None:
+                raise ValidationError(
+                    f"setup review cites a missing reviewed path: {citation['path']}"
+                )
+            matched = re.fullmatch(
+                r"lines?\s+(\d+)(?:-(\d+))?",
+                citation["location"].strip(),
+                flags=re.IGNORECASE,
+            )
+            if matched is None:
+                raise ValidationError(
+                    f"setup review citation has an invalid location: {citation['location']}"
+                )
+            start = int(matched.group(1))
+            end = int(matched.group(2) or start)
+            count = len(existing.read_text(encoding="utf-8", errors="replace").splitlines())
+            if start < 1 or end < start or end > max(count, 1):
+                raise ValidationError(
+                    f"setup review citation is outside {citation['path']}"
+                )
+    if failed and not review["findings"]:
+        raise ValidationError("failed setup review coverage requires a finding")
+    if review["findings"] and not failed:
+        raise ValidationError("setup review findings require failed coverage")
+
+
+def _dependency_uses_special_source(requirement: str) -> bool:
+    lowered = requirement.lower()
+    return (
+        " @ " in requirement
+        or "git+" in lowered
+        or "http://" in lowered
+        or "https://" in lowered
+        or "file:" in lowered
+        or requirement.startswith(("/", "./", "../"))
+    )
+
+
+def _load_authorized_design(directory: Path) -> dict[str, Any]:
+    design_path = directory / "setup" / "authorized-design.public.json"
+    authorization_path = directory / "setup" / "authorization.public.json"
+    try:
+        design = json.loads(design_path.read_text(encoding="utf-8"))
+        authorization = json.loads(authorization_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise StateError("setup has no valid authorized design") from error
+    try:
+        Draft202012Validator(finalized_design_schema()).validate(design)
+    except JsonSchemaError as error:
+        raise StateError("authorized setup design is invalid") from error
+    digest = hashlib.sha256(
+        json.dumps(design, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if (
+        not isinstance(authorization, Mapping)
+        or set(authorization)
+        != {"schema_version", "design_sha256", "decision_revision", "authorized"}
+        or authorization.get("schema_version") != 1
+        or authorization.get("authorized") is not True
+        or authorization.get("design_sha256") != digest
+    ):
+        raise StateError("authorized setup design changed after authorization")
+    decisions = load_decisions(directory)
+    if (
+        authorization.get("decision_revision") != design.get("decision_revision")
+        or decisions.get("revision") != design.get("decision_revision")
+    ):
+        raise StateError("authorized setup decisions changed after authorization")
+    controller_digest = hashlib.sha256(
+        json.dumps(SETUP_CONTROLLER_CONTRACT, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if design.get("controller_contract", {}).get("sha256") != controller_digest:
+        raise StateError("controller setup contract changed after design authorization")
+    return design
+
+
+def _validate_dependency_plan(
+    dependencies: Sequence[str],
+    *,
+    directory: Path,
+) -> None:
+    if any(not isinstance(item, str) or not item.strip() for item in dependencies):
+        raise ValidationError("setup dependencies must be non-empty requirement strings")
+    design_path = directory / "setup" / "authorized-design.public.json"
+    if not design_path.is_file():
+        if dependencies:
+            raise ValidationError("setup dependencies lack an authorized design")
+        return
+    try:
+        design = _load_authorized_design(directory)
+    except StateError as error:
+        raise ValidationError(str(error)) from error
+    declared = {
+        item["requirement"]: item for item in design.get("direct_dependencies", [])
+    }
+    unexpected = sorted(set(dependencies) - set(declared))
+    if unexpected:
+        setup_path = directory / "setup.json"
+        setup = json.loads(setup_path.read_text(encoding="utf-8"))
+        setup["state"] = "DISCOVERY_REQUIRED"
+        setup["late_dependencies"] = unexpected
+        atomic_write_json(setup_path, setup)
+        atomic_write_json(
+            directory / "setup" / "late-dependencies.public.json",
+            {"schema_version": 1, "requirements": unexpected},
+        )
+        raise StateError(
+            "build discovered direct dependencies that require a new explicit decision: "
+            + ", ".join(unexpected)
+        )
+    decisions = {
+        item["id"]
+        for item in load_decisions(directory).get("decisions", [])
+        if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+    }
+    for requirement in dependencies:
+        dependency = declared[requirement]
+        decision = dependency.get("authorization_decision")
+        if _dependency_uses_special_source(requirement) and decision not in decisions:
+            raise ValidationError(
+                f"dependency {requirement!r} uses a special source without an explicit decision"
+            )
 
 
 def _agent_failure_detail(stderr: str, stdout: str) -> str:
@@ -741,7 +946,7 @@ def _agent_run(
                 output_name=output_name,
                 writable_worktree=writable_worktree,
                 read_paths=read_paths,
-                network_enabled=not offline,
+                network_enabled=False,
             ),
         )
         environment = agent_environment(
@@ -798,55 +1003,77 @@ def initialize_setup(
     *,
     data_root: Path,
     workspace: Path,
-    repo: Path | None,
-    new_repo: bool,
+    source_repo: Path,
     task_id: str,
 ) -> dict[str, Any]:
     validate_task_id(task_id)
     workspace = workspace.resolve()
-    task_directory = data_root.resolve() / "tasks" / task_id
+    source_repo = source_repo.resolve()
+    data_root = data_root.resolve()
+    if _git(source_repo, "rev-parse", "--is-inside-work-tree", check=False) != "true":
+        raise StateError(f"target is not a Git worktree: {source_repo}")
+    if source_repo == workspace or source_repo in workspace.parents:
+        raise StateError("workspace must not be inside the source repository")
+    if source_repo == data_root or source_repo in data_root.parents:
+        raise StateError("setup data must not be stored inside the source repository")
+    task_directory = data_root / "tasks" / task_id
     if task_directory.exists():
         raise StateError(f"task already exists: {task_id}")
-    workspace.mkdir(parents=True, exist_ok=True)
-    subject = (workspace / "subject") if new_repo else repo
-    if subject is None:
-        raise StateError("setup requires an existing or new subject repository")
-    subject = subject.resolve()
-    if new_repo:
-        subject.mkdir(parents=True, exist_ok=False)
-        _git(subject, "init", "-q")
-        atomic_write_text(subject / "README.md", f"# {task_id}\n")
-        _commit(subject, "Initialize research subject")
-    elif not (subject / ".git").exists():
-        raise StateError(f"target is not a Git worktree: {subject}")
-    if not _clean_except_brief(subject):
-        raise StateError("setup requires a clean subject Git worktree except ARCTL_SETUP.md")
-    evaluator = workspace / "evaluator"
-    environment = workspace / "environment"
-    evaluator.mkdir()
-    environment.mkdir()
-    if not (subject / "ARCTL_SETUP.md").is_file() and not (
-        workspace / "ARCTL_SETUP.md"
-    ).exists():
-        atomic_write_text(workspace / "ARCTL_SETUP.md", _SETUP_TEMPLATE)
-    _git(evaluator, "init", "-q")
-    _git(environment, "init", "-q")
+    if workspace.exists():
+        raise StateError(f"workspace already exists: {workspace}")
+    if not _clean(source_repo):
+        raise StateError("setup requires a clean source Git worktree")
+    source_commit = _git(source_repo, "rev-parse", "HEAD")
+    summary_output = workspace / "ARCTL_SETUP.md"
+    if summary_output.exists():
+        raise StateError(
+            f"guided setup summary output already exists and was not changed: {summary_output}"
+        )
+    workspace.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(
+        tempfile.mkdtemp(prefix=f".{workspace.name}.init-", dir=workspace.parent)
+    )
+    try:
+        completed = subprocess.run(
+            ["git", "clone", "-q", "--no-hardlinks", str(source_repo), str(temporary / "subject")],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode:
+            raise StateError(
+                "failed to ingest source repository: "
+                + (completed.stderr.strip() or completed.stdout.strip())
+            )
+        subject = temporary / "subject"
+        if _git(subject, "rev-parse", "HEAD") != source_commit:
+            raise StateError("ingested subject does not match the source HEAD")
+        evaluator = temporary / "evaluator"
+        environment = temporary / "environment"
+        evaluator.mkdir()
+        environment.mkdir()
+        _git(evaluator, "init", "-q")
+        _git(environment, "init", "-q")
+        temporary.rename(workspace)
+    except Exception:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    subject = (workspace / "subject").resolve()
+    evaluator = (workspace / "evaluator").resolve()
+    environment = (workspace / "environment").resolve()
     task_directory.mkdir(parents=True)
     record = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "setup_contract": "conversation-v2",
         "task_id": task_id,
         "workspace": str(workspace),
         "data_root": str(data_root.resolve()),
         "subject": str(subject),
-        "subject_base": _git(subject, "rev-parse", "HEAD"),
+        "subject_base": source_commit,
+        "source_repo": str(source_repo),
+        "source_commit": source_commit,
         "environment": str(environment.resolve()),
         "evaluator": str(evaluator.resolve()),
-        "new_repo": new_repo,
-        "setup_brief": str(
-            subject / "ARCTL_SETUP.md"
-            if (subject / "ARCTL_SETUP.md").is_file()
-            else workspace / "ARCTL_SETUP.md"
-        ),
         "state": "DISCOVERY_REQUIRED",
     }
     atomic_write_json(task_directory / "setup.json", record)
@@ -855,12 +1082,12 @@ def initialize_setup(
         "schema_version: 1\n"
         f"task_id: {json.dumps(task_id)}\n"
         f"data_root: {json.dumps(str(data_root.resolve()))}\n"
+        f"source_repo: {json.dumps(str(source_repo))}\n"
+        f"source_commit: {json.dumps(source_commit)}\n"
         f"subject: {json.dumps(str(subject))}\n"
         f"environment: {json.dumps(str(environment.resolve()))}\n"
         f"evaluator: {json.dumps(str(evaluator.resolve()))}\n",
     )
-    _git(subject, "config", "--local", "arctl.dataRoot", str(data_root.resolve()))
-    _git(subject, "config", "--local", "arctl.task", task_id)
     return record
 
 
@@ -878,7 +1105,7 @@ def load_setup(data_root: Path, task_id: str | None) -> tuple[Path, dict[str, An
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise StateError("setup state is missing or invalid") from error
-    if not isinstance(value, dict) or value.get("schema_version") != 1:
+    if not isinstance(value, dict) or value.get("schema_version") not in {1, 2}:
         raise StateError("setup state is missing or invalid")
     return path.parent, value
 
@@ -1051,6 +1278,96 @@ def discover_setup(
     return value
 
 
+def discover_setup_batch(
+    directory: Path,
+    setup: dict[str, Any],
+    *,
+    command_builder: SetupCommandBuilder | None = None,
+    offline: bool = False,
+    progress: SetupProgress | None = None,
+) -> dict[str, Any]:
+    """Inspect public repository state and return at most three material choices."""
+    subject = Path(setup["subject"])
+    decisions = load_decisions(directory)
+    revision = decisions["revision"] + 1
+    prompt = (
+        "Inspect this public Python repository and continue a guided arctl setup. "
+        "Do not edit files. Ask only consequential human-owned decisions. Return at "
+        "most three related questions in this batch, each with two to four materially "
+        "different grounded options, a recommendation, a concise consequence, and exact "
+        "repository line citations. The objective, primary outcome, and policy/editable "
+        "boundary must be explicit human decisions; ask them if they are not already in "
+        "confirmed_decisions. Other implementation details should be derived when the "
+        "repository and confirmed choices make them unambiguous. Never accept silence as "
+        "confirmation and never combine several fields into one prose answer. Cite the "
+        "controller failure rule for any late_dependency_requirements and ask an "
+        "explicit allow-or-reject question for each new direct dependency before returning "
+        "another design. "
+        "controller citation only for a controller-owned invariant. When no material "
+        "question remains, return no questions and one complete typed design. Specify exact "
+        "editable paths, one canonical environment adapter, an outcome statistic with direction, "
+        "unit, aggregation, extraction, and its string-key path inside each subject result, and "
+        "a trial protocol with a finite safety horizon. "
+        "Keep hard rules, hidden-data handling, telemetry, runtime limits, and evaluator approach "
+        "in the compact derived_setup object. Declare arm symmetry only when swapping algorithm "
+        "arms is scientifically meaningful; otherwise explain why it is not applicable. A "
+        "human-derived section must reference its decision ID. Use repository citations with "
+        "kind=repository and controller citations with kind=controller plus a known rule_id. "
+        "Return only JSON.\n\n"
+        + json.dumps(
+            {
+                "task_id": setup["task_id"],
+                "revision": revision,
+                "confirmed_decisions": decisions["decisions"],
+                "late_dependency_requirements": setup.get("late_dependencies", []),
+                "required_human_decisions": ["objective", "outcome", "policy_boundary"],
+                "design_sections": [
+                    "objective", "policy", "environment_adapter", "outcome", "trial",
+                    "derived_setup", "conformance", "direct_dependencies",
+                ],
+                "controller_owned_contract": SETUP_CONTROLLER_CONTRACT,
+                "controller_capabilities": SETUP_CAPABILITIES,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    attempts = directory / "setup" / "discovery" / "attempts"
+    attempt = 1 + len(tuple(attempts.glob("*"))) if attempts.is_dir() else 1
+    if progress is not None:
+        progress({"stage": "repository inspection", "status": "started"})
+    try:
+        value = _agent_run(
+            root=attempts / f"{attempt:04d}",
+            worktree=subject,
+            schema_value=batch_schema(),
+            output_name="question-batch.public.json",
+            prompt=prompt,
+            writable_worktree=False,
+            command_builder=command_builder,
+            offline=True,
+        )
+        value = validate_batch(value, subject=subject, revision=revision)
+        save_batch(directory, value)
+        if value["design"] is None:
+            setup["state"] = "QUESTIONS_REQUIRED"
+        else:
+            finalize_design(
+                directory,
+                setup,
+                value,
+                controller_contract=SETUP_CONTROLLER_CONTRACT,
+            )
+        _save_setup(directory, setup)
+    except Exception:
+        if progress is not None:
+            progress({"stage": "repository inspection", "status": "failed"})
+        raise
+    if progress is not None:
+        progress({"stage": "repository inspection", "status": "completed"})
+    return value
+
+
 def save_answers(
     directory: Path,
     setup: dict[str, Any],
@@ -1090,7 +1407,7 @@ def save_answers(
         presentation, normalized["answers"], normalized["overrides"]
     )
     atomic_write_json(
-        directory / "setup" / "resolved.public.json",
+        directory / "setup" / "legacy-resolved.public.json",
         {
             "schema_version": 1,
             "brief_sha256": normalized["brief_sha256"],
@@ -1477,7 +1794,7 @@ def _validate_build_contract(
     calibration = manifest["calibration"]
     manifest.update(
         {
-            "schema_version": 3,
+            "schema_version": 4,
             "subject_command": [python, "_arctl/subject.py", "{input}", "{output}"],
             "prepare_command": [
                 python,
@@ -1522,8 +1839,8 @@ def _validate_build_contract(
         }
         manifest["public"] = raw_public
         parsed_manifest = EvaluatorManifest.from_mapping(manifest)
-        if parsed_manifest.schema_version != 3:
-            raise ValidationError("manifest.schema_version must equal 3 for setup")
+        if parsed_manifest.schema_version != 4:
+            raise ValidationError("manifest.schema_version must equal 4 for setup")
         if parsed_manifest.subject_visible_seed:
             raise ValidationError("guided setup requires evaluator-hidden trial seeds")
         if task_config is not None:
@@ -1564,6 +1881,93 @@ def _validate_build_contract(
     return task, manifest, task_config
 
 
+def _validate_authorized_design_match(
+    directory: Path,
+    task: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+) -> None:
+    design = _load_authorized_design(directory)
+    expected_paths = [item["pattern"] for item in design["policy"]["editable_paths"]]
+    errors: list[str] = []
+    if task.get("objective") != design["objective"]["value"]:
+        errors.append("task objective differs from the authorized objective")
+    if task.get("editable_paths") != expected_paths:
+        errors.append("task editable paths differ from the authorized policy boundary")
+    public = manifest.get("public")
+    trial = manifest.get("trial")
+    if not isinstance(public, Mapping) or public.get("statistic") != design["outcome"]["statistic"]:
+        errors.append("evaluator statistic differs from the authorized outcome")
+    result_schema: Any = manifest.get("schemas", {}).get("subject_result")
+    for part in design["outcome"]["result_path"]:
+        properties = result_schema.get("properties") if isinstance(result_schema, Mapping) else None
+        if not isinstance(properties, Mapping) or part not in properties:
+            errors.append("authorized outcome result path is absent from the subject-result schema")
+            break
+        result_schema = properties[part]
+    else:
+        result_type = result_schema.get("type") if isinstance(result_schema, Mapping) else None
+        if result_type not in {"number", "integer"}:
+            errors.append("authorized outcome result path is not numeric in the subject-result schema")
+    if not isinstance(trial, Mapping) or trial.get("meaning") != design["trial"]["unit"]:
+        errors.append("evaluator trial unit differs from the authorized trial protocol")
+    if not isinstance(trial, Mapping) or trial.get("seed_to_case") != design["trial"]["seed_handling"]:
+        errors.append("evaluator seed mapping differs from the authorized trial protocol")
+    horizon = design["trial"]["horizon"]
+    case_schema = manifest.get("schemas", {}).get("public_case")
+    case_properties = case_schema.get("properties") if isinstance(case_schema, Mapping) else None
+    case_required = case_schema.get("required") if isinstance(case_schema, Mapping) else None
+    horizon_schema = (
+        case_properties.get(horizon["case_field"])
+        if isinstance(case_properties, Mapping)
+        else None
+    )
+    if (
+        not isinstance(horizon_schema, Mapping)
+        or horizon_schema.get("const") != horizon["limit"]
+        or not isinstance(case_required, list)
+        or horizon["case_field"] not in case_required
+    ):
+        errors.append("public cases do not carry the exact authorized finite horizon")
+    adapter = design["environment_adapter"]
+    codebases = task.get("environment", {}).get("codebases", [])
+    owner_repo = adapter["owner"]
+    # _validate_build_contract has already resolved owner names to workspace repositories.
+    expected_repo = str(Path(task.get("repo", ""))) if owner_repo == "subject" else None
+    if owner_repo == "subject" and not any(
+        source.get("repo") == expected_repo
+        and adapter["source_path"] in source.get("include", [])
+        for source in codebases
+    ):
+        errors.append("task environment does not include the authorized subject adapter source")
+    if owner_repo == "environment" and not any(
+        adapter["source_path"] in source.get("include", [])
+        for source in codebases
+        if source.get("repo") != str(Path(task.get("repo", "")))
+    ):
+        errors.append("task environment does not include the authorized generated adapter source")
+    setup_contract = manifest.get("setup_contract")
+    expected_setup_contract = {
+        "environment_adapter": {
+            "entrypoint": adapter["entrypoint"],
+            "interface": adapter["interface"],
+        },
+        "outcome": {
+            key: design["outcome"][key]
+            for key in ("direction", "unit", "aggregation", "extraction")
+        },
+        "trial": {
+            "termination": design["trial"]["termination"],
+            "horizon_unit": design["trial"]["horizon"]["unit"],
+        },
+        "hard_rules": design["derived_setup"]["hard_rules"],
+        "runtime_limits": design["derived_setup"]["runtime_limits"],
+    }
+    if setup_contract != expected_setup_contract:
+        errors.append("evaluator setup contract differs from the authorized setup contract")
+    if errors:
+        raise ValidationError("; ".join(errors))
+
+
 def _public_files(root: Path, *, exclude_private: bool = False) -> tuple[Path, ...]:
     return tuple(
         path
@@ -1585,6 +1989,25 @@ def _tree_hash(root: Path, *, exclude_private: bool = False) -> str:
     return digest.hexdigest()
 
 
+def _authorization_bundle_hash(directory: Path) -> str:
+    digest = hashlib.sha256()
+    for name in (
+        "authorized-design.public.json",
+        "authorization.public.json",
+        "decisions.public.json",
+    ):
+        path = directory / "setup" / name
+        try:
+            content = path.read_bytes()
+        except OSError as error:
+            raise StateError("setup authorization bundle is missing or invalid") from error
+        digest.update(name.encode())
+        digest.update(b"\0")
+        digest.update(content)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def _acceptance_payload(directory: Path, readiness: Mapping[str, Any]) -> dict[str, Any]:
     staging = readiness.get("staging")
     owned = readiness.get("owned_files")
@@ -1597,9 +2020,17 @@ def _acceptance_payload(directory: Path, readiness: Mapping[str, Any]) -> dict[s
     ):
         raise StateError("setup readiness predates complete acceptance binding; rebuild setup")
     task_draft = directory / "task.draft.yaml"
+    runtime = staging.get("runtime")
+    lock_hash = readiness.get("dependency_lock_sha256")
+    if not isinstance(runtime, str) or not isinstance(lock_hash, str):
+        raise StateError("setup readiness lacks a dependency lock; rebuild setup")
+    lock_path = Path(runtime) / "uv.lock"
+    if not lock_path.is_file():
+        raise StateError("setup dependency lock is missing; rebuild setup")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "subject_base": readiness.get("subject_base"),
+        "authorization_bundle_sha256": _authorization_bundle_hash(directory),
         "task_draft_sha256": hashlib.sha256(task_draft.read_bytes()).hexdigest(),
         "owned_files": owned,
         "tree_hashes": {
@@ -1608,6 +2039,7 @@ def _acceptance_payload(directory: Path, readiness: Mapping[str, Any]) -> dict[s
             "evaluator": _tree_hash(Path(staging["evaluator"]), exclude_private=True),
         },
         "review_sha256": review_sha256,
+        "dependency_lock_sha256": hashlib.sha256(lock_path.read_bytes()).hexdigest(),
     }
 
 
@@ -1717,6 +2149,60 @@ def _run_setup_command(
         )
 
 
+def _setup_conformance(directory: Path) -> Mapping[str, Any]:
+    value = _load_authorized_design(directory)
+    conformance = value.get("conformance")
+    if not isinstance(conformance, Mapping):
+        raise StateError("authorized setup design has invalid conformance declarations")
+    return conformance
+
+
+def _mutated_subject_output(
+    source: Path,
+    destination: Path,
+    *,
+    trial_count: int,
+    manifest: EvaluatorManifest,
+    result_path: Sequence[str],
+) -> None:
+    """Create an alternate output by changing only the authorized outcome field."""
+    original = json.loads(source.read_text(encoding="utf-8"))
+    results = original.get("results")
+    if not isinstance(results, list) or not results:
+        raise StateError("arm-symmetry check has no subject results")
+    numbers: list[float] = []
+    for result in results:
+        target: Any = result
+        for part in result_path:
+            if not isinstance(target, Mapping) or part not in target:
+                raise StateError("authorized outcome result path is absent from subject output")
+            target = target[part]
+        if isinstance(target, bool) or not isinstance(target, (int, float)):
+            raise StateError("authorized outcome result path is not numeric")
+        numbers.append(float(target))
+    for direction in (1.0, -1.0):
+        changed = json.loads(json.dumps(original))
+        for result, number in zip(changed["results"], numbers, strict=True):
+            target = result
+            for part in result_path[:-1]:
+                target = target[part]
+            target[result_path[-1]] = number + direction * max(1.0, abs(number) * 0.1)
+        atomic_write_json(destination, changed)
+        try:
+            _validate_subject_output(
+                destination,
+                subject="candidate",
+                trial_count=trial_count,
+                manifest=manifest,
+            )
+        except Exception:
+            continue
+        return
+    raise StateError(
+        "antisymmetric comparison requires a schema-valid numeric authorized outcome"
+    )
+
+
 def _protocol_preflight(
     directory: Path,
     task: TaskConfig,
@@ -1745,7 +2231,13 @@ def _protocol_preflight(
     )
     if not isinstance(count, int) or count <= 0:
         raise StateError("setup protocol preflight has no positive trial count")
-    seeds = [int.from_bytes(hashlib.sha256(f"arctl-setup:{index}".encode()).digest()[:8], "big") for index in range(count)]
+    seeds = [
+        int.from_bytes(
+            hashlib.sha256(f"arctl-setup:{index}".encode()).digest()[:8], "big"
+        )
+        for index in range(count)
+    ]
+    seeds[0] = 0
     batch = prepare_output / "batch.public.json"
     scoring = prepare_output / "scoring.private.json"
     prepare_request = requests / "prepare.json"
@@ -1802,6 +2294,125 @@ def _protocol_preflight(
     _validate_subject_output(
         result, subject="champion", trial_count=count, manifest=manifest
     )
+
+    capabilities = _setup_conformance(directory)
+
+    def prepare_variant(label: str, variant_seeds: Sequence[int]) -> tuple[Path, Path]:
+        variant_root = outputs / label
+        variant_root.mkdir(parents=True, exist_ok=True)
+        variant_batch = variant_root / "batch.public.json"
+        variant_scoring = variant_root / "scoring.private.json"
+        request = requests / f"prepare-{label}.json"
+        response = variant_root / "response.json"
+        atomic_write_json(
+            request,
+            {
+                "schema_version": 1,
+                "operation": "prepare",
+                "kind": "primary",
+                "experiment_id": 1,
+                "trial_count": count,
+                "trial_seeds": list(variant_seeds),
+                "public_batch": str(variant_batch.resolve()),
+                "private_scoring": str(variant_scoring.resolve()),
+            },
+        )
+        _run_setup_command(
+            render_command(
+                manifest.prepare_command,
+                {"request": request, "response": response},
+                allowed_roots=(root,),
+            ),
+            cwd=evaluator,
+            root=root / f"prepare-{label}",
+            read_paths=(evaluator,),
+            write_paths=(root,),
+            timeout_seconds=manifest.limits.timeout_seconds,
+            max_output_bytes=manifest.limits.max_output_bytes,
+            label=f"protocol prepare {label}",
+            sandboxed=sandboxed,
+        )
+        _validate_prepare_response(response, kind="primary", trial_count=count)
+        _validate_batch(variant_batch, trial_count=count, manifest=manifest)
+        if not variant_scoring.is_file():
+            raise StateError(f"protocol prepare {label} omitted private scoring")
+        return variant_batch, variant_scoring
+
+    repeat_batch, repeat_scoring = prepare_variant("repeat-a", seeds)
+    if (
+        json.loads(repeat_batch.read_text(encoding="utf-8"))
+        != json.loads(batch.read_text(encoding="utf-8"))
+        or json.loads(repeat_scoring.read_text(encoding="utf-8"))
+        != json.loads(scoring.read_text(encoding="utf-8"))
+    ):
+        raise StateError("same setup reservation is not repeatable")
+    alternate_seeds = [
+        int.from_bytes(hashlib.sha256(f"arctl-setup-b:{index}".encode()).digest()[:8], "big")
+        for index in range(count)
+    ]
+    alternate_batch, _ = prepare_variant("alternate-b", alternate_seeds)
+    final_batch, final_scoring = prepare_variant("repeat-a-after-b", seeds)
+    if (
+        json.loads(final_batch.read_text(encoding="utf-8"))
+        != json.loads(batch.read_text(encoding="utf-8"))
+        or json.loads(final_scoring.read_text(encoding="utf-8"))
+        != json.loads(scoring.read_text(encoding="utf-8"))
+    ):
+        raise StateError("setup prepare leaks state across sequential reservations")
+    if capabilities.get("seeded_variation") and (
+        json.loads(alternate_batch.read_text(encoding="utf-8"))
+        == json.loads(batch.read_text(encoding="utf-8"))
+    ):
+        raise StateError("seeded-variation capability produced identical public cases")
+
+    alternate_subject_result = subject_output / "alternate-b.json"
+    _run_setup_command(
+        render_command(
+            manifest.subject_command,
+            {"input": alternate_batch, "output": alternate_subject_result},
+            allowed_roots=(root,),
+        ),
+        cwd=subject,
+        root=root / "subject-alternate-b",
+        read_paths=(subject,),
+        write_paths=(root,),
+        timeout_seconds=manifest.limits.timeout_seconds,
+        max_output_bytes=manifest.limits.max_output_bytes,
+        label="protocol subject alternate reservation",
+        sandboxed=sandboxed,
+    )
+    _validate_subject_output(
+        alternate_subject_result,
+        subject="candidate",
+        trial_count=count,
+        manifest=manifest,
+    )
+    repeated_subject_result = subject_output / "repeat-a-after-b.json"
+    _run_setup_command(
+        render_command(
+            manifest.subject_command,
+            {"input": final_batch, "output": repeated_subject_result},
+            allowed_roots=(root,),
+        ),
+        cwd=subject,
+        root=root / "subject-repeat-a-after-b",
+        read_paths=(subject,),
+        write_paths=(root,),
+        timeout_seconds=manifest.limits.timeout_seconds,
+        max_output_bytes=manifest.limits.max_output_bytes,
+        label="protocol subject repeated reservation",
+        sandboxed=sandboxed,
+    )
+    _validate_subject_output(
+        repeated_subject_result,
+        subject="candidate",
+        trial_count=count,
+        manifest=manifest,
+    )
+    if json.loads(repeated_subject_result.read_text(encoding="utf-8")) != json.loads(
+        result.read_text(encoding="utf-8")
+    ):
+        raise StateError("setup subject leaks state or randomness across sequential trials")
 
     if manifest.calibration.supported:
         calibration_request = requests / "calibrate.json"
@@ -1897,12 +2508,88 @@ def _protocol_preflight(
         )
     if evidence.suspect_required:
         raise StateError("setup protocol baseline identity check cannot require suspect testing")
+    exchangeability = "not_declared"
+    if capabilities.get("arm_symmetry") == "antisymmetric":
+        alternate_output = subject_output / "exchangeable-alternate.json"
+        _mutated_subject_output(
+            result,
+            alternate_output,
+            trial_count=count,
+            manifest=manifest,
+            result_path=_load_authorized_design(directory)["outcome"]["result_path"],
+        )
+
+        def score_variant(label: str, champion: Path, candidate: Path) -> Evidence:
+            request = requests / f"score-{label}.json"
+            response_root = score_output / label
+            response_root.mkdir(parents=True, exist_ok=True)
+            response = response_root / "evidence.json"
+            atomic_write_json(
+                request,
+                {
+                    "schema_version": 1,
+                    "operation": "score",
+                    "kind": "primary",
+                    "experiment_id": 1,
+                    "trial_count": count,
+                    "private_scoring": str(scoring.resolve()),
+                    "champion_output": str(champion.resolve()),
+                    "candidate_output": str(candidate.resolve()),
+                },
+            )
+            _run_setup_command(
+                render_command(
+                    manifest.score_command,
+                    {"request": request, "response": response},
+                    allowed_roots=(root,),
+                ),
+                cwd=evaluator,
+                root=root / f"score-{label}",
+                read_paths=(evaluator,),
+                write_paths=(root,),
+                timeout_seconds=manifest.limits.timeout_seconds,
+                max_output_bytes=manifest.limits.max_output_bytes,
+                label=f"protocol score {label}",
+                sandboxed=sandboxed,
+            )
+            return Evidence.from_mapping(
+                json.loads(response.read_text(encoding="utf-8")),
+                expected_kind="primary",
+                expected_trial_count=count,
+                allowed_telemetry=manifest.public_telemetry,
+                allowed_suspect_reasons=manifest.suspect_reason_codes,
+            )
+
+        forward = score_variant("exchange-forward", result, alternate_output)
+        reverse = score_variant("exchange-reverse", alternate_output, result)
+        if forward.effect_estimate == 0:
+            raise StateError(
+                "exchangeable comparison fixture did not produce a nonzero effect"
+            )
+        if not math.isclose(
+            forward.effect_estimate,
+            -reverse.effect_estimate,
+            rel_tol=1e-9,
+            abs_tol=1e-12,
+        ):
+            raise StateError(
+                "exchangeable comparison effect is not antisymmetric under arm-label swap"
+            )
+        exchangeability = "passed"
     summary = {
         "schema_version": 1,
         "trial_count": count,
         "seeds": seeds,
         "effect_estimate": evidence.effect_estimate,
         "one_sided_lower_bound": evidence.one_sided_lower_bound,
+        "conformance": {
+            "same_reservation_repeatability": "passed",
+            "sequential_state_isolation": "passed",
+            "seeded_variation": (
+                "passed" if capabilities.get("seeded_variation") else "not_declared"
+            ),
+            "arm_symmetry": exchangeability,
+        },
         "attempt": attempt,
     }
     atomic_write_json(root / "preflight.public.json", summary)
@@ -1984,6 +2671,176 @@ def _public_setup_checks(
         )
 
 
+def _direct_build_schema() -> dict[str, Any]:
+    text = {"type": "string", "minLength": 1}
+    paths = {"type": "array", "items": text}
+    return _schema(
+        {
+            "schema_version": {"type": "integer", "const": 1},
+            "summary": text,
+            "dependencies": {"type": "array", "items": text},
+            "subject_files": paths,
+            "environment_files": paths,
+            "evaluator_files": paths,
+        }
+    )
+
+
+def _read_owned_file_records(root: Path, paths: Sequence[str], *, label: str) -> list[dict[str, str]]:
+    records: list[dict[str, str]] = []
+    seen: set[Path] = set()
+    for raw in paths:
+        relative = Path(raw)
+        if (
+            relative.is_absolute()
+            or relative == Path(".")
+            or ".." in relative.parts
+            or ".git" in relative.parts
+            or relative in seen
+        ):
+            raise ValidationError(f"direct setup build declared an unsafe {label} path")
+        seen.add(relative)
+        path = root / relative
+        if not path.is_file() or path.is_symlink():
+            raise ValidationError(f"direct setup build omitted declared {label} file: {raw}")
+        records.append({"path": relative.as_posix(), "content": path.read_text(encoding="utf-8")})
+    return records
+
+
+def build_setup_direct(
+    directory: Path,
+    setup: dict[str, Any],
+    *,
+    offline: bool,
+    progress: SetupProgress | None = None,
+) -> dict[str, Any]:
+    """Let the builder write disposable repositories and return only a compact report."""
+    resolved_path = directory / "setup" / "authorized-design.public.json"
+    if not resolved_path.is_file():
+        raise StateError("setup design must be authorized before generation")
+    requirements = _load_authorized_design(directory)
+    attempts = directory / "setup" / "direct-build" / "attempts"
+    attempt = 1 + len(tuple(attempts.glob("*"))) if attempts.is_dir() else 1
+    subject, environment, evaluator, runtime = _fresh_staging_roots(
+        directory, setup, 10_000 + attempt
+    )
+    staging_root = subject.parent
+    prompt = (
+        "Build the authorized arctl setup directly inside the supplied disposable staging "
+        "workspace. Network access is disabled. Do not commit. Write subject files only "
+        "under subject/, environment files only under environment/, and evaluator files "
+        "only under evaluator/. Write subject/_arctl/hook.py implementing run_batch; write "
+        "evaluator/_arctl/hook.py implementing prepare, calibrate, and score; and write "
+        "evaluator/test_generated_evaluator.py. Do not write controller-owned api.py, "
+        "subject.py, evaluator.py, or evaluator.manifest.json. Write task.design.json and "
+        "evaluator.design.json at the staging root using the supplied typed build contract's "
+        "task and manifest-design shapes. Return a compact report listing only additional "
+        "owned file paths relative to each repository, direct dependencies, and a summary; "
+        "do not put source code or configuration contents in the response. Include no fixed "
+        "hook paths in the owned lists. Prefer existing project conventions and change no "
+        "confirmed decision or controller rule.\n\n"
+        + json.dumps(
+            {
+                "staging": {
+                    "root": str(staging_root),
+                    "subject": str(subject),
+                    "environment": str(environment),
+                    "evaluator": str(evaluator),
+                },
+                "requirements": requirements,
+                "prior_review_findings": setup.get("prior_review_findings", []),
+                "prior_build_findings": setup.get("prior_build_findings", []),
+                "controller_owned_contract": SETUP_CONTROLLER_CONTRACT,
+                "controller_capabilities": SETUP_CAPABILITIES,
+                "typed_build_contract": SETUP_BUILD_CONTRACT,
+                "controller_owned_hook_api_source": SETUP_API_MODULE,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    if progress is not None:
+        progress({"stage": "generation", "status": "started"})
+    try:
+        report = _agent_run(
+            root=attempts / f"{attempt:04d}",
+            worktree=staging_root,
+            schema_value=_direct_build_schema(),
+            output_name="build-report.public.json",
+            prompt=prompt,
+            writable_worktree=True,
+            read_paths=(Path(setup["subject"]),),
+            offline=True,
+        )
+        subject_hook = (subject / "_arctl" / "hook.py").read_text(encoding="utf-8")
+        evaluator_hook = (evaluator / "_arctl" / "hook.py").read_text(encoding="utf-8")
+        evaluator_test = (evaluator / "test_generated_evaluator.py").read_text(encoding="utf-8")
+        task_design = json.loads((staging_root / "task.design.json").read_text(encoding="utf-8"))
+        evaluator_design = json.loads(
+            (staging_root / "evaluator.design.json").read_text(encoding="utf-8")
+        )
+        value = {
+            "schema_version": 4,
+            "summary": report["summary"],
+            "dependencies": report["dependencies"],
+            "subject_hook": subject_hook,
+            "evaluator_hook": evaluator_hook,
+            "evaluator_test": evaluator_test,
+            "subject_files": _read_owned_file_records(
+                subject, report["subject_files"], label="subject"
+            ),
+            "environment_files": _read_owned_file_records(
+                environment, report["environment_files"], label="environment"
+            ),
+            "evaluator_files": _read_owned_file_records(
+                evaluator, report["evaluator_files"], label="evaluator"
+            ),
+            "task": task_design,
+            "evaluator": evaluator_design,
+        }
+    except Exception:
+        if progress is not None:
+            progress({"stage": "generation", "status": "failed"})
+        raise
+    if progress is not None:
+        progress({"stage": "generation", "status": "completed"})
+    contract_digest = hashlib.sha256(
+        json.dumps(build_schema(), sort_keys=True, separators=(",", ":")).encode()
+        + SUBJECT_ENTRYPOINT.encode()
+        + EVALUATOR_ENTRYPOINT.encode()
+        + SETUP_API_MODULE.encode()
+    ).hexdigest()
+    requirements_digest = hashlib.sha256(
+        resolved_path.read_bytes() + contract_digest.encode()
+    ).hexdigest()
+    internal = attempts / f"{attempt:04d}" / "output" / "build.internal.json"
+    atomic_write_json(internal, value)
+    setup["pending_build"] = {
+        "output": str(internal),
+        "requirements_sha256": requirements_digest,
+        "contract_sha256": contract_digest,
+    }
+    _save_setup(directory, setup)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            setup["subject"],
+            "worktree",
+            "remove",
+            "--force",
+            str(subject),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    shutil.rmtree(staging_root, ignore_errors=True)
+    # The normal controller path rematerializes and validates every staged file,
+    # then runs review, dependency provisioning, and conformance in sandboxes.
+    return build_setup(directory, setup, offline=offline, progress=progress)
+
+
 def build_setup(
     directory: Path,
     setup: dict[str, Any],
@@ -1996,20 +2853,10 @@ def build_setup(
     source_subject = Path(setup["subject"])
     source_evaluator = Path(setup["evaluator"])
     source_environment = Path(setup["environment"])
-    if not _clean_except_brief(source_subject):
-        raise StateError("setup requires a clean subject Git worktree except ARCTL_SETUP.md")
-    resolved_path = directory / "setup" / "resolved.public.json"
-    if not resolved_path.is_file():
-        answers = json.loads(
-            (directory / "setup" / "answers.public.json").read_text(encoding="utf-8")
-        )
-        save_answers(
-            directory,
-            setup,
-            answers.get("answers", {}),
-            answers.get("overrides", {}),
-        )
-    requirements = json.loads(resolved_path.read_text(encoding="utf-8"))
+    if not _clean(source_subject):
+        raise StateError("setup requires a clean subject Git worktree")
+    resolved_path = directory / "setup" / "authorized-design.public.json"
+    requirements = _load_authorized_design(directory)
     prior_readiness = directory / "setup" / "readiness.public.json"
     prior_findings = []
     if prior_readiness.is_file():
@@ -2088,6 +2935,11 @@ def build_setup(
         and isinstance(pending.get("output"), str)
         else None
     )
+    if command_builder is None and pending_path is None:
+        raise StateError(
+            "setup generation requires the isolated direct builder; "
+            "no validated internal build is pending"
+        )
     if progress is not None:
         progress({"stage": "generation", "status": "started"})
     if pending_path is not None and pending_path.is_file():
@@ -2142,7 +2994,17 @@ def build_setup(
         progress({"stage": "task validation", "status": "started"})
     try:
         task_value, manifest_value, task = _validate_build_contract(value, setup)
+        _validate_authorized_design_match(directory, task_value, manifest_value)
     except ValidationError as first_error:
+        if command_builder is None and pending_path is not None and pending_path.name == "build.internal.json":
+            setup.pop("pending_build", None)
+            setup["prior_build_findings"] = [str(first_error)]
+            setup["state"] = "BUILD_REQUIRED"
+            _save_setup(directory, setup)
+            raise StateError(
+                "direct staged setup is invalid and requires one fresh bounded repair: "
+                + str(first_error)
+            ) from first_error
         if progress is not None:
             progress({"stage": "task validation", "status": "failed"})
             progress(
@@ -2206,6 +3068,7 @@ def build_setup(
             }
             _save_setup(directory, setup)
             task_value, manifest_value, task = _validate_build_contract(value, setup)
+            _validate_authorized_design_match(directory, task_value, manifest_value)
         except (StateError, ValidationError) as repair_error:
             if progress is not None:
                 progress(
@@ -2233,6 +3096,7 @@ def build_setup(
             progress({"stage": "task validation", "status": "started"})
     if progress is not None:
         progress({"stage": "task validation", "status": "completed"})
+    _validate_dependency_plan(value["dependencies"], directory=directory)
     generated = {
         "subject_files": [
             *value["subject_files"],
@@ -2286,24 +3150,142 @@ def build_setup(
         + "\n"
     )
     atomic_write_text(runtime / "pyproject.toml", pyproject)
+    review_prompt = (
+        "Review this generated arctl setup before any dependency is installed or generated "
+        "code is executed. Inspect the subject integration, public environment, evaluator "
+        "code, manifest, task draft, authorized design, and direct dependency plan. Cover "
+        "every required area exactly once: intent_fidelity, grounding, editable_boundary, dependencies, "
+        "trial_independence, scoring_statistics, seed_handling, and runtime_behavior. Each "
+        "pass or failure needs a short evidence citation to an inspected file; "
+        "not_applicable needs a cogent reason. Report every concrete defect. Do not treat an "
+        "empty findings list as sufficient coverage. Return only JSON.\n\n"
+        + json.dumps(
+            {
+                "requirements": requirements,
+                "task_draft": str(directory / "task.draft.yaml"),
+                "subject": str(subject),
+                "environment": str(environment),
+                "evaluator": str(evaluator),
+                "runtime_project": str(runtime / "pyproject.toml"),
+                "controller_owned_contract": SETUP_CONTROLLER_CONTRACT,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    review_attempts = directory / "setup" / "review" / "attempts"
+    review_attempt = 1 + len(tuple(review_attempts.glob("*"))) if review_attempts.is_dir() else 1
+    if progress is not None:
+        progress({"stage": "setup review", "status": "started"})
+    try:
+        static_review = _agent_run(
+            root=review_attempts / f"{review_attempt:04d}",
+            worktree=subject,
+            schema_value=review_schema(),
+            output_name="review.public.json",
+            prompt=review_prompt,
+            writable_worktree=False,
+            read_paths=(
+                subject,
+                environment,
+                directory,
+                runtime / "pyproject.toml",
+                *_public_files(evaluator, exclude_private=True),
+            ),
+            command_builder=review_command_builder,
+            offline=offline,
+            validate_output=review_command_builder is None,
+        )
+        if static_review.get("schema_version") == 1 and review_command_builder is not None:
+            legacy_findings = static_review.get("findings", [])
+            failed_area = "intent_fidelity" if legacy_findings else None
+            static_review = {
+                "schema_version": 2,
+                "summary": static_review.get("summary", "Legacy test review."),
+                "coverage": {
+                    area: {
+                        "status": "fail" if area == failed_area else "pass",
+                        "summary": "Adapted legacy command-builder review result.",
+                        "evidence": [
+                            {
+                                "path": str(directory / "task.draft.yaml"),
+                                "location": "line 1",
+                                "finding": "The command-builder fixture inspected the generated setup.",
+                            }
+                        ],
+                    }
+                    for area in (
+                        "intent_fidelity",
+                        "grounding",
+                        "editable_boundary",
+                        "dependencies",
+                        "trial_independence",
+                        "scoring_statistics",
+                        "seed_handling",
+                        "runtime_behavior",
+                    )
+                },
+                "findings": legacy_findings,
+            }
+        _validate_review_evidence(
+            static_review,
+            roots=(subject, environment, evaluator, directory, runtime),
+        )
+    except Exception:
+        if progress is not None:
+            progress({"stage": "setup review", "status": "failed"})
+        setup["state"] = "REVIEW_FAILED"
+        _save_setup(directory, setup)
+        raise
+    if progress is not None:
+        progress({"stage": "setup review", "status": "completed"})
+    if static_review["findings"]:
+        setup["state"] = "REVIEW_FAILED"
+        setup["prior_review_findings"] = static_review["findings"]
+        _save_setup(directory, setup)
+        raise StateError("generated setup failed static review before provisioning")
     uv = shutil.which("uv")
     if uv is None:
         raise StateError("uv is required for Python workspace setup")
+    configured_index = os.environ.get("ARCTL_PACKAGE_INDEX", "https://pypi.org/simple")
+    if hashlib.sha256(configured_index.encode()).hexdigest() != requirements[
+        "dependency_source_policy"
+    ]["fingerprint"]:
+        raise StateError("configured package index changed after setup authorization")
     sync = [
         uv,
         "sync",
         "--project",
         str(runtime),
         "--no-install-project",
+        "--default-index",
+        configured_index,
         *(("--offline",) if offline else ()),
     ]
-    uv_environment = os.environ.copy()
+    uv_home = runtime / "home"
+    uv_home.mkdir(parents=True, exist_ok=True)
+    uv_environment = sanitized_environment(
+        codex_home=runtime / "codex-home",
+        writable_home=uv_home,
+    )
     uv_environment["UV_CACHE_DIR"] = str(runtime / ".uv-cache")
     uv_environment["UV_PROJECT_ENVIRONMENT"] = str(Path(setup["workspace"]) / ".venv")
     if progress is not None:
         progress({"stage": "dependencies", "status": "started"})
+    sync_command = (
+        sandbox_command(
+            marked_command(sync, runtime / "uv-sync.started"),
+            cwd=runtime,
+            read_paths=(),
+            write_paths=(runtime, Path(setup["workspace"]) / ".venv"),
+            profile="arctl-setup-dependencies",
+            network_enabled=not offline,
+        )
+        if command_builder is None
+        else tuple(sync)
+    )
     completed = subprocess.run(
-        sync,
+        sync_command,
         check=False,
         capture_output=True,
         text=True,
@@ -2315,6 +3297,10 @@ def build_setup(
         if offline:
             raise StateError("workspace dependencies are unavailable offline; rerun setup without --offline")
         raise StateError("uv failed to provision the workspace runtime: " + completed.stderr.strip())
+    dependency_lock = runtime / "uv.lock"
+    if not dependency_lock.is_file():
+        raise StateError("uv provisioning did not produce a dependency lock")
+    dependency_lock_sha256 = hashlib.sha256(dependency_lock.read_bytes()).hexdigest()
     if progress is not None:
         progress({"stage": "dependencies", "status": "completed"})
         progress({"stage": "evaluator checks", "status": "started"})
@@ -2366,57 +3352,7 @@ def build_setup(
         raise
     if progress is not None:
         progress({"stage": "public checks", "status": "completed"})
-    review_prompt = (
-        "Review this generated arctl setup. Inspect the subject integration, public "
-        "environment, evaluator code, manifest, task draft, and confirmed requirements. "
-        "Report every concrete leakage, trial-independence, statistical-contract, "
-        "telemetry, seed-handling, runtime, or fidelity defect. Do not read evaluator/private. "
-        "Reject any generated protocol that contradicts the supplied controller-owned "
-        "contract, silently resolves an ambiguous human statistic or timeout scope, "
-        "claims an unenforced resource limit, or scores an operational failure. An "
-        "empty findings array means no supported defect was found. Return only JSON.\n\n"
-        + json.dumps(
-            {
-                "requirements": requirements,
-                "task_draft": str(directory / "task.draft.yaml"),
-                "subject": str(subject),
-                "environment": str(environment),
-                "evaluator": str(evaluator),
-                "controller_owned_contract": SETUP_CONTROLLER_CONTRACT,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    )
-    review_attempts = directory / "setup" / "review" / "attempts"
-    review_attempt = (
-        1 + len(tuple(review_attempts.glob("*"))) if review_attempts.is_dir() else 1
-    )
-    if progress is not None:
-        progress({"stage": "setup review", "status": "started"})
-    try:
-        review = _agent_run(
-            root=review_attempts / f"{review_attempt:04d}",
-            worktree=subject,
-            schema_value=review_schema(),
-            output_name="review.public.json",
-            prompt=review_prompt,
-            writable_worktree=False,
-            read_paths=(
-                subject,
-                environment,
-                directory,
-                *_public_files(evaluator, exclude_private=True),
-            ),
-            command_builder=review_command_builder,
-            offline=offline,
-        )
-    except Exception:
-        if progress is not None:
-            progress({"stage": "setup review", "status": "failed"})
-        raise
-    if progress is not None:
-        progress({"stage": "setup review", "status": "completed"})
+    review = static_review
     readiness = {
         "schema_version": 2,
         "requirements": "ready",
@@ -2425,6 +3361,8 @@ def build_setup(
         "evaluator": "ready",
         "runtime": "ready",
         "dependencies": value["dependencies"],
+        "dependency_lock": str(dependency_lock),
+        "dependency_lock_sha256": dependency_lock_sha256,
         "preflight": preflight,
         "review": "ready" if not review["findings"] else "blocked",
         "findings": review["findings"],
@@ -2437,6 +3375,7 @@ def build_setup(
             "subject": str(subject),
             "environment": str(environment),
             "evaluator": str(evaluator),
+            "runtime": str(runtime),
         },
         "owned_files": generated,
         "owned_files_sha256": _json_sha256(generated),
@@ -2572,7 +3511,7 @@ def _reviewed_artifacts(
         ),
     }
     if (
-        manifest.schema_version != 3
+        manifest.schema_version != 4
         or manifest.subject_command != expected_commands["subject"]
         or manifest.prepare_command != expected_commands["prepare"]
         or manifest.score_command != expected_commands["score"]
@@ -2723,12 +3662,15 @@ def review_setup_edits(
         change["stages"] = stages
         atomic_write_json(root / "change.public.json", change)
         requirements = json.loads(
-            (directory / "setup" / "resolved.public.json").read_text(encoding="utf-8")
+            (directory / "setup" / "authorized-design.public.json").read_text(encoding="utf-8")
         )
         prompt = (
             "Review these edits to a previously reviewed arctl setup. Inspect the complete "
             "current public setup and the saved change record. Report every concrete "
-            "integrity, leakage, protocol, runtime, or fidelity defect. Return only JSON.\n\n"
+            "integrity, leakage, protocol, runtime, or fidelity defect. Cover intent_fidelity, "
+            "grounding, editable_boundary, dependencies, trial_independence, scoring_statistics, "
+            "seed_handling, and runtime_behavior with pass, fail, or justified not_applicable "
+            "and cite inspected files. Return only JSON.\n\n"
             + json.dumps(
                 {
                     "change_record": str(root / "change.public.json"),
@@ -2760,6 +3702,34 @@ def review_setup_edits(
             ),
             command_builder=review_command_builder,
             offline=offline,
+            validate_output=review_command_builder is None,
+        )
+        if review.get("schema_version") == 1 and review_command_builder is not None:
+            legacy_findings = review.get("findings", [])
+            failed_area = "intent_fidelity" if legacy_findings else None
+            review = {
+                "schema_version": 2,
+                "summary": review.get("summary", "Legacy test review."),
+                "coverage": {
+                    area: {
+                        "status": "fail" if area == failed_area else "pass",
+                        "summary": "Adapted legacy command-builder review result.",
+                        "evidence": [{
+                            "path": str(directory / "task.draft.yaml"),
+                            "location": "line 1",
+                            "finding": "The command-builder fixture inspected the setup.",
+                        }],
+                    }
+                    for area in (
+                        "intent_fidelity", "grounding", "editable_boundary", "dependencies",
+                        "trial_independence", "scoring_statistics", "seed_handling",
+                        "runtime_behavior",
+                    )
+                },
+                "findings": legacy_findings,
+            }
+        _validate_review_evidence(
+            review, roots=(subject, environment, evaluator, directory)
         )
         if progress is not None:
             progress({"stage": "setup review", "status": "completed"})
@@ -2807,6 +3777,7 @@ def accept_setup(directory: Path, setup: dict[str, Any], token: str) -> TaskConf
     readiness = json.loads(
         (directory / "setup" / "readiness.public.json").read_text(encoding="utf-8")
     )
+    _load_authorized_design(directory)
     current_token = _acceptance_token(_acceptance_payload(directory, readiness))
     if token != readiness.get("acceptance_token") or token != current_token:
         setup["state"] = "SETUP_EDIT_REVIEW_REQUIRED"
@@ -2888,19 +3859,24 @@ def accept_setup(directory: Path, setup: dict[str, Any], token: str) -> TaskConf
     if (subject.resolve(), subject_commit) not in environment_locks:
         raise StateError("accepted task does not lock the subject interface source")
     setup["state"] = "READY_FOR_APPROVAL"
-    requirements = json.loads(
-        (directory / "setup" / "answers.public.json").read_text(encoding="utf-8")
-    )
-    if requirements.get("schema_version") == 2:
-        proposed = {
-            item["id"]: item["proposed_answer"] for item in requirements["proposal"]
-        }
-        setup["evaluator_pattern"] = requirements["overrides"].get(
-            "evaluator_pattern",
-            requirements["answers"].get("evaluator", proposed["evaluator_pattern"]),
-        )
+    design_path = directory / "setup" / "authorized-design.public.json"
+    if design_path.is_file():
+        design = json.loads(design_path.read_text(encoding="utf-8"))
+        setup["evaluator_pattern"] = design["derived_setup"]["evaluator_pattern"]
     else:
-        setup["evaluator_pattern"] = requirements["answers"]["evaluator_pattern"]
+        requirements = json.loads(
+            (directory / "setup" / "answers.public.json").read_text(encoding="utf-8")
+        )
+        if requirements.get("schema_version") == 2:
+            proposed = {
+                item["id"]: item["proposed_answer"] for item in requirements["proposal"]
+            }
+            setup["evaluator_pattern"] = requirements["overrides"].get(
+                "evaluator_pattern",
+                requirements["answers"].get("evaluator", proposed["evaluator_pattern"]),
+            )
+        else:
+            setup["evaluator_pattern"] = requirements["answers"]["evaluator_pattern"]
     setup["subject_commit"] = subject_commit
     setup["environment_commit"] = environment_commit
     setup["evaluator_commit"] = evaluator_commit

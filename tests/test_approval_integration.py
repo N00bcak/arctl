@@ -154,6 +154,20 @@ class ApprovalIntegrationTests(unittest.TestCase):
                 preview.confirmation_token,
             )
 
+    def test_new_task_accepts_a_manifest_v4_setup_contract(self) -> None:
+        (self.evaluator / "evaluator.manifest.json").write_text(
+            json.dumps(valid_manifest(version=4), sort_keys=True)
+        )
+        git(self.evaluator, "add", ".")
+        git(self.evaluator, "commit", "-qm", "manifest v4")
+        raw = dict(self.raw_task)
+        raw["evaluator"] = {
+            "repo": str(self.evaluator),
+            "commit": git(self.evaluator, "rev-parse", "HEAD"),
+        }
+        preview = preview_approval(self.task_file, TaskConfig.from_mapping(raw))
+        self.assertEqual(preview.evaluator_commit, raw["evaluator"]["commit"])
+
     def test_approval_preview_summarizes_auto_protocol_and_token(self) -> None:
         import yaml
 

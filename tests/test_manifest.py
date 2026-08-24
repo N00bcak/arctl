@@ -91,6 +91,25 @@ def valid_manifest(*, version: int = 3, telemetry: bool = False) -> dict:
             "ceiling": 256,
         }
     )
+    if version >= 4:
+        manifest["setup_contract"] = {
+            "environment_adapter": {
+                "entrypoint": "demo:Environment",
+                "interface": "Python callable",
+            },
+            "outcome": {
+                "direction": "higher",
+                "unit": "score",
+                "aggregation": "paired mean",
+                "extraction": "subject result score",
+            },
+            "trial": {
+                "termination": "map completion",
+                "horizon_unit": "actions",
+            },
+            "hard_rules": ["Keep environment fixed."],
+            "runtime_limits": ["60 seconds per process"],
+        }
     return manifest
 
 
@@ -101,6 +120,17 @@ class ManifestTests(unittest.TestCase):
         manifest.validate_trial_setting(1)
         manifest.validate_trial_setting(256)
         self.assertEqual(manifest.suspect_reason_codes, ("timeout_shift",))
+
+    def test_manifest_v4_requires_and_parses_the_setup_contract(self) -> None:
+        raw = valid_manifest(version=4)
+        manifest = EvaluatorManifest.from_mapping(raw)
+        self.assertEqual(
+            manifest.setup_contract.environment_adapter_entrypoint,
+            "demo:Environment",
+        )
+        raw.pop("setup_contract")
+        with self.assertRaisesRegex(ValidationError, "missing=.*setup_contract"):
+            EvaluatorManifest.from_mapping(raw)
 
     def test_semantic_telemetry_contract(self) -> None:
         manifest = EvaluatorManifest.from_mapping(valid_manifest(telemetry=True))

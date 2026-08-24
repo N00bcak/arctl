@@ -460,7 +460,8 @@ and prints the activation command. The script must be safe to rerun and must not
 Write files through a temporary file and rename so half-written files are not used. Only one `arctl` process may hold the task lock. SQLite may help with search and reports, but Git and these files stay the source of truth.
 ```bash
 arctl doctor
-arctl init (--repo PATH | --new-repo PATH) [--workspace PATH]
+arctl init [SOURCE] [--workspace PATH]
+arctl task create [SOURCE]
 arctl setup TASK_ID [--answers FILE] [--offline] [--accept TOKEN]
 arctl approve TASK_ID
 arctl run TASK_ID [--max-experiments N] [--retries N] [--retry-delay SECONDS]
@@ -470,12 +471,23 @@ arctl report TASK_ID
 arctl history TASK_ID [--query TEXT] [--path GLOB] [--decision VALUE]
 arctl inspect TASK_ID EXPERIMENT_ID
 ```
-`TASK_ID` and `EXPERIMENT_ID` may be omitted when the current repo and context identify exactly one target. `doctor` checks Git, Codex, sandbox rules, and runtime needs. `init` creates a visible guided workspace and, when the subject has none, an `ARCTL_SETUP.md` template. `setup` treats that brief as human intent, reconciles it with cited public repository evidence, shows one canonical proposal, and asks only about material gaps, ambiguity, contradictions, or infeasible requirements. It generates a Python/uv subject adapter, public environment, evaluator, and task draft, and independently reviews their public contract. Related independence, trial sizing, horizon, seed, and hidden-trial details form one clarification; setup asks at most four disjoint clarification groups. Comparator freezing, paired-batch execution, seed non-reuse, calibration selection, promotion mapping, and unscored operational failures remain controller rules and are not human questions. Setup must not invent an unsupported number, confidence method, distribution, threshold, or resource limit; an unsupported choice has no default and requires an answer. Confirmed answers form the canonical generation and review contract. Arctl validates typed task and manifest output before dependency provisioning, then permits one repair supplied with exact contract errors. Long-running stages and downstream failures are visible. Setup agents cannot read hidden evaluator data. Existing subjects use a local setup branch; acceptance hashes and commits the reviewed trees but never pushes. Review findings may be repaired in later immutable attempts. This setup token confirms generated files only; `approve` remains the separate human trust boundary for the evaluator's mathematics and exact locked protocol. Manual task authoring remains supported. `run` first calibrates when required, ensures a strategy, then plans, implements, and runs experiments until explicitly stopped, operationally blocked, or limited by an approved finite ceiling. `status` shows setup or research work. `history` searches the public exploration ledger. `stop` stops safely. `report` shows progress and aggregate results. `inspect` shows the safe artifact inventory and aggregate record; trusted humans audit private files with normal file tools.
+`TASK_ID` and `EXPERIMENT_ID` may be omitted when the current repo and context identify exactly one target. `doctor` checks Git, Codex, sandbox rules, and runtime needs. `init` ingests a clean existing repository into a non-Git shell workspace containing independent `subject`, `environment`, and `evaluator` Git repositories; the source repository is never modified. `setup` runs a revisioned offline repository conversation, displays the exact persisted value of each consequential choice, and authorizes one typed design covering objective, editable paths, environment adapter, outcome extraction, finite horizon, derived setup, conformance, and top-level dependencies. Generation and review consume the exact hash-bound authorized snapshot. The setup specialist recommends sampling, seeds, calibration, uncertainty, and telemetry instead of delegating those mechanics. Comparator freezing, paired batches, seed non-reuse, calibration selection, promotion mapping, and unscored failures remain controller rules. The builder writes isolated staging repositories offline and returns a compact report. Review occurs before configured-index dependency provisioning; transitive dependencies inherit top-level authorization. Arctl validates typed outputs, permits one repair, and runs seed-zero, repeatability, sequential-state, identity-score, declared-variation, and applicable arm-symmetry checks. Acceptance verifies unchanged reviewed trees and commits only reviewed files in the three workspace repositories without pushing. `approve` remains the separate trust boundary. Manual task authoring uses `arctl task create SOURCE`. `run`, `status`, `history`, `stop`, `report`, and `inspect` retain their existing meanings.
+
+For new guided-setup sessions, the revisioned conversation contract supersedes
+the preceding legacy discovery description. `init` creates no input brief and
+prints an absolute resume command. `setup` asks up to three cited, numbered
+decisions per revision, persists only explicit human choices, and separately
+authorizes a complete hash-bound typed design. The builder writes offline disposable staging
+repositories and returns a compact report. Independent coverage review occurs
+before authorized direct dependencies are resolved from configured indexes;
+the authorization bundle, dependency lock, and declared conformance results are
+bound into acceptance. `ARCTL_SETUP.md` is generated afterward as a readable output.
+Legacy unfinished setup state is reported without migration or mutation.
 
 The novice setup path is:
 ```text
 arctl doctor
-arctl init --repo .
+arctl init .
 arctl setup
 arctl approve
 arctl run

@@ -20,6 +20,7 @@ commands:
   COMMAND
     doctor    check Git, Codex, sandbox, runtime, network, and cleanup support
     init      create a guided Python research workspace
+    task      manage explicitly authored task contracts
     setup     discover, build, review, and accept a Python task workspace
     approve   preview or confirm the task, evaluator, environment, and champion lock
     run       calibrate if needed, search for candidates, and run official experiments
@@ -31,7 +32,7 @@ commands:
 
 Typical workflow:
   arctl doctor
-  arctl init --repo /path/to/subject
+  arctl init /path/to/subject
   arctl setup TASK
   arctl approve TASK
   arctl approve TASK --confirm TOKEN
@@ -40,8 +41,9 @@ Typical workflow:
 
 Complete command forms:
   arctl doctor [--json]
-  arctl init (--repo PATH | --new-repo PATH) [--workspace PATH]
+  arctl init [SOURCE] [--workspace PATH]
              [--task-id TASK] [--json]
+  arctl task create [SOURCE] [--task-id TASK] [--json]
   arctl setup [TASK] [--answers FILE] [--offline]
                      [--accept TOKEN] [--json]
   arctl approve [TASK] [--confirm TOKEN] [--json]
@@ -76,42 +78,62 @@ Run this after installation or when a sandbox/runtime preflight fails.
 ## `arctl init -h`
 
 ```text
-usage: arctl init [-h] [--json] [--repo PATH] [--new-repo PATH] [--workspace PATH] [--task-id TASK]
+usage: arctl init [-h] [--json] [--workspace PATH] [--task-id TASK] [SOURCE]
 
-Create visible setup storage for an existing or new Python subject repository.
+Ingest an existing Git repository into a workspace with independent subject, environment, and evaluator repositories.
+
+positional arguments:
+  SOURCE            clean source Git repository to ingest (default: current directory)
 
 options:
   -h, --help        show this help message and exit
   --json            emit one stable machine-readable JSON object
-  --repo PATH       existing clean local Git worktree containing the policy to improve
-  --new-repo PATH   create a visible workspace and new subject repository at PATH
   --workspace PATH  workspace path; defaults to a visible sibling of an existing repo
   --task-id TASK    task ID; defaults to the repository directory name
 
 Example:
-  arctl init --repo . --task-id routing-policy
+  arctl init . --task-id routing-policy
+```
+
+## `arctl task -h`
+
+```text
+usage: arctl task [-h] COMMAND ...
+
+Create a manually editable task contract without guided workspace setup.
+
+positional arguments:
+  COMMAND
+    create    create a manually editable task.yaml
+
+options:
+  -h, --help  show this help message and exit
 ```
 
 ## `arctl setup -h`
 
 ```text
-usage: arctl setup [-h] [--json] [--answers FILE] [--offline] [--accept TOKEN] [TASK]
+usage: arctl setup [-h] [--json] [--answers FILE] [--offline] [--accept TOKEN]
+                   [--authorize-design TOKEN]
+                   [TASK]
 
-Run resumable pre-approval setup. Discovery is read-only; generated code and evaluator
-remain drafts until explicit setup acceptance and normal task approval.
+Run resumable pre-approval setup. Public inspection returns up to three cited choices
+per revision; generation is offline and reviewed before dependency provisioning.
 
 positional arguments:
-  TASK            task ID; omit when the current repository identifies exactly one task
+  TASK                      task ID; omit when the current repository identifies exactly one task
 
 options:
-  -h, --help      show this help message and exit
-  --json          emit one stable machine-readable JSON object
-  --answers FILE  JSON answers for open clarification IDs plus optional canonical overrides
-  --offline       disable setup-agent internet access and require cached uv dependencies
-  --accept TOKEN  accept the verified setup trees and create their local Git commits
+  -h, --help                show this help message and exit
+  --json                    emit one stable machine-readable JSON object
+  --answers FILE            JSON answers for open clarification IDs plus optional canonical
+                            overrides
+  --offline                 require cached dependencies; setup agents are always offline
+  --accept TOKEN            accept the verified setup trees and create their local Git commits
+  --authorize-design TOKEN  authorize the exact summarized setup design returned by --json
 
-AI operators should use --json, resolve returned clarification IDs with --answers,
-and obtain permission before using --accept.
+AI operators should use --json, answer the exact returned revision with --answers,
+authorize the summarized design, and obtain permission before using --accept.
 ```
 
 ## `arctl approve -h`

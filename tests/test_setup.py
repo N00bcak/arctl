@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import yaml
 
-from arctl.errors import StateError
+from arctl.errors import StateError, ValidationError
 from arctl.sandbox import MAX_AGENT_PROMPT_BYTES
 from arctl.setup import (
     QUESTION_IDS,
@@ -29,6 +29,7 @@ from arctl.setup import (
     _build_semantic_findings,
     _agent_failure_detail,
     _upgrade_build_v3,
+    _validate_authorized_design_match,
     _validate_build_contract,
     _run_setup_command,
 )
@@ -66,34 +67,125 @@ class GuidedSetupTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
-        self.subject = self.root / "subject"
-        self.subject.mkdir()
-        git(self.subject, "init", "-q")
-        git(self.subject, "config", "user.name", "tests")
-        git(self.subject, "config", "user.email", "tests@invalid")
-        (self.subject / "README.md").write_text("# Demo policy\n")
-        git(self.subject, "add", ".")
-        git(self.subject, "commit", "-qm", "baseline")
+        self.source = self.root / "subject"
+        self.source.mkdir()
+        git(self.source, "init", "-q")
+        git(self.source, "config", "user.name", "tests")
+        git(self.source, "config", "user.email", "tests@invalid")
+        (self.source / "README.md").write_text("# Demo policy\n")
+        git(self.source, "add", ".")
+        git(self.source, "commit", "-qm", "baseline")
         self.workspace = self.root / "demo-research"
         self.data = self.workspace / ".arctl-data"
         initialize_setup(
             data_root=self.data,
             workspace=self.workspace,
-            repo=self.subject,
-            new_repo=False,
+            source_repo=self.source,
             task_id="demo",
         )
         self.directory, self.record = load_setup(self.data, "demo")
+        self.subject = Path(self.record["subject"])
+        self.write_authorized_design()
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def write_authorized_design(
+        self, *, seeded_variation: bool = False, arm_symmetry: str = "not_applicable"
+    ) -> None:
+        derived = {"source": "derived", "decision_refs": [], "citations": []}
+        design = {
+            "schema_version": 2,
+            "revision": 1,
+            "decision_revision": 1,
+            "summary": "Demo guided setup.",
+            "objective": {
+                "value": "Improve the demo policy.", "source": "human",
+                "decision_refs": ["objective"], "citations": [],
+            },
+            "policy": {
+                "editable_paths": [{"pattern": "solution/**", "origin": "generated"}],
+                "rationale": "Keep the environment fixed.", "source": "human",
+                "decision_refs": ["policy_boundary"], "citations": [],
+            },
+            "environment_adapter": {
+                "owner": "subject", "source_path": "README.md",
+                "entrypoint": "demo:Environment", "interface": "Python callable",
+                "rationale": "Use the documented interface.", **derived,
+            },
+            "outcome": {
+                "statistic": "expected score", "direction": "higher", "unit": "score",
+                "aggregation": "paired mean", "extraction": "subject result score",
+                "result_path": ["score"],
+                "source": "human", "decision_refs": ["outcome"], "citations": [],
+            },
+            "trial": {
+                "unit": "one generated map", "termination": "map completion",
+                "horizon": {"unit": "actions", "limit": 1000, "case_field": "max_actions"},
+                "seed_handling": "seed initializes the map generator", **derived,
+            },
+            "derived_setup": {
+                "hard_rules": ["Keep environment fixed."],
+                "hidden_data": "Seeds and scoring remain evaluator-private.",
+                "telemetry": [], "runtime_limits": ["60 seconds per process"],
+                "evaluator_pattern": "paired comparison",
+            },
+            "conformance": {
+                "seeded_variation": seeded_variation,
+                "arm_symmetry": arm_symmetry,
+                "arm_symmetry_rationale": "Fixture declaration.",
+            },
+            "direct_dependencies": [],
+            "source_provenance": {
+                "path": str(self.source), "commit": self.record["source_commit"],
+            },
+            "controller_contract": {
+                "version": 1,
+                "sha256": hashlib.sha256(
+                    json.dumps(
+                        SETUP_CONTROLLER_CONTRACT,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest(),
+            },
+            "dependency_source_policy": {
+                "index": "https://pypi.org/simple",
+                "fingerprint": hashlib.sha256(b"https://pypi.org/simple").hexdigest(),
+            },
+        }
+        (self.directory / "setup").mkdir(exist_ok=True)
+        (self.directory / "setup" / "authorized-design.public.json").write_text(
+            json.dumps(design), encoding="utf-8"
+        )
+        (self.directory / "setup" / "authorization.public.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "authorized": True,
+                    "design_sha256": hashlib.sha256(
+                        json.dumps(design, sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest(),
+                    "decision_revision": design["decision_revision"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.directory / "setup" / "decisions.public.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "revision": design["decision_revision"],
+                    "decisions": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
     def discovery(self) -> dict:
         return {
             "schema_version": 5,
-            "brief_sha256": hashlib.sha256(
-                (self.workspace / "ARCTL_SETUP.md").read_bytes()
-            ).hexdigest(),
+            "brief_sha256": hashlib.sha256(b"").hexdigest(),
             "summary": "The repository exposes one small policy.",
             "fields": [
                 {
@@ -115,7 +207,29 @@ class GuidedSetupTests(unittest.TestCase):
         }
 
     def build_value(self) -> dict:
-        manifest = valid_manifest()
+        manifest = valid_manifest(version=4)
+        manifest["setup_contract"] = {
+            "environment_adapter": {
+                "entrypoint": "demo:Environment",
+                "interface": "Python callable",
+            },
+            "outcome": {
+                "direction": "higher",
+                "unit": "score",
+                "aggregation": "paired mean",
+                "extraction": "subject result score",
+            },
+            "trial": {
+                "termination": "map completion",
+                "horizon_unit": "actions",
+            },
+            "hard_rules": ["Keep environment fixed."],
+            "runtime_limits": ["60 seconds per process"],
+        }
+        manifest["schemas"]["public_case"]["required"].append("max_actions")
+        manifest["schemas"]["public_case"]["properties"]["max_actions"] = {
+            "const": 1000
+        }
         task = {
             "schema_version": 5,
             "task_id": "demo",
@@ -206,7 +320,8 @@ class GuidedSetupTests(unittest.TestCase):
                 "def prepare(context):\n"
                 "    return {'public_batch': {'schema_version': 1, "
                 "'trial_count': context['trial_count'], "
-                "'cases': [{'value': seed} for seed in context['trial_seeds']]}, "
+                "'cases': [{'value': seed, 'max_actions': 1000} "
+                "for seed in context['trial_seeds']]}, "
                 "'private_scoring': {}}\n\n"
                 "def calibrate(context):\n"
                 "    return [{'trial_count': count, 'diagnostic_value': 0.0} "
@@ -289,6 +404,11 @@ class GuidedSetupTests(unittest.TestCase):
         self.assertEqual(task.schema_version, 5)
         self.assertEqual(task.evaluator.commit, git(Path(record["evaluator"]), "rev-parse", "HEAD"))
         self.assertTrue((self.directory / "task.yaml").is_file())
+        self.assertEqual(git(self.source, "status", "--porcelain"), "")
+        self.assertEqual(
+            git(self.source, "rev-parse", "HEAD"), self.record["source_commit"]
+        )
+        self.assertFalse((self.source / "_arctl").exists())
         started = [event["stage"] for event in events if event["status"] == "started"]
         self.assertEqual(
             started,
@@ -296,27 +416,54 @@ class GuidedSetupTests(unittest.TestCase):
                 "brief + repository discovery",
                 "generation",
                 "task validation",
+                "setup review",
                 "dependencies",
                 "evaluator checks",
                 "protocol preflight",
                 "public checks",
-                "setup review",
             ],
         )
 
-    def test_init_creates_visible_setup_brief_without_modifying_subject(self) -> None:
+    def test_declared_conformance_enables_seed_and_arm_symmetry_metatests(self) -> None:
+        discover_setup(
+            self.directory,
+            self.record,
+            command_builder=output_builder("discovery.public.json", self.discovery()),
+        )
+        _, record = load_setup(self.data, "demo")
+        save_answers(self.directory, record, {})
+        self.write_authorized_design(
+            seeded_variation=True, arm_symmetry="antisymmetric"
+        )
+        _, record = load_setup(self.data, "demo")
+        readiness = build_setup(
+            self.directory,
+            record,
+            offline=False,
+            command_builder=output_builder("build.public.json", self.build_value()),
+            review_command_builder=output_builder(
+                "review.public.json",
+                {"schema_version": 1, "summary": "No findings.", "findings": []},
+            ),
+        )
+        self.assertEqual(readiness["preflight"]["conformance"]["seeded_variation"], "passed")
+        self.assertEqual(
+            readiness["preflight"]["conformance"]["arm_symmetry"],
+            "passed",
+        )
+
+    def test_init_defers_setup_summary_until_acceptance(self) -> None:
         brief = self.workspace / "ARCTL_SETUP.md"
-        self.assertTrue(brief.is_file())
-        self.assertIn("## Trial protocol", brief.read_text(encoding="utf-8"))
+        self.assertFalse(brief.exists())
         self.assertFalse((self.subject / "ARCTL_SETUP.md").exists())
 
-    def test_subject_brief_takes_precedence_and_changes_invalidate_discovery(self) -> None:
+    def test_subject_setup_note_is_not_treated_as_setup_input(self) -> None:
         (self.subject / "ARCTL_SETUP.md").write_text(
             "# ARCTL setup\n\n## Goal and primary outcome\nAccuracy.\n",
             encoding="utf-8",
         )
         discovery = self.discovery()
-        self.assertTrue(brief_changed(self.record, discovery))
+        self.assertFalse(brief_changed(self.record, discovery))
 
     def test_open_questions_are_grouped_and_only_those_answers_are_required(self) -> None:
         discovery = self.discovery()
@@ -344,7 +491,7 @@ class GuidedSetupTests(unittest.TestCase):
         self.assertEqual(set(saved["answers"]), {"constraints"})
         self.assertEqual(set(saved["overrides"]), {"runtime_budget"})
         resolved = json.loads(
-            (self.directory / "setup" / "resolved.public.json").read_text()
+            (self.directory / "setup" / "legacy-resolved.public.json").read_text()
         )
         by_id = {item["id"]: item["resolved_answer"] for item in resolved["fields"]}
         self.assertIn(
@@ -376,7 +523,7 @@ class GuidedSetupTests(unittest.TestCase):
         _, record = load_setup(self.data, "demo")
         save_answers(self.directory, record, {"constraints": "Accepted."})
         resolved = json.loads(
-            (self.directory / "setup" / "resolved.public.json").read_text()
+            (self.directory / "setup" / "legacy-resolved.public.json").read_text()
         )
         by_id = {item["id"]: item["resolved_answer"] for item in resolved["fields"]}
         for identifier in ("hard_rules", "telemetry", "runtime_budget"):
@@ -498,6 +645,43 @@ class GuidedSetupTests(unittest.TestCase):
         readiness_path.write_text(json.dumps(readiness), encoding="utf-8")
         _, record = load_setup(self.data, "demo")
         with self.assertRaisesRegex(StateError, "rerun setup to review the edits"):
+            accept_setup(self.directory, record, readiness["acceptance_token"])
+
+    def test_acceptance_rejects_an_authorized_design_edit_after_readiness(self) -> None:
+        readiness = self.ready_setup()
+        design_path = self.directory / "setup" / "authorized-design.public.json"
+        design = json.loads(design_path.read_text(encoding="utf-8"))
+        design["summary"] = "Edited after readiness."
+        design_path.write_text(json.dumps(design), encoding="utf-8")
+        _, record = load_setup(self.data, "demo")
+        with self.assertRaisesRegex(StateError, "authorized setup design changed"):
+            accept_setup(self.directory, record, readiness["acceptance_token"])
+        self.assertEqual(git(self.subject, "branch", "--show-current"), "master")
+
+    def test_acceptance_bundle_rejects_coordinated_authorization_edits(self) -> None:
+        readiness = self.ready_setup()
+        design_path = self.directory / "setup" / "authorized-design.public.json"
+        authorization_path = self.directory / "setup" / "authorization.public.json"
+        design = json.loads(design_path.read_text(encoding="utf-8"))
+        design["summary"] = "Edited with the authorization record."
+        design_path.write_text(json.dumps(design), encoding="utf-8")
+        authorization = json.loads(authorization_path.read_text(encoding="utf-8"))
+        authorization["design_sha256"] = hashlib.sha256(
+            json.dumps(design, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        authorization_path.write_text(json.dumps(authorization), encoding="utf-8")
+        _, record = load_setup(self.data, "demo")
+        with self.assertRaisesRegex(StateError, "changed after review"):
+            accept_setup(self.directory, record, readiness["acceptance_token"])
+
+    def test_acceptance_bundle_covers_the_decisions_record(self) -> None:
+        readiness = self.ready_setup()
+        decisions_path = self.directory / "setup" / "decisions.public.json"
+        decisions = json.loads(decisions_path.read_text(encoding="utf-8"))
+        decisions["decisions"].append({"id": "edited-after-readiness"})
+        decisions_path.write_text(json.dumps(decisions), encoding="utf-8")
+        _, record = load_setup(self.data, "demo")
+        with self.assertRaisesRegex(StateError, "changed after review"):
             accept_setup(self.directory, record, readiness["acceptance_token"])
 
     def test_task_edit_requires_review_and_issues_a_new_token(self) -> None:
@@ -638,27 +822,27 @@ class GuidedSetupTests(unittest.TestCase):
             {identifier: f"answer {identifier}" for identifier in QUESTION_IDS},
         )
         _, record = load_setup(self.data, "demo")
-        first = build_setup(
-            self.directory,
-            record,
-            offline=False,
-            command_builder=output_builder("build.public.json", self.build_value()),
-            review_command_builder=output_builder(
-                "review.public.json",
-                {
-                    "schema_version": 1,
-                    "summary": "One defect.",
-                    "findings": [
-                        {
-                            "code": "SEED",
-                            "location": "adapter",
-                            "message": "Fix seed handling.",
-                        }
-                    ],
-                },
-            ),
-        )
-        self.assertEqual(first["review"], "blocked")
+        with self.assertRaisesRegex(StateError, "before provisioning"):
+            build_setup(
+                self.directory,
+                record,
+                offline=False,
+                command_builder=output_builder("build.public.json", self.build_value()),
+                review_command_builder=output_builder(
+                    "review.public.json",
+                    {
+                        "schema_version": 1,
+                        "summary": "One defect.",
+                        "findings": [
+                            {
+                                "code": "SEED",
+                                "location": "adapter",
+                                "message": "Fix seed handling.",
+                            }
+                        ],
+                    },
+                ),
+            )
         _, record = load_setup(self.data, "demo")
         second = build_setup(
             self.directory,
@@ -851,6 +1035,38 @@ class GuidedSetupTests(unittest.TestCase):
         ):
             _validate_build_contract(value, self.record)
 
+    def test_build_contract_must_match_authorized_scientific_fields(self) -> None:
+        value = self.build_value()
+        task, manifest, _ = _validate_build_contract(value, self.record)
+        _validate_authorized_design_match(self.directory, task, manifest)
+        task["editable_paths"] = ["different/**"]
+        with self.assertRaisesRegex(ValidationError, "authorized policy boundary"):
+            _validate_authorized_design_match(self.directory, task, manifest)
+
+    def test_build_contract_rejects_each_unfaithful_setup_contract_field(self) -> None:
+        mutations = (
+            (("environment_adapter", "entrypoint"), "other:Environment"),
+            (("environment_adapter", "interface"), "CLI"),
+            (("outcome", "direction"), "lower"),
+            (("outcome", "unit"), "points"),
+            (("outcome", "aggregation"), "median"),
+            (("outcome", "extraction"), "another field"),
+            (("trial", "termination"), "timeout"),
+            (("trial", "horizon_unit"), "seconds"),
+            (("hard_rules",), ["Different rule."]),
+            (("runtime_limits",), ["10 seconds per process"]),
+        )
+        for path, replacement in mutations:
+            with self.subTest(path=path):
+                value = self.build_value()
+                target = value["evaluator"]["setup_contract"]
+                for part in path[:-1]:
+                    target = target[part]
+                target[path[-1]] = replacement
+                task, manifest, _ = _validate_build_contract(value, self.record)
+                with self.assertRaisesRegex(ValidationError, "authorized setup contract"):
+                    _validate_authorized_design_match(self.directory, task, manifest)
+
     def test_build_contract_reports_all_generated_telemetry_defects(self) -> None:
         value = self.build_value()
         value["evaluator"]["public"]["telemetry"] = [
@@ -928,6 +1144,10 @@ class GuidedSetupTests(unittest.TestCase):
                 record,
                 offline=False,
                 command_builder=output_builder("build.public.json", broken),
+                review_command_builder=output_builder(
+                    "review.public.json",
+                    {"schema_version": 1, "summary": "Static pass.", "findings": []},
+                ),
             )
         _, record = load_setup(self.data, "demo")
         self.assertNotIn("pending_build", record)

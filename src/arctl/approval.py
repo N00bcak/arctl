@@ -249,8 +249,8 @@ def preview_approval(task_file: Path, task: TaskConfig) -> ApprovalPreview:
     if not isinstance(value, dict):
         raise ValidationError("approved evaluator manifest must contain one object")
     manifest = EvaluatorManifest.from_mapping(value)
-    if manifest.schema_version != 3:
-        raise ValidationError("new tasks require a manifest-v3 telemetry contract")
+    if manifest.schema_version not in (3, 4):
+        raise ValidationError("new tasks require a manifest-v3 or manifest-v4 contract")
     if manifest.subject_visible_seed:
         raise ValidationError("new tasks require evaluator-hidden trial seeds")
     manifest.validate_trial_setting(task.trials)
