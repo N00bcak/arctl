@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +25,15 @@ class CandidateReviewTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.worktree = self.root / "worktree"
         self.worktree.mkdir()
+        (self.worktree / "policy.py").write_text("VALUE = 1\n")
+        for command in (
+            ("git", "init", "-q"),
+            ("git", "config", "user.name", "arctl tests"),
+            ("git", "config", "user.email", "tests@arctl.invalid"),
+            ("git", "add", "."),
+            ("git", "commit", "-qm", "champion"),
+        ):
+            subprocess.run(command, cwd=self.worktree, check=True)
         raw = valid_task()
         raw["repo"] = str(self.worktree)
         raw["candidate_review"] = {
@@ -119,6 +130,44 @@ scratch = Path(sys.argv[1])
         self.assertTrue((checks / "0001" / "process" / "stderr.bin").is_file())
         self.assertTrue(
             (checks / "0001-retry-0001" / "process" / "result.json").is_file()
+        )
+
+    def test_policy_check_discards_and_audits_isolated_python_cache(self) -> None:
+        def isolated_check(_command, _worktree, _scratch):
+            return (
+                sys.executable,
+                "-I",
+                "-m",
+                "py_compile",
+                "policy.py",
+            )
+
+        review = review_candidate(
+            self.task,
+            self.manifest,
+            worktree=self.worktree,
+            attempt_directory=self.root / "attempt",
+            champion="a" * 40,
+            request=self.request,
+            stop_path=self.root / "stop",
+            review_command_builder=self.passing_review,
+            check_command_builder=isolated_check,
+        )
+
+        assert review is not None
+        audit = json.loads(
+            (self.root / "attempt" / "runtime-artifacts.public.json").read_text()
+        )
+        self.assertEqual(
+            audit["events"],
+            [
+                {
+                    "stage": "candidate-review/round-01/check-0001",
+                    "discarded_paths": [
+                        f"__pycache__/policy.{sys.implementation.cache_tag}.pyc"
+                    ],
+                }
+            ],
         )
 
     def test_reviewer_schema_has_no_redundant_verdict(self) -> None:
@@ -223,10 +272,15 @@ scratch = Path(sys.argv[1])
 
         def repair(_worktree: Path, scratch: Path, _schema: Path, _prompt: str):
             script = """\
-import json, sys
+import json, subprocess, sys
 from pathlib import Path
 worktree, scratch = map(Path, sys.argv[1:])
 (worktree / 'bad').unlink()
+subprocess.run(
+    [sys.executable, '-I', '-m', 'py_compile', 'policy.py'],
+    cwd=worktree,
+    check=True,
+)
 (scratch / 'repair.public.json').write_text(json.dumps({
     'schema_version': 2,
     'status': 'repaired',
@@ -266,6 +320,20 @@ worktree, scratch = map(Path, sys.argv[1:])
         )
         self.assertIn("Use only supplied observations.", review_prompts[0])
         self.assertIn("bad was removed", review_prompts[0])
+        audit = json.loads(
+            (self.root / "attempt" / "runtime-artifacts.public.json").read_text()
+        )
+        self.assertEqual(
+            audit["events"],
+            [
+                {
+                    "stage": "candidate-review/round-01/repair",
+                    "discarded_paths": [
+                        f"__pycache__/policy.{sys.implementation.cache_tag}.pyc"
+                    ],
+                }
+            ],
+        )
 
     def test_infeasible_repair_ends_the_attempt(self) -> None:
         (self.worktree / "bad").write_text("violation")

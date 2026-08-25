@@ -232,6 +232,9 @@ def freeze_candidate(
             denied_paths=task.denied_paths,
             prior_candidate_ref_prefix=f"refs/arctl/{task.task_id}/candidates/",
             message=f"arctl experiment {record.experiment_id}",
+            runtime_artifact_audit=(
+                experiment_directory / "runtime-artifacts.public.json"
+            ),
         )
         atomic_write_text(candidate_path, candidate + "\n")
 

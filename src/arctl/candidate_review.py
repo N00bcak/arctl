@@ -15,6 +15,7 @@ from .agent_backend import AgentSessionRequest, agent_command, agent_environment
 from .agent_selection import select_agent
 from .downstream import transient_process_error
 from .errors import ProcessError, ResearchMiss, StateError, StoppedError
+from .git import normalize_runtime_artifacts
 from .manifest import EvaluatorManifest
 from .process import run_or_load_once
 from .registry import LocatedTask
@@ -279,6 +280,8 @@ def _check_failure(
     root: Path,
     manifest: EvaluatorManifest,
     *,
+    artifact_audit: Path,
+    artifact_stage: str,
     command_builder: CheckCommandBuilder | None,
     stop_path: Path,
 ) -> dict[str, Any] | None:
@@ -337,6 +340,11 @@ def _check_failure(
             if transient is not None:
                 raise transient from error
             result = {"return_code": 1}
+        normalize_runtime_artifacts(
+            worktree,
+            stage=f"{artifact_stage}/check-{scratch.name}",
+            audit_path=artifact_audit,
+        )
         if result["return_code"] == 0:
             continue
         transient = transient_process_error(
@@ -468,6 +476,10 @@ def review_candidate(
             worktree,
             root,
             manifest,
+            artifact_audit=(
+                attempt_directory / "runtime-artifacts.public.json"
+            ),
+            artifact_stage=f"candidate-review/{root.name}",
             command_builder=check_command_builder,
             stop_path=stop_path,
         )
@@ -490,6 +502,11 @@ def review_candidate(
                 command_builder=review_command_builder,
                 writable=False,
                 stop_path=stop_path,
+            )
+            normalize_runtime_artifacts(
+                worktree,
+                stage=f"candidate-review/{root.name}/semantic",
+                audit_path=attempt_directory / "runtime-artifacts.public.json",
             )
             review = _validate_review(raw)
             assert review is not None
@@ -521,6 +538,11 @@ def review_candidate(
             command_builder=repair_command_builder,
             writable=True,
             stop_path=stop_path,
+        )
+        normalize_runtime_artifacts(
+            worktree,
+            stage=f"candidate-review/{root.name}/repair",
+            audit_path=attempt_directory / "runtime-artifacts.public.json",
         )
         implementation_report = _validate_repair(repair)
         if implementation_report["status"] == "infeasible":

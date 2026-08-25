@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -305,6 +306,72 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
         self.assertEqual(plan["selection"], request["strategy_behavior_id"])
         self.assertEqual(plan["directions"][0]["request"], request)
         self.assertTrue((attempt / "implementation.public.json").is_file())
+
+    def test_isolated_python_cache_is_audited_without_replanning(self) -> None:
+        def implementation(
+            worktree: Path, scratch: Path, _schema: Path, _prompt: str
+        ):
+            script = """\
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+worktree, scratch = map(Path, sys.argv[1:])
+subject = worktree / "subject.py"
+subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
+subprocess.run(
+    [sys.executable, "-I", "-m", "py_compile", "subject.py"],
+    cwd=worktree,
+    check=True,
+)
+(scratch / "implementation.public.json").write_text(json.dumps({
+    "schema_version": 1,
+    "status": "implemented",
+    "summary": "Implemented and probed the frozen mechanism.",
+    "deviations": [],
+}))
+"""
+            return ("python3", "-c", script, str(worktree), str(scratch))
+
+        outcome = run_task(
+            self.task,
+            max_experiments=1,
+            planning_command_builder=self.planning_command,
+            research_command_builder=implementation,
+            public_check_command_builder=self.unconfined_public,
+            comparison_command_builder=self.unconfined_comparison,
+        )
+
+        self.assertEqual(len(outcome.results), 1)
+        attempts = self.task_directory / "searches" / "000001" / "attempts"
+        self.assertEqual([path.name for path in attempts.iterdir()], ["01"])
+        audit = json.loads(
+            (attempts / "01" / "runtime-artifacts.public.json").read_text()
+        )
+        self.assertEqual(
+            audit,
+            {
+                "schema_version": 1,
+                "events": [
+                    {
+                        "stage": "implementation",
+                        "discarded_paths": [
+                            f"__pycache__/subject.{sys.implementation.cache_tag}.pyc"
+                        ],
+                    }
+                ],
+            },
+        )
+        self.assertEqual(
+            search_ledger(
+                self.task_directory,
+                query="scope_violation",
+                path=None,
+                decision=None,
+            ),
+            [],
+        )
 
     def test_all_directions_exhausted_refreshes_strategy_then_replans(self) -> None:
         planning_calls = 0

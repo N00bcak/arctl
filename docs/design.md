@@ -356,6 +356,7 @@ TASK/
 │   ├── 000001.public.json            # environment observations and behaviors
 │   └── 000001/                       # process and failure artifacts
 ├── searches/000001/attempts/01/      # executor and candidate-review attempts
+│   └── runtime-artifacts.public.json # discarded interpreter-cache audit
 ├── experiments/000001/
 │   ├── request.public.json
 │   ├── candidate.commit

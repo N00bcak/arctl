@@ -67,6 +67,13 @@ Before review, arctl times that approved probe and projects official runtime.
 Likely overruns are visible to the implementer, reviewer, and operator but do
 not reject the candidate or alter approved trials.
 
+Python caches are redirected to attempt scratch space when the interpreter
+allows it. Canonical untracked `__pycache__/*.pyc` files that bypass that
+redirect, including under isolated Python, are discarded at writable lifecycle
+boundaries and recorded by stage in `runtime-artifacts.public.json`. Tracked,
+symlinked, orphaned, or noncanonical bytecode remains subject to the normal
+editable-path checks.
+
 Public results retain the promotion `decision` and add independent status axes.
 `operational_status` records whether execution completed; `scientific_status`
 records supported, contradicted, inconclusive, or untested evidence.

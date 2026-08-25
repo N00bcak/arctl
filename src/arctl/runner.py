@@ -51,6 +51,7 @@ from .git import (
     create_detached_worktree,
     delete_ref,
     ensure_clean_worktree,
+    normalize_runtime_artifacts,
     remove_worktree,
     resolve_commit,
 )
@@ -1119,6 +1120,11 @@ def _candidate_search(
                 )
                 request_path = attempt_directory / "request.public.json"
                 request = json.loads(request_path.read_text(encoding="utf-8"))
+            normalize_runtime_artifacts(
+                worktree,
+                stage="implementation" if split_roles else "research",
+                audit_path=attempt_directory / "runtime-artifacts.public.json",
+            )
             if not isinstance(request, dict):
                 raise ResearchMiss("invalid_request", "research request is not an object")
             try:
@@ -1146,6 +1152,11 @@ def _candidate_search(
                 command_builder=check_command_builder,
                 stop_path=stop_path,
             )
+            normalize_runtime_artifacts(
+                worktree,
+                stage="compute-probe",
+                audit_path=attempt_directory / "runtime-artifacts.public.json",
+            )
             _notify(progress, "compute_probe", report=compute_report)
             review_candidate(
                 task,
@@ -1169,6 +1180,9 @@ def _candidate_search(
                 denied_paths=task.config.denied_paths,
                 prior_candidate_ref_prefix=f"refs/arctl/{task.config.task_id}/candidates/",
                 message=f"arctl search {search_id} attempt {attempt}",
+                runtime_artifact_audit=(
+                    attempt_directory / "runtime-artifacts.public.json"
+                ),
             )
         except StoppedError:
             remove_worktree(task.config.repo, worktree)
@@ -1305,6 +1319,11 @@ def _recover_candidate_stage(
             except (StateError, TransientDownstreamError):
                 remove_worktree(task.config.repo, worktree)
                 raise
+            normalize_runtime_artifacts(
+                worktree,
+                stage="implementation",
+                audit_path=attempt_directory / "runtime-artifacts.public.json",
+            )
             ResearchRequest.from_mapping(
                 request, allowed_telemetry=manifest.public_telemetry
             )
@@ -1321,6 +1340,11 @@ def _recover_candidate_stage(
                 trial_count=trial_count,
                 command_builder=check_command_builder,
                 stop_path=stop_path,
+            )
+            normalize_runtime_artifacts(
+                worktree,
+                stage="compute-probe",
+                audit_path=attempt_directory / "runtime-artifacts.public.json",
             )
             _notify(progress, "compute_probe", report=compute_report)
             review_candidate(
@@ -1345,6 +1369,9 @@ def _recover_candidate_stage(
                 denied_paths=task.config.denied_paths,
                 prior_candidate_ref_prefix=f"refs/arctl/{task.config.task_id}/candidates/",
                 message=f"arctl search {search_id} attempt {attempt_number}",
+                runtime_artifact_audit=(
+                    attempt_directory / "runtime-artifacts.public.json"
+                ),
             )
             write_json_once(
                 attempt_directory / "candidate.public.json",
@@ -1434,6 +1461,11 @@ def _recover_candidate_review(
                 attempt=attempt,
                 attempts=6,
             )
+            normalize_runtime_artifacts(
+                worktree,
+                stage="candidate-review-recovery",
+                audit_path=attempt_directory / "runtime-artifacts.public.json",
+            )
             compute_report = _run_compute_probe(
                 task,
                 manifest,
@@ -1442,6 +1474,11 @@ def _recover_candidate_review(
                 trial_count=trial_count,
                 command_builder=check_command_builder,
                 stop_path=stop_path,
+            )
+            normalize_runtime_artifacts(
+                worktree,
+                stage="compute-probe",
+                audit_path=attempt_directory / "runtime-artifacts.public.json",
             )
             _notify(progress, "compute_probe", report=compute_report)
             review_candidate(
@@ -1478,6 +1515,9 @@ def _recover_candidate_review(
                     f"refs/arctl/{task.config.task_id}/candidates/"
                 ),
                 message=f"arctl search {search_id} attempt {attempt}",
+                runtime_artifact_audit=(
+                    attempt_directory / "runtime-artifacts.public.json"
+                ),
             )
             write_json_once(
                 candidate_path,
