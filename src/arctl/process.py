@@ -183,11 +183,31 @@ def run_once(
                 selector.register(source, selectors.EVENT_READ)
             deadline = time.monotonic() + timeout_seconds
             output_bytes = 0
+            process_exited_at: float | None = None
             try:
                 while selector.get_map():
                     if stop_path is not None and stop_path.exists():
                         raise StoppedError("process stopped by request")
-                    remaining = deadline - time.monotonic()
+                    now = time.monotonic()
+                    if process.poll() is not None:
+                        if process_exited_at is None:
+                            process_exited_at = now
+                        elif now - process_exited_at >= 1:
+                            # A managed command must not leave descendants running.
+                            # Descendants that inherit stdout/stderr otherwise keep the
+                            # selector open until the full command timeout even though
+                            # the recorded process has already exited.
+                            try:
+                                os.killpg(process.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                        if now - process_exited_at >= 2:
+                            # A descriptor inherited outside the process group must not
+                            # prevent the main command's result from being recorded.
+                            for key in tuple(selector.get_map().values()):
+                                selector.unregister(key.fileobj)
+                            break
+                    remaining = deadline - now
                     if remaining <= 0:
                         raise ProcessError("process timed out")
                     for key, _ in selector.select(min(remaining, 0.1)):

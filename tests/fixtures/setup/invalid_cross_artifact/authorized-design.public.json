@@ -1,0 +1,16 @@
+{
+  "direct_dependencies": [
+    {
+      "imports": ["numpy"],
+      "requirement": "numpy (runtime dependency)"
+    },
+    {
+      "imports": ["local_env"],
+      "requirement": "local-env"
+    }
+  ],
+  "environment_adapter": {
+    "owner": "environment",
+    "source_path": "adapter.py"
+  }
+}

@@ -13,9 +13,11 @@ import yaml
 
 from arctl.errors import StateError, ValidationError
 from arctl.sandbox import MAX_AGENT_PROMPT_BYTES
+from arctl.setup_protocol import UNITTEST_ENTRYPOINT
 from arctl.setup import (
     QUESTION_IDS,
     SETUP_CONTROLLER_CONTRACT,
+    _authorized_adapter_source_path,
     accept_setup,
     build_schema,
     build_setup,
@@ -64,6 +66,23 @@ def output_builder(name: str, value: dict):
 
 
 class GuidedSetupTests(unittest.TestCase):
+    def test_legacy_authorized_adapter_note_is_not_part_of_source_path(self) -> None:
+        self.assertEqual(
+            _authorized_adapter_source_path(
+                {
+                    "source_path": (
+                        "arctl_environment_adapter.py "
+                        "(environment-owned generated adapter; not subject-editable)"
+                    )
+                }
+            ),
+            "arctl_environment_adapter.py",
+        )
+        self.assertEqual(
+            _authorized_adapter_source_path({"source_path": "nested/adapter.py"}),
+            "nested/adapter.py",
+        )
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -1125,6 +1144,29 @@ class GuidedSetupTests(unittest.TestCase):
         self.assertEqual(task["public_checks"][0][0], expected_python)
         self.assertEqual(task["public_probe"]["command"][0], expected_python)
 
+    def test_subject_only_environment_evidence_needs_no_environment_placeholder(self) -> None:
+        value = self.build_value()
+        subject_sources = [
+            source
+            for source in value["task"]["environment"]["codebases"]
+            if source["owner"] == "subject"
+        ]
+        self.assertTrue(subject_sources)
+        value["task"]["environment"]["codebases"] = subject_sources
+        source_ids = {source["id"] for source in subject_sources}
+        for probe in value["task"]["environment"]["probes"]:
+            probe["backed_by"] = [
+                identifier
+                for identifier in probe["backed_by"]
+                if identifier in source_ids
+            ]
+
+        task, _, _ = _validate_build_contract(value, self.record)
+
+        serialized = json.dumps(task, sort_keys=True)
+        self.assertIn("SETUP_SUBJECT_COMMIT", serialized)
+        self.assertNotIn("SETUP_ENVIRONMENT_COMMIT", serialized)
+
     def test_protocol_preflight_failure_forces_fresh_generation(self) -> None:
         discover_setup(
             self.directory,
@@ -1164,3 +1206,39 @@ class GuidedSetupTests(unittest.TestCase):
                 self.record,
                 command_builder=output_builder("discovery.public.json", discovery),
             )
+
+    def test_controller_unittest_runner_rejects_skipped_coverage(self) -> None:
+        root = self.root / "runner-fixture"
+        suite = root / "suite"
+        suite.mkdir(parents=True)
+        runner = root / "runner.py"
+        runner.write_text(UNITTEST_ENTRYPOINT, encoding="utf-8")
+        test = suite / "test_generated.py"
+        test.write_text(
+            "import unittest\n"
+            "class GeneratedTest(unittest.TestCase):\n"
+            "    @unittest.skip('missing dependency')\n"
+            "    def test_runtime(self): pass\n",
+            encoding="utf-8",
+        )
+        skipped = subprocess.run(
+            [sys.executable, str(runner), str(suite)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(skipped.returncode, 0)
+        self.assertIn("missing dependency", skipped.stderr)
+        test.write_text(
+            "import unittest\n"
+            "class GeneratedTest(unittest.TestCase):\n"
+            "    def test_runtime(self): self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+        passed = subprocess.run(
+            [sys.executable, str(runner), str(suite)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(passed.returncode, 0, passed.stderr)

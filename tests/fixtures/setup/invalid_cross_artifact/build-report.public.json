@@ -1,0 +1,50 @@
+{
+  "environment_files": ["adapter.py"],
+  "evaluator_files": ["test_generated_evaluator.py"],
+  "subject_files": ["policy.py"],
+  "task": {
+    "editable_paths": ["policy.py"],
+    "environment": {
+      "codebases": [
+        {
+          "id": "editable_policy_source",
+          "include": ["policy.py"],
+          "owner": "subject"
+        },
+        {
+          "id": "misplaced_runtime_source",
+          "include": ["local_env/**"],
+          "owner": "environment"
+        },
+        {
+          "id": "adapter_source",
+          "include": ["adapter.py"],
+          "owner": "environment"
+        }
+      ],
+      "probes": [
+        {
+          "execution": {
+            "arguments": [],
+            "kind": "script",
+            "target": "missing_environment_probe.py"
+          }
+        }
+      ]
+    },
+    "public_checks": [
+      {
+        "arguments": [],
+        "kind": "script",
+        "target": "missing_public_check.py"
+      }
+    ],
+    "public_probe": {
+      "execution": {
+        "arguments": ["missing_public_probe.py"],
+        "kind": "module",
+        "target": "compileall"
+      }
+    }
+  }
+}

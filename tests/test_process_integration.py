@@ -168,6 +168,41 @@ class ProcessIntegrationTests(unittest.TestCase):
                     timeout_seconds=1,
                 )
 
+    def test_clean_exit_records_result_when_descendant_inherits_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary, "process")
+            pid_file = Path(temporary, "child.pid")
+            script = (
+                "import pathlib, subprocess, sys;"
+                "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']);"
+                f"pathlib.Path({str(pid_file)!r}).write_text(str(p.pid));"
+                "print('main complete')"
+            )
+            started = time.monotonic()
+
+            result = run_once(
+                directory,
+                ["python3", "-c", script],
+                timeout_seconds=5,
+            )
+
+            self.assertEqual(result["return_code"], 0)
+            self.assertLess(time.monotonic() - started, 3)
+            self.assertEqual((directory / "stdout.bin").read_text(), "main complete\n")
+            self.assertTrue((directory / "result.json").is_file())
+            child_pid = int(pid_file.read_text())
+            for _ in range(20):
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    break
+                state = Path(f"/proc/{child_pid}/stat").read_text().split()[2]
+                if state == "Z":
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("descendant process remained alive after the managed command exited")
+
     def test_output_limit_invalidates_completed_process(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary, "process")

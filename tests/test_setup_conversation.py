@@ -5,24 +5,38 @@ import hashlib
 import contextlib
 import io
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
+
 from arctl.cli import _data_root, _init, _print_question_batch, _setup
+from arctl.codex_schema import validate_codex_output_schema
 from arctl.errors import StateError, ValidationError
 from arctl.setup import (
     QUESTION_IDS,
     SETUP_CONTROLLER_CONTRACT,
+    _cross_artifact_findings,
+    _declared_dependency_requirements,
+    _direct_build_schema,
+    _read_direct_build_files,
     _validate_dependency_plan,
     _validate_review_evidence,
     build_setup_direct,
+    discover_setup_batch,
     initialize_setup,
     load_setup,
+    reopen_review_decision_batch,
+    review_schema,
 )
 from arctl.storage import atomic_write_json
+from arctl.setup_protocol import UNITTEST_ENTRYPOINT
 from arctl.setup_conversation import (
     answer_batch,
     authorize_design,
@@ -81,6 +95,7 @@ class SetupConversationTests(unittest.TestCase):
                     "path": "README.md",
                     "location": "line 2",
                     "finding": "The environment is documented as CPU-only.",
+                    "excerpt_sha256": None,
                 }
             ],
         }
@@ -304,7 +319,7 @@ class SetupConversationTests(unittest.TestCase):
         _, record = load_setup(self.data, "demo")
         self.assertEqual(record["state"], "BUILD_REQUIRED")
         resolved = json.loads((self.directory / "setup" / "authorized-design.public.json").read_text())
-        self.assertEqual(resolved["schema_version"], 2)
+        self.assertEqual(resolved["schema_version"], 3)
         note = render_setup_note(self.directory, record)
         self.assertIn("## Confirmed choices", note.read_text())
         self.assertIn("## Authorized setup", note.read_text())
@@ -346,6 +361,41 @@ class SetupConversationTests(unittest.TestCase):
         )
         self.assertEqual(load_setup(self.data, "demo")[1]["state"], "DESIGN_AUTHORIZATION_REQUIRED")
 
+    def test_design_cannot_invent_dependency_authorization_decisions(self) -> None:
+        batch = validate_batch(self.question_batch(), subject=self.subject, revision=1)
+        save_batch(self.directory, batch)
+        answer_batch(
+            self.directory,
+            self.record,
+            {
+                "revision": 1,
+                "answers": {
+                    "objective": "objective_a",
+                    "outcome": "outcome_a",
+                    "policy_boundary": "policy_boundary_a",
+                },
+            },
+        )
+        _, record = load_setup(self.data, "demo")
+        batch = self.design_batch()
+        batch["design"]["direct_dependencies"] = [
+            {
+                "requirement": "requests",
+                "imports": ["requests"],
+                "reason": "Proposed fixture dependency.",
+                "origin": "proposed",
+                "authorization_decision": "invented_dependency_decision",
+            }
+        ]
+        design = validate_batch(batch, subject=self.subject, revision=2)
+        with self.assertRaisesRegex(ValidationError, "unknown decision"):
+            finalize_design(
+                self.directory,
+                record,
+                design,
+                controller_contract=SETUP_CONTROLLER_CONTRACT,
+            )
+
     def test_interactive_options_show_the_exact_untruncated_value(self) -> None:
         batch = self.question_batch()
         exact = "canonical-" + "x" * 400
@@ -362,6 +412,7 @@ class SetupConversationTests(unittest.TestCase):
             [
                     {
                         "requirement": "demo @ https://example.invalid/demo.whl",
+                        "imports": ["demo"],
                         "reason": "Fixture dependency.",
                         "origin": "proposed",
                         "authorization_decision": "dependency_source_demo",
@@ -403,7 +454,124 @@ class SetupConversationTests(unittest.TestCase):
         self.assertEqual(record["state"], "DISCOVERY_REQUIRED")
         self.assertEqual(record["late_dependencies"], ["numpy>=2"])
 
-    def test_direct_builder_writes_staging_and_returns_only_a_compact_report(self) -> None:
+    def test_discovery_binds_the_next_decision_revision_in_the_agent_schema(self) -> None:
+        atomic_write_json(
+            self.directory / "setup" / "decisions.public.json",
+            {
+                "schema_version": 1,
+                "revision": 1,
+                "decisions": [
+                    {"id": "objective"},
+                    {"id": "outcome"},
+                    {"id": "policy_boundary"},
+                ],
+            },
+        )
+        captured: dict[str, object] = {}
+
+        def fake_agent(**kwargs):
+            captured.update(kwargs)
+            raise StateError("stop after schema capture")
+
+        with patch("arctl.setup._agent_run", side_effect=fake_agent):
+            with self.assertRaisesRegex(StateError, "stop after schema capture"):
+                discover_setup_batch(self.directory, self.record)
+
+        schema = captured["schema_value"]
+        self.assertEqual(
+            schema["properties"]["revision"],
+            {"type": "integer", "const": 2},
+        )
+        decision_refs = schema["properties"]["design"]["anyOf"][1]["properties"][
+            "objective"
+        ]["properties"]["decision_refs"]
+        self.assertEqual(
+            decision_refs["items"]["enum"],
+            ["objective", "outcome", "policy_boundary"],
+        )
+
+    def test_controller_turns_unapproved_proposed_dependency_into_question(self) -> None:
+        decisions = {
+            "schema_version": 1,
+            "revision": 1,
+            "decisions": [
+                {"id": "objective"},
+                {"id": "outcome"},
+                {"id": "policy_boundary"},
+            ],
+        }
+        atomic_write_json(
+            self.directory / "setup" / "decisions.public.json", decisions
+        )
+        batch = self.design_batch()
+        batch["design"]["direct_dependencies"] = [
+            {
+                "requirement": "opencv-python-headless",
+                "imports": ["cv2"],
+                "reason": "The repository imports cv2 at module load.",
+                "origin": "proposed",
+                "authorization_decision": None,
+            }
+        ]
+
+        with patch("arctl.setup._agent_run", return_value=batch):
+            result = discover_setup_batch(self.directory, self.record)
+
+        self.assertIsNone(result["design"])
+        self.assertEqual(len(result["questions"]), 1)
+        question = result["questions"][0]
+        self.assertEqual(question["id"], "allow_dependency_opencv_python_headless")
+        self.assertEqual(question["recommended_option_id"], "allow")
+        self.assertEqual([item["id"] for item in question["options"]], ["allow", "reject"])
+        _, saved = load_setup(self.data, "demo")
+        self.assertEqual(saved["state"], "QUESTIONS_REQUIRED")
+
+    def test_review_conflict_reopens_and_replaces_objective_decision(self) -> None:
+        design = self.write_authorized_design([])
+        citation = self.option("grounded", "Grounded")["citations"][0]
+        design["objective"]["citations"] = [citation]
+        design["outcome"]["citations"] = [citation]
+        atomic_write_json(
+            self.directory / "setup" / "authorized-design.public.json", design
+        )
+        atomic_write_json(
+            self.directory / "setup" / "decisions.public.json",
+            {
+                "schema_version": 1,
+                "revision": 1,
+                "decisions": [
+                    {"id": "objective", "answer": "Maximize reward."},
+                    {"id": "outcome", "answer": "Total lines cleared."},
+                    {"id": "policy_boundary", "answer": "Edit policy only."},
+                ],
+            },
+        )
+        self.record["state"] = "REVIEW_FAILED"
+        self.record["prior_review_findings"] = [
+            {"code": "INTENT_OBJECTIVE_OUTCOME_MISMATCH"}
+        ]
+
+        batch = reopen_review_decision_batch(self.directory, self.record)
+
+        self.assertIsNotNone(batch)
+        assert batch is not None
+        self.assertEqual(batch["questions"][0]["id"], "objective")
+        _, saved = load_setup(self.data, "demo")
+        self.assertEqual(saved["state"], "QUESTIONS_REQUIRED")
+        decisions = answer_batch(
+            self.directory,
+            saved,
+            {"revision": 2, "answers": {"objective": "total_lines_cleared"}},
+        )
+        objective = next(
+            item for item in decisions["decisions"] if item["id"] == "objective"
+        )
+        self.assertEqual(
+            objective["answer"],
+            "Maximize total lines cleared per seeded episode over at most 1000 block placements.",
+        )
+
+    def test_direct_builder_stages_code_and_returns_typed_designs(self) -> None:
         atomic_write_json(
             self.directory / "setup" / "authorized-design.public.json",
             self.write_authorized_design([]),
@@ -421,16 +589,75 @@ class SetupConversationTests(unittest.TestCase):
             (evaluator / "_arctl").mkdir()
             (evaluator / "_arctl" / "hook.py").write_text("# evaluator hooks\n")
             (evaluator / "test_generated_evaluator.py").write_text("# tests\n")
-            (environment / "README.md").write_text("Environment\n")
-            (staging / "task.design.json").write_text("{}")
-            (staging / "evaluator.design.json").write_text("{}")
             return {
-                "schema_version": 1,
+                "schema_version": 3,
                 "summary": "Compact build.",
-                "dependencies": [],
-                "subject_files": [],
-                "environment_files": ["README.md"],
-                "evaluator_files": [],
+                "files": [
+                    {
+                        "repository": "subject",
+                        "path": "_arctl/hook.py",
+                        "role": "subject_hook",
+                    },
+                    {
+                        "repository": "evaluator",
+                        "path": "_arctl/hook.py",
+                        "role": "evaluator_hook",
+                    },
+                    {
+                        "repository": "evaluator",
+                        "path": "test_generated_evaluator.py",
+                        "role": "evaluator_test",
+                    },
+                ],
+                "task": {
+                    "objective": "Model echo.",
+                    "editable_paths": ["wrong/**"],
+                    "environment": {
+                        "codebases": [
+                            {
+                                "id": "subject-interface",
+                                "description": "Subject interface.",
+                                "owner": "subject",
+                                "include": [],
+                            }
+                        ]
+                    },
+                },
+                "evaluator": {
+                    "public": {"statistic": "Model echo."},
+                    "trial": {
+                        "meaning": "Model echo.",
+                        "seed_to_case": "Model echo.",
+                    },
+                    "schemas": {
+                        "public_case_json": json.dumps(
+                            {
+                                "type": "object",
+                                "properties": {"value": {"type": "integer"}},
+                                "required": ["value"],
+                                "additionalProperties": False,
+                            }
+                        ),
+                        "subject_result_json": json.dumps(
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "metrics": {
+                                        "type": "object",
+                                        "properties": {
+                                            "score": {
+                                                "type": "integer",
+                                                "minimum": 0,
+                                            }
+                                        },
+                                    },
+                                    "score": {"type": "number"},
+                                },
+                            }
+                        ),
+                    },
+                    "setup_contract": {},
+                },
             }
 
         with patch("arctl.setup._agent_run", side_effect=fake_agent), patch(
@@ -445,12 +672,278 @@ class SetupConversationTests(unittest.TestCase):
         self.assertTrue(captured["writable_worktree"])
         self.assertTrue(captured["offline"])
         self.assertEqual(captured["output_name"], "build-report.public.json")
+        self.assertEqual(
+            captured["schema_value"]["properties"]["schema_version"],
+            {"type": "integer", "const": 3},
+        )
+        self.assertIn("task", captured["schema_value"]["properties"])
+        self.assertIn("evaluator", captured["schema_value"]["properties"])
+        task_schema = captured["schema_value"]["properties"]["task"]["properties"]
+        evaluator_schema = captured["schema_value"]["properties"]["evaluator"][
+            "properties"
+        ]
+        self.assertEqual(task_schema["objective"]["const"], "Improve the demo policy.")
+        self.assertEqual(task_schema["editable_paths"]["minItems"], 1)
+        self.assertEqual(task_schema["editable_paths"]["maxItems"], 1)
+        self.assertEqual(
+            task_schema["editable_paths"]["items"]["enum"], ["solution/**"]
+        )
+        self.assertEqual(
+            evaluator_schema["public"]["properties"]["statistic"]["const"],
+            "expected score",
+        )
+        hard_rules = evaluator_schema["setup_contract"]["properties"]["hard_rules"]
+        self.assertEqual(hard_rules["minItems"], 1)
+        self.assertEqual(
+            hard_rules["items"]["enum"], ["Do not edit environment dynamics."]
+        )
+        self.assertIn("Do not write", captured["prompt"])
+        self.assertIn("files at the staging root", captured["prompt"])
         self.assertIn('"conformance"', captured["prompt"])
         self.assertIn('"direct_dependencies"', captured["prompt"])
         self.assertIn('"horizon"', captured["prompt"])
         pending = json.loads((self.directory / "setup.json").read_text())["pending_build"]
         internal = json.loads(Path(pending["output"]).read_text())
-        self.assertEqual(internal["environment_files"][0]["content"], "Environment\n")
+        self.assertEqual(internal["environment_files"], [])
+        self.assertEqual(internal["task"]["objective"], "Improve the demo policy.")
+        self.assertEqual(internal["task"]["editable_paths"], ["solution/**"])
+        self.assertIn(
+            "README.md",
+            internal["task"]["environment"]["codebases"][0]["include"],
+        )
+        self.assertEqual(internal["evaluator"]["public"]["statistic"], "expected score")
+        self.assertEqual(
+            internal["evaluator"]["setup_contract"]["hard_rules"],
+            ["Do not edit environment dynamics."],
+        )
+        public_case = json.loads(
+            internal["evaluator"]["schemas"]["public_case_json"]
+        )
+        self.assertEqual(
+            public_case["properties"]["max_actions"],
+            {"type": "integer", "const": 1000},
+        )
+        self.assertEqual(
+            public_case["required"],
+            ["case_id", "seed", "policy_path", "max_actions"],
+        )
+        self.assertEqual(
+            public_case["properties"]["policy_path"],
+            {"type": "string", "const": "solution/**"},
+        )
+        subject_result = json.loads(
+            internal["evaluator"]["schemas"]["subject_result_json"]
+        )
+        self.assertEqual(
+            subject_result["required"], ["case_id", "score", "telemetry"]
+        )
+        self.assertEqual(
+            subject_result["properties"]["score"],
+            {"type": "integer", "minimum": 0},
+        )
+        self.assertEqual(
+            internal["evaluator"]["public"]["subject_interface"],
+            "Python callable",
+        )
+        self.assertEqual(
+            [
+                item["name"]
+                for item in internal["evaluator"]["public"]["telemetry"]
+            ],
+            [
+                "score",
+                "placements",
+                "terminated_rate",
+                "truncated_rate",
+                "paired_standard_error",
+            ],
+        )
+
+    def test_direct_builder_rejects_duplicate_fixed_file_declarations(self) -> None:
+        roots = {
+            name: self.root / "direct-files" / name
+            for name in ("subject", "environment", "evaluator")
+        }
+        for root in roots.values():
+            root.mkdir(parents=True)
+        (roots["subject"] / "_arctl").mkdir()
+        (roots["subject"] / "_arctl" / "hook.py").write_text("# subject\n")
+        (roots["evaluator"] / "_arctl").mkdir()
+        (roots["evaluator"] / "_arctl" / "hook.py").write_text("# evaluator\n")
+        (roots["evaluator"] / "test_generated_evaluator.py").write_text("# test\n")
+        declarations = [
+            {"repository": "subject", "path": "_arctl/hook.py", "role": "subject_hook"},
+            {"repository": "evaluator", "path": "_arctl/hook.py", "role": "evaluator_hook"},
+            {"repository": "evaluator", "path": "test_generated_evaluator.py", "role": "evaluator_test"},
+            {"repository": "evaluator", "path": "test_generated_evaluator.py", "role": "support"},
+        ]
+        with self.assertRaisesRegex(ValidationError, "OWN_DUPLICATE_PATH"):
+            _read_direct_build_files(roots, declarations)
+
+    def test_direct_builder_schema_rejects_repository_prefixed_paths(self) -> None:
+        schema = _direct_build_schema()
+        validate_codex_output_schema(schema)
+        declaration = schema["properties"]["files"]["items"]
+        validator = Draft202012Validator(declaration)
+        for value in (
+            {
+                "repository": "subject",
+                "path": "subject/_arctl/hook.py",
+                "role": "subject_hook",
+            },
+        ):
+            with self.assertRaises(JsonSchemaValidationError):
+                validator.validate(value)
+        validator.validate(
+            {
+                "repository": "subject",
+                "path": "_arctl/hook.py",
+                "role": "subject_hook",
+            }
+        )
+
+    def test_dependency_validation_reports_prose_and_local_source_together(self) -> None:
+        local = self.subject / "local_demo"
+        local.mkdir()
+        (local / "__init__.py").write_text("")
+        design = self.design_batch()["design"]
+        design["direct_dependencies"] = [
+            {
+                "requirement": "numpy (runtime dependency)",
+                "imports": ["numpy"],
+                "reason": "Fixture prose.",
+                "origin": "repository",
+                "authorization_decision": None,
+            },
+            {
+                "requirement": "local_demo",
+                "imports": ["local_demo"],
+                "reason": "Local fixture.",
+                "origin": "repository",
+                "authorization_decision": None,
+            },
+        ]
+        with self.assertRaises(ValidationError) as caught:
+            _declared_dependency_requirements(design, subject=self.subject)
+        self.assertIn("not valid PEP 508", str(caught.exception))
+        self.assertIn("supplied by the subject tree", str(caught.exception))
+
+    def test_legacy_dependency_design_preserves_decisions_and_reopens_discovery(self) -> None:
+        self.write_authorized_design(
+            [
+                {
+                    "requirement": "numpy (runtime dependency)",
+                    "reason": "Legacy prose.",
+                    "origin": "repository",
+                    "authorization_decision": None,
+                }
+            ]
+        )
+        decisions_path = self.directory / "setup" / "decisions.public.json"
+        before = decisions_path.read_bytes()
+        with patch("arctl.setup._agent_run") as agent:
+            with self.assertRaisesRegex(StateError, "deterministic validation"):
+                build_setup_direct(self.directory, self.record, offline=False)
+        agent.assert_not_called()
+        _, saved = load_setup(self.data, "demo")
+        self.assertEqual(saved["state"], "DISCOVERY_REQUIRED")
+        self.assertEqual(decisions_path.read_bytes(), before)
+        self.assertIn("DESIGN_DEPENDENCY", saved["prior_design_findings"][0])
+
+    def test_invalid_cross_artifact_fixture_is_portable(self) -> None:
+        fixture = Path(__file__).parent / "fixtures" / "setup" / "invalid_cross_artifact"
+        for path in fixture.rglob("*"):
+            self.assertFalse(path.is_symlink(), path)
+            self.assertNotIn("__pycache__", path.parts)
+            self.assertNotEqual(path.suffix, ".pyc")
+            if path.is_file():
+                content = path.read_text(encoding="utf-8")
+                self.assertNotIn("/home/", content)
+                self.assertNotIn("test_tris", content)
+
+    def test_invalid_cross_artifact_fixture_reports_complete_failure_set(self) -> None:
+        """Preserve the mechanical regressions reproduced from setup attempt 0006."""
+        fixture = Path(__file__).parent / "fixtures" / "setup" / "invalid_cross_artifact"
+        report = json.loads((fixture / "build-report.public.json").read_text())
+        design = json.loads((fixture / "authorized-design.public.json").read_text())
+        staging = self.root / "invalid-cross-artifact"
+        shutil.copytree(fixture / "staging", staging)
+        roots = {
+            name: staging / name
+            for name in ("subject", "environment", "evaluator")
+        }
+        declarations = [
+            {"repository": "subject", "path": "_arctl/hook.py", "role": "subject_hook"},
+            {"repository": "evaluator", "path": "_arctl/hook.py", "role": "evaluator_hook"},
+            {"repository": "evaluator", "path": "test_generated_evaluator.py", "role": "evaluator_test"},
+            *(
+                {"repository": "subject", "path": path, "role": "support"}
+                for path in report["subject_files"]
+            ),
+            *(
+                {"repository": "environment", "path": path, "role": "support"}
+                for path in report["environment_files"]
+            ),
+            *(
+                {"repository": "evaluator", "path": path, "role": "support"}
+                for path in report["evaluator_files"]
+            ),
+        ]
+        with self.assertRaisesRegex(ValidationError, "OWN_DUPLICATE_PATH"):
+            _read_direct_build_files(roots, declarations)
+        with self.assertRaises(ValidationError) as dependency_error:
+            _declared_dependency_requirements(design, subject=roots["subject"])
+        self.assertIn("not valid PEP 508", str(dependency_error.exception))
+        self.assertIn("supplied by the subject tree", str(dependency_error.exception))
+        first = _cross_artifact_findings(
+            report, design, subject=roots["subject"], environment=roots["environment"]
+        )
+        second = _cross_artifact_findings(
+            report, design, subject=roots["subject"], environment=roots["environment"]
+        )
+        self.assertEqual(first, second)
+        joined = "\n".join(first)
+        for code in (
+            "COMMAND_UNREACHABLE",
+            "IMPORT_UNDECLARED adapter",
+            "IMPORT_UNDECLARED cv2",
+            "SOURCE_EDITABLE_OVERLAP",
+            "SOURCE_UNREACHABLE",
+        ):
+            self.assertIn(code, joined)
+        runner = self.root / "unittest_runner.py"
+        runner.write_text(UNITTEST_ENTRYPOINT, encoding="utf-8")
+        completed = subprocess.run(
+            [sys.executable, "-B", str(runner), str(roots["evaluator"])],
+            check=False,
+            capture_output=True,
+            text=True,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("skipped", completed.stderr)
+
+    def test_design_rejects_adapter_source_path_with_appended_prose(self) -> None:
+        batch = self.design_batch()
+        batch["design"]["environment_adapter"]["source_path"] = (
+            "README.md (subject-owned adapter)"
+        )
+        with self.assertRaisesRegex(ValidationError, "must be one file path"):
+            validate_batch(batch, subject=self.subject, revision=2)
+
+    def test_design_requires_headless_opencv_for_cv2(self) -> None:
+        batch = self.design_batch()
+        batch["design"]["direct_dependencies"] = [
+            {
+                "requirement": "opencv-python",
+                "imports": ["cv2"],
+                "reason": "The repository imports cv2.",
+                "origin": "repository",
+                "authorization_decision": None,
+            }
+        ]
+        with self.assertRaisesRegex(ValidationError, "opencv-python-headless"):
+            validate_batch(batch, subject=self.subject, revision=2)
 
     def test_clean_review_requires_complete_cited_coverage(self) -> None:
         areas = (
@@ -477,6 +970,27 @@ class SetupConversationTests(unittest.TestCase):
         review["coverage"]["seed_handling"]["evidence"] = []
         with self.assertRaisesRegex(ValidationError, "requires evidence"):
             _validate_review_evidence(review, roots=(self.subject,))
+
+    def test_review_schema_rejects_multi_range_citation_locations(self) -> None:
+        citation = review_schema()["properties"]["coverage"]["properties"][
+            "grounding"
+        ]["properties"]["evidence"]["items"]
+        validator = Draft202012Validator(citation)
+        with self.assertRaises(JsonSchemaValidationError):
+            validator.validate(
+                {
+                    "path": "README.md",
+                    "location": "lines 5-14, 78-81",
+                    "finding": "Two disjoint ranges were combined.",
+                }
+            )
+        validator.validate(
+            {
+                "path": "README.md",
+                "location": "lines 5-14",
+                "finding": "One contiguous range.",
+            }
+        )
 
 
 if __name__ == "__main__":

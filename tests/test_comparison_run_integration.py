@@ -4,6 +4,7 @@ import json
 import hashlib
 import subprocess
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -174,8 +175,8 @@ class ComparisonRunIntegrationTests(unittest.TestCase):
         evidence = self.execute_comparison()
         self.assertEqual(evidence.effect_estimate, 1)
         self.assertEqual(evidence.one_sided_lower_bound, 1)
-        started = sorted(self.comparison.glob("process/*/started.json"))
-        self.assertEqual(len(started), 4)
+        started = sorted(self.comparison.rglob("process/**/started.json"))
+        self.assertEqual(len(started), 10)
         timestamps = {path: path.stat().st_mtime_ns for path in started}
 
         recovered = self.execute_comparison()
@@ -197,6 +198,120 @@ class ComparisonRunIntegrationTests(unittest.TestCase):
             [row["score"] for row in champion["results"]],
         )
 
+    def test_subject_cases_run_concurrently_and_preserve_order(self) -> None:
+        barrier_subject = textwrap.dedent(
+            """\
+            import json
+            import sys
+            import time
+            from pathlib import Path
+
+            batch = json.loads(Path(sys.argv[1]).read_text())
+            output = Path(sys.argv[2])
+            ready = output.with_suffix(".ready")
+            ready.write_text("ready")
+            deadline = time.monotonic() + 2
+            while len(tuple(output.parent.parent.glob("*/*.ready"))) < 4:
+                if time.monotonic() >= deadline:
+                    raise SystemExit("subject shards did not overlap")
+                time.sleep(0.01)
+            results = [{"score": case["value"] + BIAS} for case in batch["cases"]]
+            output.write_text(json.dumps({
+                "schema_version": 1,
+                "trial_count": batch["trial_count"],
+                "results": results,
+            }))
+            """
+        )
+        (self.champion / "subject.py").write_text(barrier_subject.replace("BIAS", "0"))
+        (self.candidate / "subject.py").write_text(barrier_subject.replace("BIAS", "1"))
+        for directory in (self.champion, self.candidate):
+            subprocess.run(["git", "-C", str(directory), "add", "."], check=True)
+            subprocess.run(
+                ["git", "-C", str(directory), "commit", "-qm", "parallel subject"],
+                check=True,
+            )
+        object.__setattr__(self.reservation, "champion", self.revision(self.champion))
+        object.__setattr__(self.reservation, "candidate", self.revision(self.candidate))
+
+        evidence = self.execute_comparison()
+
+        self.assertEqual(evidence.effect_estimate, 1)
+        for subject in ("champion", "candidate"):
+            workers = self.comparison / "outputs" / subject / "workers"
+            self.assertEqual(len(tuple(workers.glob("*/result.json"))), 4)
+            combined = json.loads(
+                (self.comparison / "outputs" / subject / "result.json").read_text()
+            )
+            self.assertEqual(combined["trial_count"], 4)
+
+    def test_subject_worker_count_is_capped_at_sixteen(self) -> None:
+        self.comparison = self.root / "comparison-sixteen-workers"
+        self.reservation = reserve_comparison(
+            self.comparison / "reservation.private.json",
+            kind="primary",
+            experiment_id=1,
+            champion=self.champion_commit,
+            candidate=self.candidate_commit,
+            evaluator=self.evaluator_commit,
+            manifest=self.manifest_hash,
+            trial_count=17,
+            commands={
+                "subject": self.manifest.subject_command,
+                "prepare": self.manifest.prepare_command,
+                "score": self.manifest.score_command,
+            },
+            master_seed=bytes(range(32)),
+        )
+
+        evidence = self.execute_comparison()
+
+        self.assertEqual(evidence.effect_estimate, 1)
+        for subject in ("champion", "candidate"):
+            workers = self.comparison / "outputs" / subject / "workers"
+            batches = sorted(workers.glob("*/batch.public.json"))
+            self.assertEqual(len(batches), 16)
+            self.assertEqual(
+                sorted(json.loads(path.read_text())["trial_count"] for path in batches),
+                [1] * 15 + [2],
+            )
+            combined = json.loads(
+                (self.comparison / "outputs" / subject / "result.json").read_text()
+            )
+            self.assertEqual(combined["trial_count"], 17)
+
+    def test_completed_legacy_serial_outputs_remain_recoverable(self) -> None:
+        values = [seed % 100 for seed in self.reservation.trial_seeds]
+        for subject, bias in (("champion", 0), ("candidate", 1)):
+            output = self.comparison / "outputs" / subject / "result.json"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps({
+                "schema_version": 1,
+                "trial_count": 4,
+                "results": [{"score": value + bias} for value in values],
+            }))
+
+        evidence = self.execute_comparison()
+
+        self.assertEqual(evidence.effect_estimate, 1)
+        self.assertFalse((self.comparison / "outputs" / "champion" / "workers").exists())
+        self.assertFalse((self.comparison / "outputs" / "candidate" / "workers").exists())
+
+    def test_incomplete_legacy_serial_process_fails_without_starting_workers(self) -> None:
+        for subject in ("champion", "candidate"):
+            process = self.comparison / "process" / subject
+            process.mkdir(parents=True, exist_ok=True)
+            (process / "started.json").write_text("{}")
+
+        with self.assertRaisesRegex(
+            ComparisonFailure,
+            "legacy serial .* process started without a recoverable output",
+        ):
+            self.execute_comparison()
+
+        self.assertFalse((self.comparison / "outputs" / "champion" / "workers").exists())
+        self.assertFalse((self.comparison / "outputs" / "candidate" / "workers").exists())
+
     def test_invalid_candidate_output_is_reject_domain_and_never_reruns(self) -> None:
         (self.candidate / "subject.py").write_text(
             "import json,sys; open(sys.argv[2], 'w').write(json.dumps({"
@@ -215,13 +330,18 @@ class ComparisonRunIntegrationTests(unittest.TestCase):
         with self.assertRaises(ComparisonFailure) as first:
             self.execute_comparison()
         self.assertEqual(first.exception.source, "candidate")
-        started = self.comparison / "process" / "candidate" / "started.json"
-        timestamp = started.stat().st_mtime_ns
+        started = sorted(
+            (self.comparison / "process" / "candidate").glob("*/started.json")
+        )
+        timestamps = {path: path.stat().st_mtime_ns for path in started}
 
         with self.assertRaises(ComparisonFailure) as second:
             self.execute_comparison()
         self.assertEqual(second.exception.source, "candidate")
-        self.assertEqual(started.stat().st_mtime_ns, timestamp)
+        self.assertEqual(
+            {path: path.stat().st_mtime_ns for path in started},
+            timestamps,
+        )
 
     def test_tampered_reservation_commands_fail_before_any_process(self) -> None:
         object.__setattr__(

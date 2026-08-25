@@ -101,16 +101,26 @@ class CliTests(unittest.TestCase):
             },
             "dependency_source_policy": {"index": "https://pypi.org/simple"},
             "controller_contract": {"version": 1, "sha256": "a" * 64},
-            "direct_dependencies": [],
+            "direct_dependencies": [
+                {
+                    "requirement": "numpy",
+                    "imports": ["numpy"],
+                    "origin": "repository",
+                    "reason": "The adapter exchanges NumPy arrays.",
+                }
+            ],
         }
         summary = _design_summary(design)
         for expected in (
             "Keep evaluation fixed.", "env.py", "Use the public adapter.",
             "read score from each result", "metrics.score", "max_actions",
             "seed initializes the map", "Do not edit dynamics.",
-            "60 seconds per process", "Labels are exchangeable.",
+            "60 seconds per process", "Labels are exchangeable.", "numpy",
+            "Setup item", "Authorized value", "Policy boundary", "Authorization",
         ):
             self.assertIn(expected, summary)
+        self.assertTrue(summary.startswith("┌"))
+        self.assertNotIn("- Objective:", summary)
 
     def test_init_creates_one_editable_task_and_json_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -798,13 +808,15 @@ class CliTests(unittest.TestCase):
                 "stage": "subject",
                 "batch": 1,
                 "batches": 2,
+                "trial_count": 40,
+                "workers": 16,
             },
             {"scope": "comparison", "stage": "score"},
             {"scope": "comparison", "stage": "validate"},
         ]
         labels = [_ProgressView._stage_label(event) for event in events]
         self.assertEqual(labels[6], "evaluator prepare")
-        self.assertEqual(labels[7], "subject batch 1/2")
+        self.assertEqual(labels[7], "subject batch 1/2 · 40 trials · 16 workers")
 
     def test_setup_progress_is_visible_and_timed(self) -> None:
         output = io.StringIO()

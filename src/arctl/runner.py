@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError, ValidationError as JsonSchemaError
+from jsonschema.exceptions import ValidationError as JsonSchemaError
 
 from .agent_backend import AgentSessionRequest, agent_command, agent_environment, agent_provenance
 from .agent_selection import select_agent
@@ -20,6 +20,7 @@ from .approval import verify_approval
 from .calibration import CalibrationCommandBuilder, calibrate_trial_count
 from .candidate_review import AgentCommandBuilder as ReviewCommandBuilder
 from .candidate_review import requirement_audit_schema, review_candidate
+from .codex_schema import validate_codex_output_schema
 from .comparison import ComparisonReservation, load_reservation, reserve_comparison
 from .comparison_run import CommandBuilder, ComparisonFailure, run_comparison
 from .components import invoke_component
@@ -102,55 +103,7 @@ def _notify(
         progress({"event": event, **fields})
 
 def _validate_codex_output_schema(schema: Mapping[str, Any]) -> None:
-    try:
-        Draft202012Validator.check_schema(schema)
-    except SchemaError as error:
-        raise StateError("Codex output schema is not valid JSON Schema") from error
-
-    def visit(node: Mapping[str, Any], path: str) -> None:
-        if "$ref" not in node and "anyOf" not in node and "type" not in node:
-            raise StateError(f"Codex output schema node lacks a type: {path}")
-        alternatives = node.get("anyOf")
-        if alternatives is not None:
-            if not isinstance(alternatives, list):
-                raise StateError(f"Codex output schema anyOf is invalid: {path}")
-            for index, alternative in enumerate(alternatives):
-                if not isinstance(alternative, Mapping):
-                    raise StateError(f"Codex output schema anyOf is invalid: {path}")
-                visit(alternative, f"{path}.anyOf[{index}]")
-        if node.get("type") == "object":
-            properties = node.get("properties")
-            required = node.get("required")
-            if (
-                not isinstance(properties, Mapping)
-                or node.get("additionalProperties") is not False
-                or not isinstance(required, list)
-                or len(required) != len(properties)
-                or set(required) != set(properties)
-            ):
-                raise StateError(f"Codex output schema object is not strict: {path}")
-            for name, child in properties.items():
-                if not isinstance(name, str) or not isinstance(child, Mapping):
-                    raise StateError(
-                        f"Codex output schema properties are invalid: {path}"
-                    )
-                visit(child, f"{path}.properties.{name}")
-        if node.get("type") == "array":
-            items = node.get("items")
-            if not isinstance(items, Mapping):
-                raise StateError(f"Codex output schema array lacks items: {path}")
-            visit(items, f"{path}.items")
-        definitions = node.get("$defs", {})
-        if not isinstance(definitions, Mapping):
-            raise StateError(f"Codex output schema definitions are invalid: {path}")
-        for name, child in definitions.items():
-            if not isinstance(name, str) or not isinstance(child, Mapping):
-                raise StateError(f"Codex output schema definitions are invalid: {path}")
-            visit(child, f"{path}.$defs.{name}")
-
-    if schema.get("type") != "object":
-        raise StateError("Codex output schema root must be an object")
-    visit(schema, "$")
+    validate_codex_output_schema(schema)
 
 
 def _research_schema(manifest: EvaluatorManifest) -> dict[str, Any]:

@@ -50,13 +50,15 @@ or other adapter is verified until that concrete adapter and version pass it.
 
 ## Search evolution
 
-This release is serial and has exactly one official champion. Its contracts
-reserve generation and branch provenance, but do not run work concurrently. A
-future beam method must retain one official champion per generation. One width
-`K` limits both evaluated branches and retained alternatives; at most `K`
-positive-mean non-winners are retained in descending order of effect estimate,
-lower bound, then stable branch ID. A retained policy may seed a later branch,
-but descendants are evaluated against the current official champion.
+This release has exactly one official champion and does not run experiments,
+branches, or the champion/candidate arms concurrently. Within one arm, the
+controller partitions the ordered case batch across at most 16 isolated subject
+workers and restores original case order before scoring. A future beam method
+must retain one official champion per generation. One width `K` limits both
+evaluated branches and retained alternatives; at most `K` positive-mean
+non-winners are retained in descending order of effect estimate, lower bound,
+then stable branch ID. A retained policy may seed a later branch, but descendants
+are evaluated against the current official champion.
 
 EVALUATE may select another approved protocol implementation in the future,
 while the controller continues to own private seeds and data, evidence

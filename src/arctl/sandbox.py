@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from .codex_schema import load_codex_output_schema
 from .errors import StateError
 from .storage import atomic_write_text
 
@@ -130,6 +131,88 @@ def sandbox_command(
     )
 
 
+def networked_dependency_command(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    write_paths: Sequence[Path],
+) -> tuple[str, ...]:
+    """Confine an online package installer without hiding host DNS/networking."""
+    if not command:
+        raise ValueError("networked dependency command must not be empty")
+    bubblewrap = shutil.which("bwrap")
+    if bubblewrap is None:
+        raise StateError("bwrap is required for networked dependency provisioning")
+    for path in write_paths:
+        path.mkdir(parents=True, exist_ok=True)
+    arguments = [
+        bubblewrap,
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--unshare-cgroup",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/tmp",
+        "--dir",
+        "/arctl-tools",
+    ]
+    executable = Path(command[0])
+    if not executable.is_absolute():
+        located = shutil.which(command[0])
+        if located is None:
+            raise StateError(f"dependency executable is unavailable: {command[0]}")
+        executable = Path(located)
+    executable = executable.resolve()
+    sandbox_executable = Path("/arctl-tools") / executable.name
+    arguments.extend(
+        ("--ro-bind", str(executable.parent), "/arctl-tools")
+    )
+    system_paths = (
+        Path("/usr"),
+        Path("/bin"),
+        Path("/lib"),
+        Path("/lib64"),
+        Path("/etc/resolv.conf"),
+        Path("/etc/hosts"),
+        Path("/etc/nsswitch.conf"),
+        Path("/etc/gai.conf"),
+        Path("/etc/ssl"),
+        Path("/etc/ca-certificates"),
+    )
+    for path in system_paths:
+        if path.exists():
+            arguments.extend(("--ro-bind", str(path), str(path)))
+    mounted_roots: list[Path] = [path.resolve() for path in system_paths if path.is_dir()]
+    for path in command_runtime_read_paths(command):
+        resolved = path.resolve()
+        if resolved == executable or not resolved.exists() or any(
+            resolved == root or root in resolved.parents for root in mounted_roots
+        ):
+            continue
+        arguments.extend(("--ro-bind", str(resolved), str(resolved)))
+        mounted_roots.append(resolved)
+    for path in write_paths:
+        resolved = path.resolve()
+        arguments.extend(("--bind", str(resolved), str(resolved)))
+    arguments.extend(
+        (
+            "--chdir",
+            str(cwd.resolve()),
+            "--",
+            str(sandbox_executable),
+            *command[1:],
+        )
+    )
+    return tuple(arguments)
+
+
 def research_command(
     *,
     worktree: Path,
@@ -151,6 +234,7 @@ def research_command(
             "agent prompt exceeds the global limit: "
             f"{len(encoded_prompt)} > {MAX_AGENT_PROMPT_BYTES} bytes"
         )
+    load_codex_output_schema(output_schema)
     prompt_path = scratch.parent / "prompt.public.txt"
     if prompt_path.is_symlink():
         raise StateError("saved agent prompt must not be a symlink")

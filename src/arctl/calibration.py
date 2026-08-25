@@ -10,9 +10,10 @@ from typing import Any
 
 from .commands import render_command
 from .comparison_run import (
+    SUBJECT_WORKERS,
+    _run_subject_arm,
     _validate_batch,
     _validate_prepare_response,
-    _validate_subject_output,
 )
 from .errors import ProcessError, StateError
 from .downstream import primary_process_error
@@ -452,7 +453,7 @@ def _calibrate_controller_pilot(
         kind="calibration",
         trial_count=calibration.ceiling,
     )
-    _validate_batch(
+    cases = _validate_batch(
         batch_path,
         trial_count=calibration.ceiling,
         manifest=manifest,
@@ -460,47 +461,34 @@ def _calibrate_controller_pilot(
     if scoring_path.is_symlink() or not scoring_path.is_file():
         raise StateError("calibration private scoring data is missing")
 
-    subject_result = champion_output / "result.json"
-    subject_command = render_command(
-        manifest.subject_command,
-        {"input": batch_path, "output": subject_result},
-        allowed_roots=(root,),
-    )
     _notify(
         progress,
         "champion_pilot",
         "started",
         trial_count=calibration.ceiling,
+        workers=min(SUBJECT_WORKERS, calibration.ceiling),
     )
-    _run_pilot_process(
-        root / "process" / "champion",
-        subject_command,
-        cwd=champion_directory,
-        read_paths=(
-            champion_directory,
-            batch_path,
-        ),
-        write_paths=(champion_output,),
-        profile="arctl-subject",
-        source="champion pilot",
-        manifest=manifest,
-        command_builder=command_builder,
-        codex_home=codex_home,
-        writable_home=champion_output,
-        stop_path=stop_path,
-        execution_marker=champion_output / "execution.started",
-    )
+    try:
+        subject_result, _ = _run_subject_arm(
+            root,
+            process_root=root / "process",
+            outputs=outputs,
+            cases=cases,
+            subject="champion",
+            subject_directory=champion_directory,
+            manifest=manifest,
+            command_builder=command_builder,
+            codex_home=codex_home,
+            stop_path=stop_path,
+        )
+    except StateError as error:
+        raise StateError("calibration champion pilot failed and cannot be retried") from error
     _notify(
         progress,
         "champion_pilot",
         "complete",
         trial_count=calibration.ceiling,
-    )
-    _validate_subject_output(
-        subject_result,
-        subject="champion",
-        trial_count=calibration.ceiling,
-        manifest=manifest,
+        workers=min(SUBJECT_WORKERS, calibration.ceiling),
     )
 
     assessment_request = requests / "calibrate.json"

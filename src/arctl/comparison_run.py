@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Sequence
 
@@ -43,6 +44,7 @@ CommandBuilder = Callable[
     Sequence[str],
 ]
 ProgressCallback = Callable[[dict[str, Any]], None]
+SUBJECT_WORKERS = 16
 
 
 def _notify(
@@ -148,7 +150,7 @@ def _validate_batch(
     *,
     trial_count: int,
     manifest: EvaluatorManifest,
-) -> None:
+) -> list[Any]:
     batch = _load_json_object(path, source="evaluator", label="public batch")
     if set(batch) != {"schema_version", "trial_count", "cases"}:
         raise ComparisonFailure("evaluator", "public batch fields are invalid")
@@ -166,6 +168,7 @@ def _validate_batch(
             raise ComparisonFailure(
                 "evaluator", f"public batch case {index} violates the approved schema"
             )
+    return list(cases)
 
 
 def _validate_subject_output(
@@ -209,6 +212,141 @@ def _validate_prepare_response(
     }
     if response != expected:
         raise ComparisonFailure("evaluator", "prepare response does not match its request")
+
+
+def _subject_case_shards(cases: Sequence[Any]) -> tuple[tuple[Any, ...], ...]:
+    """Partition ordered cases into at most sixteen balanced contiguous shards."""
+    worker_count = min(SUBJECT_WORKERS, len(cases))
+    if worker_count == 0:
+        return ()
+    width, remainder = divmod(len(cases), worker_count)
+    shards: list[tuple[Any, ...]] = []
+    start = 0
+    for index in range(worker_count):
+        end = start + width + (1 if index < remainder else 0)
+        shards.append(tuple(cases[start:end]))
+        start = end
+    return tuple(shards)
+
+
+def _run_subject_arm(
+    directory: Path,
+    *,
+    process_root: Path,
+    outputs: Path,
+    cases: Sequence[Any],
+    subject: Literal["champion", "candidate"],
+    subject_directory: Path,
+    manifest: EvaluatorManifest,
+    command_builder: CommandBuilder,
+    codex_home: Path,
+    stop_path: Path | None,
+) -> tuple[Path, bool]:
+    """Run one arm in isolated case shards and assemble its canonical ordered output."""
+    output_directory = outputs / subject
+    output_directory.mkdir(parents=True, exist_ok=True)
+    output = output_directory / "result.json"
+    if output.is_file():
+        _validate_subject_output(
+            output,
+            subject=subject,
+            trial_count=len(cases),
+            manifest=manifest,
+        )
+        return output, True
+    if (process_root / subject / "started.json").is_file():
+        raise ComparisonFailure(
+            subject,
+            f"legacy serial {subject} process started without a recoverable output",
+        )
+
+    shards = _subject_case_shards(cases)
+
+    def run_worker(index: int, shard: tuple[Any, ...]) -> None:
+        worker = f"{index:04d}"
+        worker_output = output_directory / "workers" / worker
+        worker_output.mkdir(parents=True, exist_ok=True)
+        worker_batch = worker_output / "batch.public.json"
+        worker_result = worker_output / "result.json"
+        write_json_once(
+            worker_batch,
+            {
+                "schema_version": 1,
+                "trial_count": len(shard),
+                "cases": list(shard),
+            },
+        )
+        command = render_command(
+            manifest.subject_command,
+            {"input": worker_batch, "output": worker_result},
+            allowed_roots=(directory,),
+        )
+        _run_process(
+            process_root / subject / worker,
+            command_builder(
+                marked_command(command, worker_output / "execution.started"),
+                subject_directory,
+                (
+                    subject_directory,
+                    worker_batch,
+                    *command_runtime_read_paths(command),
+                ),
+                (worker_output,),
+                "arctl-subject",
+            ),
+            cwd=subject_directory,
+            manifest=manifest,
+            source=subject,
+            codex_home=codex_home,
+            writable_home=worker_output,
+            stop_path=stop_path,
+            execution_marker=worker_output / "execution.started",
+        )
+        _validate_subject_output(
+            worker_result,
+            subject=subject,
+            trial_count=len(shard),
+            manifest=manifest,
+        )
+
+    with ThreadPoolExecutor(max_workers=len(shards)) as executor:
+        futures = [
+            executor.submit(run_worker, index, shard)
+            for index, shard in enumerate(shards, start=1)
+        ]
+        failures: list[Exception] = []
+        for future in futures:
+            try:
+                future.result()
+            except Exception as error:
+                failures.append(error)
+        if failures:
+            raise failures[0]
+
+    combined: list[Any] = []
+    for index, shard in enumerate(shards, start=1):
+        worker_result = output_directory / "workers" / f"{index:04d}" / "result.json"
+        value = _load_json_object(
+            worker_result,
+            source=subject,
+            label=f"{subject} worker {index} output",
+        )
+        combined.extend(value["results"])
+    write_json_once(
+        output,
+        {
+            "schema_version": 1,
+            "trial_count": len(cases),
+            "results": combined,
+        },
+    )
+    _validate_subject_output(
+        output,
+        subject=subject,
+        trial_count=len(cases),
+        manifest=manifest,
+    )
+    return output, False
 
 
 def run_comparison(
@@ -343,7 +481,7 @@ def run_comparison(
         kind=reservation.kind,
         trial_count=reservation.trial_count,
     )
-    _validate_batch(
+    cases = _validate_batch(
         batch_path,
         trial_count=reservation.trial_count,
         manifest=manifest,
@@ -359,16 +497,6 @@ def run_comparison(
         "candidate": candidate_directory,
     }
     for subject_index, subject in enumerate(reservation.subject_order, start=1):
-        output_directory = outputs / subject
-        output_directory.mkdir(parents=True, exist_ok=True)
-        output = output_directory / "result.json"
-        command = render_command(
-            manifest.subject_command,
-            {"input": batch_path, "output": output},
-            allowed_roots=(directory,),
-        )
-        subject_process = process_root / subject
-        subject_recovered = (subject_process / "result.json").is_file()
         _notify(
             progress,
             kind=reservation.kind,
@@ -377,27 +505,19 @@ def run_comparison(
             batch=subject_index,
             batches=2,
             trial_count=reservation.trial_count,
+            workers=min(SUBJECT_WORKERS, reservation.trial_count),
         )
-        _run_process(
-            subject_process,
-            command_builder(
-                marked_command(command, output_directory / "execution.started"),
-                subject_directories[subject],
-                (
-                    subject_directories[subject],
-                    batch_path,
-                    *command_runtime_read_paths(command),
-                ),
-                (output_directory,),
-                "arctl-subject",
-            ),
-            cwd=subject_directories[subject],
+        output, subject_recovered = _run_subject_arm(
+            directory,
+            process_root=process_root,
+            outputs=outputs,
+            cases=cases,
+            subject=subject,  # type: ignore[arg-type]
+            subject_directory=subject_directories[subject],
             manifest=manifest,
-            source=subject,  # type: ignore[arg-type]
+            command_builder=command_builder,
             codex_home=codex_home,
-            writable_home=output_directory,
             stop_path=stop_path,
-            execution_marker=output_directory / "execution.started",
         )
         _notify(
             progress,
@@ -407,12 +527,7 @@ def run_comparison(
             batch=subject_index,
             batches=2,
             trial_count=reservation.trial_count,
-        )
-        _validate_subject_output(
-            output,
-            subject=subject,  # type: ignore[arg-type]
-            trial_count=reservation.trial_count,
-            manifest=manifest,
+            workers=min(SUBJECT_WORKERS, reservation.trial_count),
         )
         subject_outputs[subject] = output
 

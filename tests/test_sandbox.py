@@ -13,6 +13,7 @@ from arctl.runner import _research_schema, _validate_codex_output_schema
 from arctl.sandbox import (
     MAX_AGENT_PROMPT_BYTES,
     command_runtime_read_paths,
+    networked_dependency_command,
     research_command,
     sandbox_command,
     sanitized_environment,
@@ -21,7 +22,42 @@ from arctl.sandbox import (
 from .test_manifest import valid_manifest
 
 
+def write_output_schema(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '{"type":"object","properties":{},"required":[],'
+        '"additionalProperties":false}',
+        encoding="utf-8",
+    )
+    return path
+
+
 class SandboxCommandTests(unittest.TestCase):
+    def test_networked_dependencies_inherit_network_without_mounting_host_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            environment = root / "venv"
+            command = networked_dependency_command(
+                ("/bin/true", "sync"),
+                cwd=runtime,
+                write_paths=(runtime, environment),
+            )
+
+        self.assertEqual(command[0], "/usr/bin/bwrap")
+        self.assertNotIn("--unshare-net", command)
+        self.assertFalse(
+            any(
+                command[index : index + 3] == ("--ro-bind", "/", "/")
+                for index in range(len(command) - 2)
+            )
+        )
+        self.assertIn(str(runtime.resolve()), command)
+        self.assertIn(str(environment.resolve()), command)
+        self.assertEqual(
+            command[-3:], ("--", "/arctl-tools/true", "sync")
+        )
+
     def test_runtime_paths_include_the_active_virtual_environment(self) -> None:
         paths = command_runtime_read_paths((sys.executable, "-V"))
 
@@ -83,7 +119,7 @@ class SandboxCommandTests(unittest.TestCase):
             command = research_command(
                 worktree=candidate,
                 scratch=scratch,
-                output_schema=scratch / "schema.json",
+                output_schema=write_output_schema(scratch / "schema.json"),
                 prompt="reflect",
                 read_paths=(champion,),
                 writable_worktree=False,
@@ -148,7 +184,7 @@ class SandboxCommandTests(unittest.TestCase):
             command = research_command(
                 worktree=root / "worktree",
                 scratch=root / "scratch",
-                output_schema=root / "schema.json",
+                output_schema=write_output_schema(root / "schema.json"),
                 prompt="Make one improvement.",
                 read_paths=(runtime,),
             )
@@ -174,7 +210,7 @@ class SandboxCommandTests(unittest.TestCase):
             command = research_command(
                 worktree=root / "worktree",
                 scratch=root / "scratch",
-                output_schema=root / "schema.json",
+                output_schema=write_output_schema(root / "schema.json"),
                 prompt="inspect public documentation",
                 writable_worktree=False,
                 network_enabled=True,
@@ -194,6 +230,22 @@ class SandboxCommandTests(unittest.TestCase):
                     prompt="x" * (MAX_AGENT_PROMPT_BYTES + 1),
                 )
 
+    def test_research_rejects_invalid_schema_before_saving_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            schema = root / "schema.json"
+            schema.write_text("{}", encoding="utf-8")
+
+            with self.assertRaisesRegex(StateError, "root must be an object"):
+                research_command(
+                    worktree=root / "worktree",
+                    scratch=root / "scratch",
+                    output_schema=schema,
+                    prompt="must not be saved",
+                )
+
+            self.assertFalse((root / "prompt.public.txt").exists())
+
     def test_strategy_selects_explicit_model_effort_and_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -202,7 +254,7 @@ class SandboxCommandTests(unittest.TestCase):
             worktree.mkdir()
             scratch.mkdir()
             schema = scratch / "schema.json"
-            schema.write_text("{}")
+            write_output_schema(schema)
             with mock.patch("arctl.sandbox.shutil.which", return_value="/usr/bin/codex"):
                 command = research_command(
                     worktree=worktree,

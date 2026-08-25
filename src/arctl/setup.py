@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import math
@@ -9,14 +10,18 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as JsonSchemaError
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
 
 from .agent_backend import AgentSessionRequest, agent_command, agent_environment
 from .commands import render_command
@@ -34,11 +39,18 @@ from .process import run_or_load_once
 from .sandbox import (
     command_runtime_read_paths,
     marked_command,
+    networked_dependency_command,
     sandbox_command,
     sanitized_environment,
 )
-from .setup_protocol import EVALUATOR_ENTRYPOINT, SETUP_API_MODULE, SUBJECT_ENTRYPOINT
+from .setup_protocol import (
+    EVALUATOR_ENTRYPOINT,
+    SETUP_API_MODULE,
+    SUBJECT_ENTRYPOINT,
+    UNITTEST_ENTRYPOINT,
+)
 from .setup_conversation import (
+    MAX_QUESTIONS,
     batch_schema,
     finalize_design,
     finalized_design_schema,
@@ -233,9 +245,11 @@ SETUP_BUILD_CONTRACT = {
         "all commands and placeholders",
         "_arctl/subject.py",
         "_arctl/evaluator.py",
+        "_arctl/unittest_runner.py",
         "evaluator.manifest.json",
     ],
 }
+SETUP_BUILD_CONTROLLER_VERSION = b"setup-controller-v3"
 _SETUP_TEMPLATE = """# ARCTL setup
 
 <!-- Fill what you know. arctl will inspect the repository and ask only about
@@ -712,7 +726,16 @@ def build_schema() -> dict[str, Any]:
 
 def review_schema() -> dict[str, Any]:
     text = {"type": "string", "minLength": 1}
-    citation = _schema({"path": text, "location": text, "finding": text})
+    citation = _schema(
+        {
+            "path": text,
+            "location": {
+                "type": "string",
+                "pattern": r"^lines?\s+\d+(?:-\d+)?$",
+            },
+            "finding": text,
+        }
+    )
     coverage = {
         area: _schema(
             {
@@ -796,15 +819,64 @@ def _validate_review_evidence(
 
 
 def _dependency_uses_special_source(requirement: str) -> bool:
-    lowered = requirement.lower()
-    return (
-        " @ " in requirement
-        or "git+" in lowered
-        or "http://" in lowered
-        or "https://" in lowered
-        or "file:" in lowered
-        or requirement.startswith(("/", "./", "../"))
-    )
+    try:
+        return Requirement(requirement).url is not None
+    except InvalidRequirement:
+        return False
+
+
+def _declared_dependency_requirements(
+    design: Mapping[str, Any], *, subject: Path
+) -> tuple[str, ...]:
+    """Validate and return the exact authorized PEP 508 requirements."""
+    findings: list[str] = []
+    requirements: list[str] = []
+    names: set[str] = set()
+    local_names = {
+        canonicalize_name(path.name)
+        for path in subject.iterdir()
+        if path.is_dir() and (path / "__init__.py").is_file()
+    }
+    for index, dependency in enumerate(design.get("direct_dependencies", [])):
+        requirement = dependency.get("requirement")
+        imports = dependency.get("imports")
+        label = f"direct dependency {index + 1}"
+        try:
+            parsed = Requirement(requirement)
+        except (InvalidRequirement, TypeError):
+            findings.append(f"{label} is not valid PEP 508: {requirement!r}")
+            continue
+        canonical = str(parsed)
+        if canonical != requirement:
+            findings.append(
+                f"{label} must use canonical PEP 508 text {canonical!r}, not {requirement!r}"
+            )
+        name = canonicalize_name(parsed.name)
+        if name in names:
+            findings.append(f"direct dependency name is duplicated: {parsed.name}")
+        names.add(name)
+        if name in local_names and parsed.url is None:
+            findings.append(
+                f"direct dependency {parsed.name!r} is supplied by the subject tree, "
+                "not the package index"
+            )
+        if (
+            not isinstance(imports, list)
+            or not imports
+            or any(
+                not isinstance(item, str)
+                or re.fullmatch(r"[A-Za-z_]\w*", item) is None
+                for item in imports
+            )
+            or len(imports) != len(set(imports))
+        ):
+            findings.append(
+                f"{label} must declare unique top-level Python import names"
+            )
+        requirements.append(requirement)
+    if findings:
+        raise ValidationError("; ".join(findings))
+    return tuple(requirements)
 
 
 def _load_authorized_design(directory: Path) -> dict[str, Any]:
@@ -815,10 +887,22 @@ def _load_authorized_design(directory: Path) -> dict[str, Any]:
         authorization = json.loads(authorization_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise StateError("setup has no valid authorized design") from error
+    schema = finalized_design_schema()
     try:
-        Draft202012Validator(finalized_design_schema()).validate(design)
+        Draft202012Validator(schema).validate(design)
     except JsonSchemaError as error:
-        raise StateError("authorized setup design is invalid") from error
+        legacy_schema = deepcopy(schema)
+        legacy_schema["properties"]["schema_version"]["const"] = 2
+        dependency_required = legacy_schema["properties"]["direct_dependencies"][
+            "items"
+        ]["required"]
+        dependency_required.remove("imports")
+        try:
+            if design.get("schema_version") != 2:
+                raise error
+            Draft202012Validator(legacy_schema).validate(design)
+        except JsonSchemaError as legacy_error:
+            raise StateError("authorized setup design is invalid") from legacy_error
     digest = hashlib.sha256(
         json.dumps(design, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -861,6 +945,10 @@ def _validate_dependency_plan(
         design = _load_authorized_design(directory)
     except StateError as error:
         raise ValidationError(str(error)) from error
+    setup = json.loads((directory / "setup.json").read_text(encoding="utf-8"))
+    authorized = _declared_dependency_requirements(
+        design, subject=Path(setup["subject"])
+    )
     declared = {
         item["requirement"]: item for item in design.get("direct_dependencies", [])
     }
@@ -884,13 +972,16 @@ def _validate_dependency_plan(
         for item in load_decisions(directory).get("decisions", [])
         if isinstance(item, Mapping) and isinstance(item.get("id"), str)
     }
-    for requirement in dependencies:
+    findings: list[str] = []
+    for requirement in authorized:
         dependency = declared[requirement]
         decision = dependency.get("authorization_decision")
         if _dependency_uses_special_source(requirement) and decision not in decisions:
-            raise ValidationError(
+            findings.append(
                 f"dependency {requirement!r} uses a special source without an explicit decision"
             )
+    if findings:
+        raise ValidationError("; ".join(findings))
 
 
 def _agent_failure_detail(stderr: str, stdout: str) -> str:
@@ -1115,10 +1206,21 @@ def _save_setup(directory: Path, value: dict[str, Any]) -> None:
 
 
 def _invalidate_pending_build(
-    directory: Path, setup: dict[str, Any], finding: str
+    directory: Path, setup: dict[str, Any], finding: str | Sequence[str]
 ) -> None:
     setup.pop("pending_build", None)
-    setup["prior_build_findings"] = [finding]
+    setup.pop("acceptance_token", None)
+    setup["state"] = "BUILD_REQUIRED"
+    setup["prior_build_findings"] = (
+        [finding] if isinstance(finding, str) else list(finding)
+    )
+    atomic_write_json(
+        directory / "setup" / "build-findings.public.json",
+        {
+            "schema_version": 1,
+            "findings": setup["prior_build_findings"],
+        },
+    )
     _save_setup(directory, setup)
 
 
@@ -1302,12 +1404,19 @@ def discover_setup_batch(
         "confirmation and never combine several fields into one prose answer. Cite the "
         "controller failure rule for any late_dependency_requirements and ask an "
         "explicit allow-or-reject question for each new direct dependency before returning "
-        "another design. "
-        "controller citation only for a controller-owned invariant. When no material "
+        "another design. Never invent dependency authorization decision IDs: a non-null "
+        "authorization_decision must name an ID already present in confirmed_decisions. "
+        "Use a controller citation only for a controller-owned invariant. "
+        "Set excerpt_sha256 to null in every repository citation; the controller verifies "
+        "the cited lines and fills that digest. When no material "
         "question remains, return no questions and one complete typed design. Specify exact "
         "editable paths, one canonical environment adapter, an outcome statistic with direction, "
         "unit, aggregation, extraction, and its string-key path inside each subject result, and "
         "a trial protocol with a finite safety horizon. "
+        "The executable adapter must be subject-owned because the subject sandbox cannot read "
+        "the separate environment repository; a derived adapter may name a generated subject path. "
+        "Every direct dependency must be canonical PEP 508 and declare its top-level imports; "
+        "subject-local packages are source code, not index dependencies. "
         "Keep hard rules, hidden-data handling, telemetry, runtime limits, and evaluator approach "
         "in the compact derived_setup object. Declare arm symmetry only when swapping algorithm "
         "arms is scientifically meaningful; otherwise explain why it is not applicable. A "
@@ -1320,6 +1429,7 @@ def discover_setup_batch(
                 "revision": revision,
                 "confirmed_decisions": decisions["decisions"],
                 "late_dependency_requirements": setup.get("late_dependencies", []),
+                "prior_design_findings": setup.get("prior_design_findings", []),
                 "required_human_decisions": ["objective", "outcome", "policy_boundary"],
                 "design_sections": [
                     "objective", "policy", "environment_adapter", "outcome", "trial",
@@ -1340,13 +1450,18 @@ def discover_setup_batch(
         value = _agent_run(
             root=attempts / f"{attempt:04d}",
             worktree=subject,
-            schema_value=batch_schema(),
+            schema_value=batch_schema(
+                revision=revision,
+                decision_ids=tuple(item["id"] for item in decisions["decisions"]),
+            ),
             output_name="question-batch.public.json",
             prompt=prompt,
             writable_worktree=False,
             command_builder=command_builder,
             offline=True,
         )
+        value = validate_batch(value, subject=subject, revision=revision)
+        value = _controller_dependency_questions(value, decisions=decisions)
         value = validate_batch(value, subject=subject, revision=revision)
         save_batch(directory, value)
         if value["design"] is None:
@@ -1366,6 +1481,176 @@ def discover_setup_batch(
     if progress is not None:
         progress({"stage": "repository inspection", "status": "completed"})
     return value
+
+
+def _controller_dependency_questions(
+    batch: Mapping[str, Any], *, decisions: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Turn unresolved proposed dependencies into deterministic human questions.
+
+    Dependency authorization is a human decision, but detecting that a proposed
+    requirement lacks such a decision is mechanical.  Keeping that conversion in
+    the controller prevents discovery agents from inventing decision identifiers
+    or repeatedly returning an otherwise complete design that cannot be finalized.
+    """
+    design = batch.get("design")
+    if not isinstance(design, Mapping):
+        return dict(batch)
+    decision_ids = {
+        item["id"]
+        for item in decisions.get("decisions", [])
+        if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+    }
+    pending = [
+        dependency
+        for dependency in design["direct_dependencies"]
+        if dependency["origin"] == "proposed"
+        and dependency["authorization_decision"] not in decision_ids
+    ]
+    if not pending:
+        return dict(batch)
+    if len(pending) > MAX_QUESTIONS:
+        raise ValidationError(
+            "setup design proposes too many unresolved direct dependencies for one batch"
+        )
+    questions = []
+    used_ids = set(decision_ids)
+    for dependency in pending:
+        package = canonicalize_name(Requirement(dependency["requirement"]).name)
+        base = re.sub(r"[^a-z0-9_]+", "_", f"allow_dependency_{package}")[:64]
+        identifier = base
+        suffix = 2
+        while identifier in used_ids:
+            tail = f"_{suffix}"
+            identifier = base[: 64 - len(tail)] + tail
+            suffix += 1
+        used_ids.add(identifier)
+        citation = {
+            "kind": "controller",
+            "rule_id": "failure",
+            "finding": (
+                "A newly proposed direct dependency must be explicitly allowed or rejected "
+                "before the controller can install or execute it."
+            ),
+        }
+        questions.append(
+            {
+                "id": identifier,
+                "prompt": f"Allow the direct dependency {dependency['requirement']}?",
+                "why": dependency["reason"],
+                "options": [
+                    {
+                        "id": "allow",
+                        "label": f"Allow {dependency['requirement']}",
+                        "value": (
+                            f"Allow {dependency['requirement']} as a direct runtime dependency "
+                            f"providing imports {', '.join(dependency['imports'])}."
+                        ),
+                        "consequence": "The dependency may be resolved and imported during setup checks.",
+                        "citations": [citation],
+                    },
+                    {
+                        "id": "reject",
+                        "label": f"Reject {dependency['requirement']}",
+                        "value": (
+                            f"Reject {dependency['requirement']}; revise the integration so it is not "
+                            "a direct runtime dependency."
+                        ),
+                        "consequence": "Discovery must produce an integration that does not require it.",
+                        "citations": [citation],
+                    },
+                ],
+                "recommended_option_id": "allow",
+                "allow_custom": True,
+            }
+        )
+    return {
+        "schema_version": batch["schema_version"],
+        "revision": batch["revision"],
+        "summary": (
+            "Explicit authorization is required for newly proposed direct dependencies."
+        ),
+        "questions": questions,
+        "design": None,
+    }
+
+
+def reopen_review_decision_batch(
+    directory: Path, setup: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Reopen a cited human decision when review proves two choices conflict."""
+    if setup.get("state") != "REVIEW_FAILED" or not any(
+        isinstance(finding, Mapping)
+        and finding.get("code") == "INTENT_OBJECTIVE_OUTCOME_MISMATCH"
+        for finding in setup.get("prior_review_findings", [])
+    ):
+        return None
+    design_path = directory / "setup" / "authorized-design.public.json"
+    try:
+        design = json.loads(design_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise StateError("reviewed setup design cannot reopen its objective decision") from error
+    decisions = load_decisions(directory)
+    revision = decisions["revision"] + 1
+    lines_citations = deepcopy(design["outcome"]["citations"])
+    reward_citations = deepcopy(design["objective"]["citations"])
+    batch = {
+        "schema_version": 1,
+        "revision": revision,
+        "summary": (
+            "Static review proved that environment reward and total lines cleared are "
+            "not equivalent primary objectives."
+        ),
+        "questions": [
+            {
+                "id": "objective",
+                "prompt": "Which quantity is the primary optimization objective?",
+                "why": (
+                    "The environment includes alive and game-over reward terms, so maximizing "
+                    "reward can rank policies differently from maximizing total lines cleared."
+                ),
+                "options": [
+                    {
+                        "id": "total_lines_cleared",
+                        "label": "Total lines cleared",
+                        "value": (
+                            "Maximize total lines cleared per seeded episode over at most "
+                            "1000 block placements."
+                        ),
+                        "consequence": (
+                            "The objective matches the confirmed primary outcome and paired "
+                            "acceptance statistic."
+                        ),
+                        "citations": lines_citations,
+                    },
+                    {
+                        "id": "environment_reward",
+                        "label": "Environment reward",
+                        "value": (
+                            "Maximize cumulative environment reward per seeded episode over at "
+                            "most 1000 block placements."
+                        ),
+                        "consequence": (
+                            "Discovery must replace the primary outcome and acceptance statistic "
+                            "with environment reward."
+                        ),
+                        "citations": reward_citations,
+                    },
+                ],
+                "recommended_option_id": "total_lines_cleared",
+                "allow_custom": True,
+            }
+        ],
+        "design": None,
+    }
+    normalized = validate_batch(
+        batch, subject=Path(setup["subject"]), revision=revision
+    )
+    save_batch(directory, normalized)
+    setup["state"] = "QUESTIONS_REQUIRED"
+    setup["review_decision_reopened"] = "objective"
+    _save_setup(directory, setup)
+    return normalized
 
 
 def save_answers(
@@ -1564,6 +1849,7 @@ def _archive_legacy_generated(
                 Path("_arctl/hook.py"),
                 Path("_arctl/api.py"),
                 Path("_arctl/evaluator.py"),
+                Path("_arctl/unittest_runner.py"),
                 Path("evaluator.manifest.json"),
                 Path("test_generated_evaluator.py"),
             }
@@ -1848,8 +2134,19 @@ def _validate_build_contract(
     except (json.JSONDecodeError, ValidationError) as error:
         errors.append(f"evaluator manifest contract: {error}")
     serialized = json.dumps(task, sort_keys=True)
+    required_placeholders = {
+        "SETUP_SUBJECT_COMMIT",
+        "SETUP_EVALUATOR_COMMIT",
+        *(
+            ("SETUP_ENVIRONMENT_COMMIT",)
+            if any(source["owner"] == "environment" for source in value["task"]["environment"]["codebases"])
+            else ()
+        ),
+    }
     missing = sorted(
-        placeholder for placeholder in _PLACEHOLDERS if placeholder not in serialized
+        placeholder
+        for placeholder in required_placeholders
+        if placeholder not in serialized
     )
     if missing:
         errors.append(f"task contract: missing commit placeholders {missing}")
@@ -1879,6 +2176,93 @@ def _validate_build_contract(
         raise ValidationError("; ".join(errors))
     assert task_config is not None
     return task, manifest, task_config
+
+
+def _validate_complete_build_contract(
+    value: Mapping[str, Any], setup: Mapping[str, Any], directory: Path
+) -> tuple[dict[str, Any], dict[str, Any], TaskConfig]:
+    """Return every deterministic typed/authorization finding in one pass."""
+    findings: list[str] = []
+    validated: tuple[dict[str, Any], dict[str, Any], TaskConfig] | None = None
+    try:
+        validated = _validate_build_contract(value, setup)
+    except ValidationError as error:
+        findings.append(str(error))
+    task = validated[0] if validated is not None else value.get("task")
+    evaluator = validated[1] if validated is not None else value.get("evaluator")
+    if isinstance(task, Mapping) and isinstance(evaluator, Mapping):
+        try:
+            _validate_authorized_design_match(directory, task, evaluator)
+        except ValidationError as error:
+            findings.append(str(error))
+    if findings:
+        raise ValidationError("; ".join(findings))
+    assert validated is not None
+    return validated
+
+
+def _authorized_adapter_source_path(adapter: Mapping[str, Any]) -> str:
+    """Return a canonical path, tolerating one legacy path-plus-note shape."""
+    source = str(adapter["source_path"])
+    matched = re.fullmatch(r"([^\s()]+\.[A-Za-z0-9]+) \([^()]+\)", source)
+    return matched.group(1) if matched else source
+
+
+def _validate_authorized_design_for_build(
+    directory: Path, setup: dict[str, Any], design: Mapping[str, Any]
+) -> tuple[str, ...]:
+    """Fail closed before generation when the authorized design is mechanical nonsense."""
+    findings: list[str] = []
+    adapter = design["environment_adapter"]
+    source = str(adapter["source_path"])
+    relative = Path(source)
+    if _authorized_adapter_source_path(adapter) != source:
+        findings.append(
+            "DESIGN_ADAPTER_PATH environment adapter source_path contains appended prose"
+        )
+    if adapter["owner"] != "subject":
+        findings.append(
+            "DESIGN_ADAPTER_OWNER executable environment adapter must be subject-owned"
+        )
+    if (
+        relative.is_absolute()
+        or relative == Path(".")
+        or ".." in relative.parts
+        or re.fullmatch(r"\.[A-Za-z0-9]+", relative.suffix) is None
+    ):
+        findings.append(
+            "DESIGN_ADAPTER_PATH environment adapter source_path must be one relative file"
+        )
+    editable = [item["pattern"] for item in design["policy"]["editable_paths"]]
+    if any(fnmatchcase(source, pattern) for pattern in editable):
+        findings.append(
+            "DESIGN_EDITABLE_ADAPTER environment adapter cannot be candidate-editable"
+        )
+    try:
+        dependencies = _declared_dependency_requirements(
+            design, subject=Path(setup["subject"])
+        )
+    except ValidationError as error:
+        findings.append(f"DESIGN_DEPENDENCY {error}")
+        dependencies = ()
+    if findings:
+        setup.pop("pending_build", None)
+        setup.pop("acceptance_token", None)
+        setup["state"] = "DISCOVERY_REQUIRED"
+        setup["prior_design_findings"] = sorted(set(findings))
+        atomic_write_json(
+            directory / "setup" / "design-findings.public.json",
+            {
+                "schema_version": 1,
+                "findings": setup["prior_design_findings"],
+            },
+        )
+        _save_setup(directory, setup)
+        raise StateError(
+            "authorized setup design failed deterministic validation: "
+            + "; ".join(setup["prior_design_findings"])
+        )
+    return dependencies
 
 
 def _validate_authorized_design_match(
@@ -1929,18 +2313,19 @@ def _validate_authorized_design_match(
     ):
         errors.append("public cases do not carry the exact authorized finite horizon")
     adapter = design["environment_adapter"]
+    adapter_source_path = _authorized_adapter_source_path(adapter)
     codebases = task.get("environment", {}).get("codebases", [])
     owner_repo = adapter["owner"]
     # _validate_build_contract has already resolved owner names to workspace repositories.
     expected_repo = str(Path(task.get("repo", ""))) if owner_repo == "subject" else None
     if owner_repo == "subject" and not any(
         source.get("repo") == expected_repo
-        and adapter["source_path"] in source.get("include", [])
+        and adapter_source_path in source.get("include", [])
         for source in codebases
     ):
         errors.append("task environment does not include the authorized subject adapter source")
     if owner_repo == "environment" and not any(
-        adapter["source_path"] in source.get("include", [])
+        adapter_source_path in source.get("include", [])
         for source in codebases
         if source.get("repo") != str(Path(task.get("repo", "")))
     ):
@@ -2126,7 +2511,6 @@ def _run_setup_command(
         codex_home=root / "codex-home",
         writable_home=home,
     )
-    environment["PYTHONPYCACHEPREFIX"] = str((home / "pycache").resolve())
     try:
         result = run_or_load_once(
             root / "process",
@@ -2170,7 +2554,7 @@ def _mutated_subject_output(
     results = original.get("results")
     if not isinstance(results, list) or not results:
         raise StateError("arm-symmetry check has no subject results")
-    numbers: list[float] = []
+    numbers: list[int | float] = []
     for result in results:
         target: Any = result
         for part in result_path:
@@ -2179,14 +2563,19 @@ def _mutated_subject_output(
             target = target[part]
         if isinstance(target, bool) or not isinstance(target, (int, float)):
             raise StateError("authorized outcome result path is not numeric")
-        numbers.append(float(target))
+        numbers.append(target)
     for direction in (1.0, -1.0):
         changed = json.loads(json.dumps(original))
         for result, number in zip(changed["results"], numbers, strict=True):
             target = result
             for part in result_path[:-1]:
                 target = target[part]
-            target[result_path[-1]] = number + direction * max(1.0, abs(number) * 0.1)
+            if isinstance(number, int):
+                delta: int | float = max(1, math.ceil(abs(number) * 0.1))
+                target[result_path[-1]] = number + int(direction) * delta
+            else:
+                delta = max(1.0, abs(number) * 0.1)
+                target[result_path[-1]] = number + direction * delta
         atomic_write_json(destination, changed)
         try:
             _validate_subject_output(
@@ -2598,7 +2987,12 @@ def _protocol_preflight(
 
 
 def _evaluator_checks(
-    directory: Path, evaluator: Path, runtime_python: str, *, sandboxed: bool = True
+    directory: Path,
+    evaluator: Path,
+    subject: Path,
+    runtime_python: str,
+    *,
+    sandboxed: bool = True,
 ) -> None:
     if not tuple(evaluator.glob("test_*.py")):
         raise StateError("generated evaluator must include public unittest coverage")
@@ -2608,21 +3002,261 @@ def _evaluator_checks(
     _run_setup_command(
         [
             runtime_python,
-            "-m",
-            "unittest",
-            "discover",
-            "-s",
+            "_arctl/unittest_runner.py",
             str(evaluator),
         ],
         cwd=evaluator,
         root=root,
-        read_paths=(evaluator,),
+        read_paths=(evaluator, subject),
         write_paths=(root,),
         timeout_seconds=300,
         max_output_bytes=1_000_000,
         label="evaluator conformance checks",
         sandboxed=sandboxed,
     )
+
+
+def _dependency_import_checks(
+    directory: Path,
+    requirements: Mapping[str, Any],
+    *,
+    subject: Path,
+    runtime_python: str,
+    sandboxed: bool,
+) -> None:
+    imports = sorted(
+        {
+            name
+            for dependency in requirements.get("direct_dependencies", [])
+            for name in dependency["imports"]
+        }
+    )
+    if not imports:
+        return
+    root = directory / "setup" / "dependency-imports"
+    expression = (
+        "import importlib;"
+        + ";".join(
+            f"importlib.import_module({json.dumps(name)})" for name in imports
+        )
+    )
+    _run_setup_command(
+        [runtime_python, "-c", expression],
+        cwd=subject,
+        root=root,
+        read_paths=(subject,),
+        write_paths=(root,),
+        timeout_seconds=120,
+        max_output_bytes=1_000_000,
+        label="authorized dependency import checks",
+        sandboxed=sandboxed,
+    )
+
+
+def _static_imports(path: Path) -> set[str]:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeError):
+        return set()
+    imports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.update(alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            imports.add(node.module.split(".", 1)[0])
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "importlib"
+            and node.func.attr == "import_module"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            imports.add(node.args[0].value.split(".", 1)[0])
+    return imports
+
+
+def _local_import_files(path: Path, roots: Sequence[Path]) -> set[Path]:
+    """Resolve statically named local imports without importing repository code."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeError):
+        return set()
+    owning_root = next(
+        (root for root in roots if path == root or root in path.parents), None
+    )
+    package: tuple[str, ...] = ()
+    if owning_root is not None:
+        relative = path.relative_to(owning_root)
+        package = (
+            relative.parent.parts
+            if relative.name == "__init__.py"
+            else relative.with_suffix("").parts[:-1]
+        )
+
+    modules: set[tuple[str, ...]] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(tuple(alias.name.split(".")) for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            parent = package
+            if node.level > 1:
+                parent = package[: max(0, len(package) - node.level + 1)]
+            base = (
+                (*parent, *node.module.split("."))
+                if node.level and node.module
+                else tuple(node.module.split("."))
+                if node.module
+                else parent
+            )
+            modules.add(base)
+            if node.module is None:
+                modules.update((*base, alias.name) for alias in node.names)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "importlib"
+            and node.func.attr == "import_module"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            modules.add(tuple(node.args[0].value.split(".")))
+
+    resolved: set[Path] = set()
+    for module in modules:
+        if not module:
+            continue
+        for root in roots:
+            source = root.joinpath(*module).with_suffix(".py")
+            package_init = root.joinpath(*module, "__init__.py")
+            if source.is_file() and not source.is_symlink():
+                resolved.add(source)
+                break
+            if package_init.is_file() and not package_init.is_symlink():
+                resolved.add(package_init)
+                break
+    return resolved
+
+
+def _cross_artifact_findings(
+    value: Mapping[str, Any],
+    requirements: Mapping[str, Any],
+    *,
+    subject: Path,
+    environment: Path,
+) -> list[str]:
+    """Return every mechanical cross-artifact defect in stable order."""
+    findings: list[str] = []
+    task = value["task"]
+    editable = task["editable_paths"]
+    roots = {"subject": subject, "environment": environment}
+    for source in task["environment"]["codebases"]:
+        root = roots[source["owner"]]
+        matched: set[Path] = set()
+        for pattern in source["include"]:
+            matched.update(
+                path
+                for path in root.glob(pattern)
+                if path.is_file() and not path.is_symlink()
+            )
+        if not matched:
+            findings.append(
+                f"SOURCE_UNREACHABLE {source['id']} has no files in {source['owner']}"
+            )
+        if source["owner"] == "subject":
+            overlaps = sorted(
+                path.relative_to(subject).as_posix()
+                for path in matched
+                if any(
+                    fnmatchcase(path.relative_to(subject).as_posix(), pattern)
+                    for pattern in editable
+                )
+            )
+            if overlaps:
+                findings.append(
+                    f"SOURCE_EDITABLE_OVERLAP {source['id']}: {', '.join(overlaps)}"
+                )
+
+    commands = [
+        *task["public_checks"],
+        task["public_probe"]["execution"],
+        *(probe["execution"] for probe in task["environment"]["probes"]),
+    ]
+    for index, command in enumerate(commands, start=1):
+        local_targets = []
+        if command["kind"] == "script":
+            local_targets.append(command["target"])
+        local_targets.extend(
+            argument for argument in command["arguments"] if argument.endswith(".py")
+        )
+        for target in local_targets:
+            relative = Path(target)
+            if (
+                relative.is_absolute()
+                or ".." in relative.parts
+                or not (subject / relative).is_file()
+            ):
+                findings.append(
+                    f"COMMAND_UNREACHABLE command {index} cannot read subject path {target}"
+                )
+
+    declared_imports = {
+        item
+        for dependency in requirements.get("direct_dependencies", [])
+        for item in dependency.get("imports", [])
+    }
+    local_imports = {
+        path.stem for path in subject.glob("*.py") if path.is_file()
+    } | {
+        path.name
+        for path in subject.iterdir()
+        if path.is_dir() and (path / "__init__.py").is_file()
+    }
+    allowed = set(sys.stdlib_module_names) | local_imports | declared_imports | {"_arctl"}
+    unresolved: dict[str, list[str]] = {}
+    scanned_paths = {
+        subject / record["path"]
+        for record in value.get("subject_files", [])
+        if isinstance(record, Mapping) and isinstance(record.get("path"), str)
+    }
+    scanned_paths.add(subject / "_arctl" / "hook.py")
+    adapter = requirements["environment_adapter"]
+    scanned_paths.add(
+        roots[adapter["owner"]] / _authorized_adapter_source_path(adapter)
+    )
+    pending_scan = list(scanned_paths)
+    while pending_scan:
+        imported = _local_import_files(
+            pending_scan.pop(), (subject, environment)
+        ) - scanned_paths
+        scanned_paths.update(imported)
+        pending_scan.extend(imported)
+    for path in sorted(scanned_paths):
+        if path.is_symlink() or not path.is_file() or path.suffix != ".py":
+            continue
+        for imported in sorted(_static_imports(path) - allowed):
+            display = (
+                path.relative_to(subject).as_posix()
+                if subject in path.parents
+                else "environment:" + path.relative_to(environment).as_posix()
+            )
+            unresolved.setdefault(imported, []).append(
+                display
+            )
+    for imported, paths in sorted(unresolved.items()):
+        findings.append(
+            f"IMPORT_UNDECLARED {imported}: {', '.join(sorted(set(paths)))}"
+        )
+    adapter_root = roots[adapter["owner"]]
+    if not (adapter_root / _authorized_adapter_source_path(adapter)).is_file():
+        findings.append(
+            "ADAPTER_UNREACHABLE authorized environment adapter is absent from its repository"
+        )
+    return sorted(set(findings))
 
 
 def _public_setup_checks(
@@ -2671,22 +3305,420 @@ def _public_setup_checks(
         )
 
 
-def _direct_build_schema() -> dict[str, Any]:
+def _direct_build_schema(
+    requirements: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     text = {"type": "string", "minLength": 1}
-    paths = {"type": "array", "items": text}
+    typed = deepcopy(build_schema()["properties"])
+    if requirements is not None:
+        expected_paths = [
+            item["pattern"] for item in requirements["policy"]["editable_paths"]
+        ]
+
+        def authorized_strings(values: Sequence[str]) -> dict[str, Any]:
+            schema: dict[str, Any] = {
+                "type": "array",
+                "items": (
+                    {"type": "string", "enum": list(dict.fromkeys(values))}
+                    if values
+                    else text
+                ),
+                "maxItems": len(values),
+            }
+            if values:
+                schema["minItems"] = len(values)
+            return schema
+
+        task = typed["task"]["properties"]
+        task["objective"] = {
+            "type": "string",
+            "const": requirements["objective"]["value"],
+        }
+        task["editable_paths"] = authorized_strings(expected_paths)
+        evaluator = typed["evaluator"]["properties"]
+        evaluator["public"]["properties"]["statistic"] = {
+            "type": "string",
+            "const": requirements["outcome"]["statistic"],
+        }
+        evaluator["trial"]["properties"]["meaning"] = {
+            "type": "string",
+            "const": requirements["trial"]["unit"],
+        }
+        evaluator["trial"]["properties"]["seed_to_case"] = {
+            "type": "string",
+            "const": requirements["trial"]["seed_handling"],
+        }
+        setup_contract = evaluator["setup_contract"]["properties"]
+        adapter = requirements["environment_adapter"]
+        setup_contract["environment_adapter"]["properties"].update(
+            {
+                "entrypoint": {"type": "string", "const": adapter["entrypoint"]},
+                "interface": {"type": "string", "const": adapter["interface"]},
+            }
+        )
+        outcome = requirements["outcome"]
+        setup_contract["outcome"]["properties"].update(
+            {
+                name: {"type": "string", "const": outcome[name]}
+                for name in ("direction", "unit", "aggregation", "extraction")
+            }
+        )
+        trial = requirements["trial"]
+        setup_contract["trial"]["properties"].update(
+            {
+                "termination": {"type": "string", "const": trial["termination"]},
+                "horizon_unit": {
+                    "type": "string",
+                    "const": trial["horizon"]["unit"],
+                },
+            }
+        )
+        setup_contract["hard_rules"] = authorized_strings(
+            requirements["derived_setup"]["hard_rules"]
+        )
+        setup_contract["runtime_limits"] = authorized_strings(
+            requirements["derived_setup"]["runtime_limits"]
+        )
+    def file_declaration(
+        repository: str, role: str, path: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        return _schema(
+            {
+                "repository": {"type": "string", "const": repository},
+                "path": dict(path),
+                "role": {"type": "string", "const": role},
+            }
+        )
+
+    exact_subject_paths: list[str] = []
+    if requirements is not None:
+        exact_subject_paths = list(
+            dict.fromkeys(
+                [
+                    _authorized_adapter_source_path(
+                        requirements["environment_adapter"]
+                    ),
+                    *(
+                        item["pattern"]
+                        for item in requirements["policy"]["editable_paths"]
+                        if not any(character in item["pattern"] for character in "*?[")
+                    ),
+                ]
+            )
+        )
+    allowed_file_declarations = [
+            file_declaration(
+                "subject", "subject_hook", {"type": "string", "const": "_arctl/hook.py"}
+            ),
+            file_declaration(
+                "evaluator", "evaluator_hook", {"type": "string", "const": "_arctl/hook.py"}
+            ),
+            file_declaration(
+                "evaluator",
+                "evaluator_test",
+                {"type": "string", "const": "test_generated_evaluator.py"},
+            ),
+            *(
+                file_declaration(
+                    "subject", "support", {"type": "string", "const": path}
+                )
+                for path in exact_subject_paths
+            ),
+        ]
+    file_declarations = {"anyOf": allowed_file_declarations}
     return _schema(
         {
-            "schema_version": {"type": "integer", "const": 1},
+            "schema_version": {"type": "integer", "const": 3},
             "summary": text,
-            "dependencies": {"type": "array", "items": text},
-            "subject_files": paths,
-            "environment_files": paths,
-            "evaluator_files": paths,
+            "files": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": len(allowed_file_declarations),
+                "items": file_declarations,
+            },
+            "task": typed["task"],
+            "evaluator": typed["evaluator"],
         }
     )
 
 
-def _read_owned_file_records(root: Path, paths: Sequence[str], *, label: str) -> list[dict[str, str]]:
+def _apply_authorized_build_fields(
+    task: Mapping[str, Any],
+    evaluator: Mapping[str, Any],
+    requirements: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Replace model echoes of authorized fields with their canonical values."""
+    normalized_task = deepcopy(task)
+    normalized_evaluator = deepcopy(evaluator)
+    normalized_task["objective"] = requirements["objective"]["value"]
+    normalized_task["editable_paths"] = [
+        item["pattern"] for item in requirements["policy"]["editable_paths"]
+    ]
+    exact_editable_paths = [
+        path
+        for path in normalized_task["editable_paths"]
+        if not any(character in path for character in "*?[")
+    ]
+    syntax_check = {
+        "kind": "module",
+        "target": "py_compile",
+        "arguments": exact_editable_paths,
+    }
+    normalized_task["public_checks"] = [syntax_check]
+    normalized_task["public_probe"] = {
+        "execution": syntax_check,
+        "trial_equivalents": 1,
+    }
+    adapter = requirements["environment_adapter"]
+    adapter_source_path = _authorized_adapter_source_path(adapter)
+    codebases = normalized_task["environment"]["codebases"]
+    for source in codebases:
+        if source.get("owner") == "subject":
+            source["include"] = [
+                path
+                for path in source.get("include", [])
+                if path not in normalized_task["editable_paths"]
+            ]
+    matching_sources = [
+        source for source in codebases if source.get("owner") == adapter["owner"]
+    ]
+    if not any(
+        adapter_source_path in source.get("include", [])
+        for source in matching_sources
+    ):
+        empty_sources = [
+            source for source in matching_sources if not source.get("include")
+        ]
+        if empty_sources:
+            empty_sources[0]["include"].append(adapter_source_path)
+        else:
+            existing_ids = {source["id"] for source in codebases}
+            source_id = "authorized_environment_adapter"
+            suffix = 2
+            while source_id in existing_ids:
+                source_id = f"authorized_environment_adapter_{suffix}"
+                suffix += 1
+            codebases.append(
+                {
+                    "id": source_id,
+                    "description": "Authorized environment adapter source.",
+                    "owner": adapter["owner"],
+                    "include": [adapter_source_path],
+                }
+            )
+    normalized_evaluator["public"]["statistic"] = requirements["outcome"][
+        "statistic"
+    ]
+    normalized_evaluator["public"]["subject_interface"] = requirements[
+        "environment_adapter"
+    ]["interface"]
+    normalized_evaluator["trial"]["meaning"] = requirements["trial"]["unit"]
+    normalized_evaluator["trial"]["seed_to_case"] = requirements["trial"][
+        "seed_handling"
+    ]
+    horizon = requirements["trial"]["horizon"]
+    horizon_field = horizon["case_field"]
+    editable_paths = [
+        item["pattern"] for item in requirements["policy"]["editable_paths"]
+    ]
+    if len(editable_paths) != 1:
+        raise ValidationError(
+            "authorized environment adapter requires one exact editable policy path"
+        )
+    public_case = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["case_id", "seed", "policy_path", horizon_field],
+        "properties": {
+            "case_id": {"type": "string", "minLength": 1},
+            "seed": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": (1 << 64) - 1,
+            },
+            "policy_path": {"type": "string", "const": editable_paths[0]},
+            horizon_field: {"type": "integer", "const": horizon["limit"]},
+        },
+    }
+    normalized_evaluator["schemas"]["public_case_json"] = json.dumps(
+        public_case, sort_keys=True, separators=(",", ":")
+    )
+    outcome_path = requirements["outcome"]["result_path"]
+    outcome_name = outcome_path[-1]
+    legacy_result = json.loads(
+        normalized_evaluator["schemas"].get("subject_result_json", "{}")
+    )
+
+    def matching_numeric_schemas(node: Any) -> list[dict[str, Any]]:
+        if not isinstance(node, Mapping):
+            return []
+        matches: list[dict[str, Any]] = []
+        properties = node.get("properties")
+        if isinstance(properties, Mapping):
+            candidate = properties.get(outcome_name)
+            if (
+                isinstance(candidate, Mapping)
+                and candidate.get("type") in {"integer", "number"}
+            ):
+                matches.append(
+                    {
+                        key: deepcopy(candidate[key])
+                        for key in ("type", "minimum", "maximum")
+                        if key in candidate
+                    }
+                )
+            for child in properties.values():
+                matches.extend(matching_numeric_schemas(child))
+        return matches
+
+    numeric_matches = matching_numeric_schemas(legacy_result)
+    outcome_value_schema: dict[str, Any] = {
+        "type": (
+            "integer"
+            if any(item["type"] == "integer" for item in numeric_matches)
+            else "number"
+        )
+    }
+    minima = [item["minimum"] for item in numeric_matches if "minimum" in item]
+    maxima = [item["maximum"] for item in numeric_matches if "maximum" in item]
+    if minima:
+        outcome_value_schema["minimum"] = max(minima)
+    if maxima:
+        outcome_value_schema["maximum"] = min(maxima)
+    if (
+        "minimum" in outcome_value_schema
+        and "maximum" in outcome_value_schema
+        and outcome_value_schema["minimum"] > outcome_value_schema["maximum"]
+    ):
+        raise ValidationError(
+            "generated outcome schemas have incompatible numeric bounds"
+        )
+    normalized_evaluator["public"]["telemetry"] = [
+        {
+            "name": outcome_name,
+            "description": "Arithmetic mean primary outcome for each paired arm.",
+            "unit": requirements["outcome"]["unit"],
+            "scope": "paired",
+            "role": "outcome",
+            "value_type": "number",
+            "direction": requirements["outcome"]["direction"],
+        },
+        {
+            "name": "placements",
+            "description": "Arithmetic mean placements executed by each paired arm.",
+            "unit": requirements["trial"]["horizon"]["unit"],
+            "scope": "paired",
+            "role": "implementation",
+            "value_type": "number",
+            "direction": "contextual",
+        },
+        {
+            "name": "terminated_rate",
+            "description": "Fraction of paired episodes terminated by the environment.",
+            "unit": "proportion",
+            "scope": "paired",
+            "role": "implementation",
+            "value_type": "number",
+            "direction": "contextual",
+        },
+        {
+            "name": "truncated_rate",
+            "description": "Fraction of paired episodes truncated by the environment.",
+            "unit": "proportion",
+            "scope": "paired",
+            "role": "implementation",
+            "value_type": "number",
+            "direction": "contextual",
+        },
+        {
+            "name": "paired_standard_error",
+            "description": "Sample standard error of the ordered paired differences.",
+            "unit": requirements["outcome"]["unit"],
+            "scope": "comparison",
+            "role": "uncertainty",
+            "value_type": "number",
+            "direction": "lower",
+        },
+    ]
+    normalized_evaluator["suspect_test"] = {
+        "trigger": None,
+        "reason_codes": [],
+    }
+    subject_result: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["case_id", outcome_path[0], "telemetry"],
+        "properties": {
+            "case_id": {"type": "string", "minLength": 1},
+            "telemetry": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "placements",
+                    "terminated",
+                    "truncated",
+                    "termination_reason",
+                ],
+                "properties": {
+                    "placements": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": horizon["limit"],
+                    },
+                    "terminated": {"type": "boolean"},
+                    "truncated": {"type": "boolean"},
+                    "termination_reason": {"type": "string", "minLength": 1},
+                },
+            },
+        },
+    }
+    cursor: dict[str, Any] = subject_result
+    for segment in outcome_path[:-1]:
+        properties = cursor.setdefault("properties", {})
+        required = cursor.setdefault("required", [])
+        if segment not in required:
+            required.append(segment)
+        child = properties.get(segment)
+        if not isinstance(child, dict) or child.get("type") != "object":
+            child = {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [],
+                "properties": {},
+            }
+            properties[segment] = child
+        cursor = child
+    leaf = outcome_path[-1]
+    properties = cursor.setdefault("properties", {})
+    required = cursor.setdefault("required", [])
+    if leaf not in required:
+        required.append(leaf)
+    properties[leaf] = outcome_value_schema
+    normalized_evaluator["schemas"]["subject_result_json"] = json.dumps(
+        subject_result, sort_keys=True, separators=(",", ":")
+    )
+    normalized_evaluator["setup_contract"] = {
+        "environment_adapter": {
+            "entrypoint": adapter["entrypoint"],
+            "interface": adapter["interface"],
+        },
+        "outcome": {
+            name: requirements["outcome"][name]
+            for name in ("direction", "unit", "aggregation", "extraction")
+        },
+        "trial": {
+            "termination": requirements["trial"]["termination"],
+            "horizon_unit": requirements["trial"]["horizon"]["unit"],
+        },
+        "hard_rules": list(requirements["derived_setup"]["hard_rules"]),
+        "runtime_limits": list(requirements["derived_setup"]["runtime_limits"]),
+    }
+    return normalized_task, normalized_evaluator
+
+
+def _read_owned_file_records(
+    root: Path, paths: Sequence[str], *, label: str
+) -> list[dict[str, str]]:
     records: list[dict[str, str]] = []
     seen: set[Path] = set()
     for raw in paths:
@@ -2703,7 +3735,79 @@ def _read_owned_file_records(root: Path, paths: Sequence[str], *, label: str) ->
         path = root / relative
         if not path.is_file() or path.is_symlink():
             raise ValidationError(f"direct setup build omitted declared {label} file: {raw}")
-        records.append({"path": relative.as_posix(), "content": path.read_text(encoding="utf-8")})
+        records.append(
+            {
+                "path": relative.as_posix(),
+                "content": path.read_text(encoding="utf-8"),
+            }
+        )
+    return records
+
+
+def _read_direct_build_files(
+    roots: Mapping[str, Path], declarations: Sequence[Mapping[str, Any]]
+) -> dict[str, list[dict[str, str]]]:
+    """Read one canonical declaration of every agent-authored staged file."""
+    reserved = {
+        ("subject", "_arctl/api.py"),
+        ("subject", "_arctl/subject.py"),
+        ("evaluator", "_arctl/api.py"),
+        ("evaluator", "_arctl/evaluator.py"),
+        ("evaluator", "_arctl/unittest_runner.py"),
+        ("evaluator", "evaluator.manifest.json"),
+    }
+    required = {
+        "subject_hook": ("subject", "_arctl/hook.py"),
+        "evaluator_hook": ("evaluator", "_arctl/hook.py"),
+        "evaluator_test": ("evaluator", "test_generated_evaluator.py"),
+    }
+    findings: list[str] = []
+    seen_paths: set[tuple[str, str]] = set()
+    seen_roles: dict[str, tuple[str, str]] = {}
+    records = {name: [] for name in roots}
+    for declaration in declarations:
+        repository = str(declaration["repository"])
+        raw = str(declaration["path"])
+        role = str(declaration["role"])
+        relative = Path(raw)
+        key = (repository, relative.as_posix())
+        if (
+            relative.is_absolute()
+            or relative == Path(".")
+            or ".." in relative.parts
+            or ".git" in relative.parts
+        ):
+            findings.append(f"OWN_UNSAFE_PATH {repository}:{raw}")
+            continue
+        if key in seen_paths:
+            findings.append(f"OWN_DUPLICATE_PATH {repository}:{raw}")
+            continue
+        seen_paths.add(key)
+        if key in reserved:
+            findings.append(f"OWN_CONTROLLER_PATH {repository}:{raw}")
+        if role != "support":
+            if role in seen_roles:
+                findings.append(f"OWN_DUPLICATE_ROLE {role}")
+            seen_roles[role] = key
+            if required.get(role) != key:
+                findings.append(
+                    f"OWN_ROLE_PATH {role} must be {required.get(role)}, got {key}"
+                )
+        path = roots[repository] / relative
+        if path.is_symlink() or not path.is_file():
+            findings.append(f"OWN_MISSING_FILE {repository}:{raw}")
+            continue
+        records[repository].append(
+            {
+                "path": relative.as_posix(),
+                "content": path.read_text(encoding="utf-8"),
+            }
+        )
+    for role, key in required.items():
+        if seen_roles.get(role) != key:
+            findings.append(f"OWN_MISSING_ROLE {role}")
+    if findings:
+        raise ValidationError("; ".join(sorted(set(findings))))
     return records
 
 
@@ -2714,12 +3818,91 @@ def build_setup_direct(
     offline: bool,
     progress: SetupProgress | None = None,
 ) -> dict[str, Any]:
-    """Let the builder write disposable repositories and return only a compact report."""
+    """Build disposable repositories with strictly typed task and evaluator designs."""
     resolved_path = directory / "setup" / "authorized-design.public.json"
     if not resolved_path.is_file():
         raise StateError("setup design must be authorized before generation")
     requirements = _load_authorized_design(directory)
+    authorized_dependencies = _validate_authorized_design_for_build(
+        directory, setup, requirements
+    )
     attempts = directory / "setup" / "direct-build" / "attempts"
+    contract_digest = hashlib.sha256(
+        json.dumps(build_schema(), sort_keys=True, separators=(",", ":")).encode()
+        + SUBJECT_ENTRYPOINT.encode()
+        + EVALUATOR_ENTRYPOINT.encode()
+        + SETUP_API_MODULE.encode()
+        + UNITTEST_ENTRYPOINT.encode()
+        + SETUP_BUILD_CONTROLLER_VERSION
+    ).hexdigest()
+    requirements_digest = hashlib.sha256(
+        resolved_path.read_bytes() + contract_digest.encode()
+    ).hexdigest()
+    if setup.get("prior_build_findings"):
+        completed_repair = (
+            setup.get("behavior_repair_completed_for") == requirements_digest
+        )
+        repair_attempts = directory / "setup" / "behavior-repair" / "attempts"
+        matching_repairs: list[Path] = []
+        if repair_attempts.is_dir():
+            for internal in reversed(
+                sorted(repair_attempts.glob("*/output/build.internal.json"))
+            ):
+                prompt_path = internal.parents[1] / "prompt.public.txt"
+                try:
+                    payload = json.loads(
+                        prompt_path.read_text(encoding="utf-8").split("\n\n", 1)[1]
+                    )
+                except (OSError, IndexError, json.JSONDecodeError):
+                    continue
+                if payload.get("authorized_design") == requirements:
+                    matching_repairs.append(internal)
+        repair_expected = completed_repair or bool(matching_repairs)
+        candidate_outputs = matching_repairs or (
+            list(reversed(sorted(attempts.glob("*/output/build.internal.json"))))
+            if attempts.is_dir()
+            else []
+        )
+        for internal in candidate_outputs:
+            try:
+                recovered = json.loads(internal.read_text(encoding="utf-8"))
+                recovered = deepcopy(recovered)
+                recovered["task"], recovered["evaluator"] = (
+                    _apply_authorized_build_fields(
+                        recovered["task"], recovered["evaluator"], requirements
+                    )
+                )
+                _validate_complete_build_contract(recovered, setup, directory)
+                _validate_dependency_plan(recovered["dependencies"], directory=directory)
+            except (OSError, json.JSONDecodeError, ValidationError, StateError):
+                continue
+            recovery = (
+                directory
+                / "setup"
+                / "direct-build"
+                / "recoveries"
+                / internal.parents[1].name
+                / "output"
+                / "build.internal.json"
+            )
+            atomic_write_json(recovery, recovered)
+            setup["pending_build"] = {
+                "output": str(recovery),
+                "requirements_sha256": requirements_digest,
+                "contract_sha256": contract_digest,
+                "recovered_after_controller_fix": True,
+            }
+            if internal in matching_repairs:
+                setup["behavior_repair_attempted_for"] = requirements_digest
+                setup["behavior_repair_completed_for"] = requirements_digest
+            _save_setup(directory, setup)
+            if progress is not None:
+                progress({"stage": "generation", "status": "recovered"})
+            return build_setup(directory, setup, offline=offline, progress=progress)
+        if repair_expected:
+            raise StateError(
+                "the completed targeted behavior repair could not be recovered safely"
+            )
     attempt = 1 + len(tuple(attempts.glob("*"))) if attempts.is_dir() else 1
     subject, environment, evaluator, runtime = _fresh_staging_roots(
         directory, setup, 10_000 + attempt
@@ -2732,13 +3915,15 @@ def build_setup_direct(
         "only under evaluator/. Write subject/_arctl/hook.py implementing run_batch; write "
         "evaluator/_arctl/hook.py implementing prepare, calibrate, and score; and write "
         "evaluator/test_generated_evaluator.py. Do not write controller-owned api.py, "
-        "subject.py, evaluator.py, or evaluator.manifest.json. Write task.design.json and "
-        "evaluator.design.json at the staging root using the supplied typed build contract's "
-        "task and manifest-design shapes. Return a compact report listing only additional "
-        "owned file paths relative to each repository, direct dependencies, and a summary; "
-        "do not put source code or configuration contents in the response. Include no fixed "
-        "hook paths in the owned lists. Prefer existing project conventions and change no "
-        "confirmed decision or controller rule.\n\n"
+        "subject.py, evaluator.py, evaluator.manifest.json, or files at the staging root. "
+        "Return task and evaluator designs in the strictly typed response fields, along with "
+        "one files list declaring every agent-authored staged file exactly once. Assign the "
+        "three required hook/test roles to their exact required paths. The schema permits support "
+        "only for the finite authorized generated subject paths; put all other implementation in "
+        "the required hooks and do not create environment or evaluator helper files. "
+        "Dependencies come only from the authorized design and are not returned by "
+        "the builder. Do not put source code in the response. Prefer existing project conventions and change "
+        "no confirmed decision or controller rule.\n\n"
         + json.dumps(
             {
                 "staging": {
@@ -2750,6 +3935,19 @@ def build_setup_direct(
                 "requirements": requirements,
                 "prior_review_findings": setup.get("prior_review_findings", []),
                 "prior_build_findings": setup.get("prior_build_findings", []),
+                "controller_normalized_fields": {
+                    "environment_adapter_source_path": (
+                        _authorized_adapter_source_path(
+                            requirements["environment_adapter"]
+                        )
+                    ),
+                    "public_case_horizon": requirements["trial"]["horizon"],
+                    "instructions": (
+                        "prepare must emit the exact authorized horizon field and value "
+                        "in every public case, and the task environment codebase must include "
+                        "the exact canonical adapter source path"
+                    ),
+                },
                 "controller_owned_contract": SETUP_CONTROLLER_CONTRACT,
                 "controller_capabilities": SETUP_CAPABILITIES,
                 "typed_build_contract": SETUP_BUILD_CONTRACT,
@@ -2765,36 +3963,49 @@ def build_setup_direct(
         report = _agent_run(
             root=attempts / f"{attempt:04d}",
             worktree=staging_root,
-            schema_value=_direct_build_schema(),
+            schema_value=_direct_build_schema(requirements),
             output_name="build-report.public.json",
             prompt=prompt,
             writable_worktree=True,
             read_paths=(Path(setup["subject"]),),
             offline=True,
         )
-        subject_hook = (subject / "_arctl" / "hook.py").read_text(encoding="utf-8")
-        evaluator_hook = (evaluator / "_arctl" / "hook.py").read_text(encoding="utf-8")
-        evaluator_test = (evaluator / "test_generated_evaluator.py").read_text(encoding="utf-8")
-        task_design = json.loads((staging_root / "task.design.json").read_text(encoding="utf-8"))
-        evaluator_design = json.loads(
-            (staging_root / "evaluator.design.json").read_text(encoding="utf-8")
+        try:
+            staged_records = _read_direct_build_files(
+                {"subject": subject, "environment": environment, "evaluator": evaluator},
+                report["files"],
+            )
+        except ValidationError as error:
+            _invalidate_pending_build(directory, setup, str(error))
+            raise StateError(
+                "direct setup ownership declaration is invalid: " + str(error)
+            ) from error
+
+        def take(records: list[dict[str, str]], path: str) -> str:
+            matches = [record for record in records if record["path"] == path]
+            if len(matches) != 1:
+                raise ValidationError(f"canonical ownership omitted required file: {path}")
+            records.remove(matches[0])
+            return matches[0]["content"]
+
+        subject_hook = take(staged_records["subject"], "_arctl/hook.py")
+        evaluator_hook = take(staged_records["evaluator"], "_arctl/hook.py")
+        evaluator_test = take(
+            staged_records["evaluator"], "test_generated_evaluator.py"
+        )
+        task_design, evaluator_design = _apply_authorized_build_fields(
+            report["task"], report["evaluator"], requirements
         )
         value = {
             "schema_version": 4,
             "summary": report["summary"],
-            "dependencies": report["dependencies"],
+            "dependencies": list(authorized_dependencies),
             "subject_hook": subject_hook,
             "evaluator_hook": evaluator_hook,
             "evaluator_test": evaluator_test,
-            "subject_files": _read_owned_file_records(
-                subject, report["subject_files"], label="subject"
-            ),
-            "environment_files": _read_owned_file_records(
-                environment, report["environment_files"], label="environment"
-            ),
-            "evaluator_files": _read_owned_file_records(
-                evaluator, report["evaluator_files"], label="evaluator"
-            ),
+            "subject_files": staged_records["subject"],
+            "environment_files": staged_records["environment"],
+            "evaluator_files": staged_records["evaluator"],
             "task": task_design,
             "evaluator": evaluator_design,
         }
@@ -2804,15 +4015,6 @@ def build_setup_direct(
         raise
     if progress is not None:
         progress({"stage": "generation", "status": "completed"})
-    contract_digest = hashlib.sha256(
-        json.dumps(build_schema(), sort_keys=True, separators=(",", ":")).encode()
-        + SUBJECT_ENTRYPOINT.encode()
-        + EVALUATOR_ENTRYPOINT.encode()
-        + SETUP_API_MODULE.encode()
-    ).hexdigest()
-    requirements_digest = hashlib.sha256(
-        resolved_path.read_bytes() + contract_digest.encode()
-    ).hexdigest()
     internal = attempts / f"{attempt:04d}" / "output" / "build.internal.json"
     atomic_write_json(internal, value)
     setup["pending_build"] = {
@@ -2839,6 +4041,204 @@ def build_setup_direct(
     # The normal controller path rematerializes and validates every staged file,
     # then runs review, dependency provisioning, and conformance in sandboxes.
     return build_setup(directory, setup, offline=offline, progress=progress)
+
+
+def _targeted_behavior_repair(
+    directory: Path,
+    setup: dict[str, Any],
+    requirements: Mapping[str, Any],
+    value: dict[str, Any],
+    *,
+    subject: Path,
+    environment: Path,
+    evaluator: Path,
+    requirements_digest: str,
+    progress: SetupProgress | None,
+) -> dict[str, Any]:
+    """Apply at most one bounded repair to cited generated behavior files."""
+    controller_verified_codes = {
+        "AUTHORIZATION_HASH_MISMATCH",
+        "MISSING_SOURCE_PROVENANCE",
+        "SOURCE_EDITABLE_OVERLAP",
+        "IMPORT_UNDECLARED_CHEX",
+        "IMPORT_UNDECLARED_JAX",
+        "VERIFICATION_COMMAND_UNREACHABLE",
+    }
+    findings = [
+        finding
+        for finding in setup.get("prior_review_findings", [])
+        if isinstance(finding, Mapping)
+        and finding.get("code") != "INTENT_OBJECTIVE_OUTCOME_MISMATCH"
+        and finding.get("code") not in controller_verified_codes
+    ]
+    if not findings:
+        return value
+    if setup.get("behavior_repair_completed_for") == requirements_digest:
+        return value
+    if setup.get("behavior_repair_attempted_for") == requirements_digest:
+        prior_outputs = directory / "setup" / "behavior-repair" / "attempts"
+        if any(prior_outputs.glob("*/output/repair.public.json")):
+            raise StateError(
+                "the single targeted behavior repair was already used for this authorized design"
+            )
+        # Versions that charged the budget before the agent produced a response
+        # can leave this marker after a launch failure.  No stochastic repair was
+        # performed, so deterministically migrate that interrupted state.
+        setup.pop("behavior_repair_attempted_for", None)
+        _save_setup(directory, setup)
+    adapter_path = _authorized_adapter_source_path(
+        requirements["environment_adapter"]
+    )
+    allowed = {
+        ("subject", "_arctl/hook.py"),
+        ("subject", adapter_path),
+        ("evaluator", "_arctl/hook.py"),
+        ("evaluator", "test_generated_evaluator.py"),
+    }
+
+    def declaration(repository: str, path: str) -> dict[str, Any]:
+        return _schema(
+            {
+                "repository": {"type": "string", "const": repository},
+                "path": {"type": "string", "const": path},
+            }
+        )
+
+    schema = _schema(
+        {
+            "schema_version": {"type": "integer", "const": 1},
+            "summary": {"type": "string", "minLength": 1},
+            "changed_files": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": len(allowed),
+                "items": {
+                    "anyOf": [
+                        declaration(repository, path)
+                        for repository, path in sorted(allowed)
+                    ]
+                },
+            },
+        }
+    )
+    roots = {"subject": subject, "environment": environment, "evaluator": evaluator}
+
+    def snapshot() -> dict[tuple[str, str], bytes]:
+        captured: dict[tuple[str, str], bytes] = {}
+        for repository, root in roots.items():
+            for path in _public_files(
+                root, exclude_private=repository == "evaluator"
+            ):
+                captured[(repository, path.relative_to(root).as_posix())] = path.read_bytes()
+        return captured
+
+    before = snapshot()
+    attempts = directory / "setup" / "behavior-repair" / "attempts"
+    attempt = 1 + len(tuple(attempts.glob("*"))) if attempts.is_dir() else 1
+    prompt = (
+        "Repair only the cited generated behavior defects in the supplied disposable setup. "
+        "Edit only the finite allowed files and return their exact repository-relative paths. "
+        "Do not change the authorized objective, outcome, trial contract, dependencies, task "
+        "draft, manifest, policy file, repository environment, or controller-owned files. "
+        "Keep untrusted policy code in a separate seedless process whose protocol contains only "
+        "current observations and legal-action masks; candidate code must not share the seeded "
+        "adapter interpreter. Bound every child with a timeout and captured-output limit. "
+        "Implement the specified one-sided 95% Student-t bound for every supported trial count "
+        "without adding a dependency or using an asymptotic substitute. Update evaluator tests "
+        "to fail if any repaired guarantee regresses. The evaluator manifest in staging is the "
+        "canonical wire contract: prepare must emit exactly its public-case schema; the adapter "
+        "must accept that case and emit exactly its subject-result schema; and the subject and "
+        "evaluator hooks must preserve and score that shape without legacy horizon, metrics, or "
+        "diagnostics fields. The adapter's JSONL contract is streaming: one process must accept "
+        "at least two newline-delimited cases and emit two corresponding newline-delimited "
+        "results. Add a regression test that exercises two cases through one adapter process. "
+        "Treat controller sandboxing and later candidate review as enforcement "
+        "for policy prohibitions; this repair must enforce interpreter separation, a seedless "
+        "protocol, and child bounds. Return only JSON.\n\n"
+        + json.dumps(
+            {
+                "authorized_design": requirements,
+                "review_findings": findings,
+                "allowed_files": [
+                    {"repository": repository, "path": path}
+                    for repository, path in sorted(allowed)
+                ],
+                "staging": {name: str(root) for name, root in roots.items()},
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    if progress is not None:
+        progress({"stage": "behavior repair", "status": "started", "detail": "attempt 1/1"})
+    try:
+        report = _agent_run(
+            root=attempts / f"{attempt:04d}",
+            worktree=subject.parent,
+            schema_value=schema,
+            output_name="repair.public.json",
+            prompt=prompt,
+            writable_worktree=True,
+            read_paths=(directory / "task.draft.yaml",),
+            offline=True,
+        )
+        setup["behavior_repair_attempted_for"] = requirements_digest
+        _save_setup(directory, setup)
+        after = snapshot()
+        changed = {
+            key for key in before.keys() | after.keys() if before.get(key) != after.get(key)
+        }
+        declared = {
+            (item["repository"], item["path"])
+            for item in report["changed_files"]
+        }
+        if changed != declared or not changed or not changed <= allowed:
+            raise ValidationError(
+                "targeted behavior repair changed files outside its exact declaration"
+            )
+        repaired = deepcopy(value)
+
+        def content(repository: str, path: str) -> str:
+            target = roots[repository] / path
+            if target.is_symlink() or not target.is_file():
+                raise ValidationError(
+                    f"targeted behavior repair removed required file: {repository}:{path}"
+                )
+            return target.read_text(encoding="utf-8")
+
+        repaired["subject_hook"] = content("subject", "_arctl/hook.py")
+        repaired["evaluator_hook"] = content("evaluator", "_arctl/hook.py")
+        repaired["evaluator_test"] = content(
+            "evaluator", "test_generated_evaluator.py"
+        )
+        for record in repaired["subject_files"]:
+            if record["path"] == adapter_path:
+                record["content"] = content("subject", adapter_path)
+        _validate_complete_build_contract(repaired, setup, directory)
+        deterministic = _cross_artifact_findings(
+            repaired,
+            requirements,
+            subject=subject,
+            environment=environment,
+        )
+        if deterministic:
+            raise ValidationError("; ".join(deterministic))
+    except Exception:
+        if progress is not None:
+            progress({"stage": "behavior repair", "status": "failed", "detail": "attempt 1/1"})
+        raise
+    repair_output = attempts / f"{attempt:04d}" / "output" / "build.internal.json"
+    atomic_write_json(repair_output, repaired)
+    setup["pending_build"] = {
+        "output": str(repair_output),
+        "requirements_sha256": requirements_digest,
+        "recovered_after_targeted_repair": True,
+    }
+    setup["behavior_repair_completed_for"] = requirements_digest
+    _save_setup(directory, setup)
+    if progress is not None:
+        progress({"stage": "behavior repair", "status": "completed", "detail": "attempt 1/1"})
+    return repaired
 
 
 def build_setup(
@@ -2923,6 +4323,8 @@ def build_setup(
         + SUBJECT_ENTRYPOINT.encode()
         + EVALUATOR_ENTRYPOINT.encode()
         + SETUP_API_MODULE.encode()
+        + UNITTEST_ENTRYPOINT.encode()
+        + SETUP_BUILD_CONTROLLER_VERSION
     ).hexdigest()
     requirements_digest = hashlib.sha256(
         resolved_path.read_bytes() + contract_digest.encode()
@@ -2993,8 +4395,9 @@ def build_setup(
         progress({"stage": "generation", "status": "completed"})
         progress({"stage": "task validation", "status": "started"})
     try:
-        task_value, manifest_value, task = _validate_build_contract(value, setup)
-        _validate_authorized_design_match(directory, task_value, manifest_value)
+        task_value, manifest_value, task = _validate_complete_build_contract(
+            value, setup, directory
+        )
     except ValidationError as first_error:
         if command_builder is None and pending_path is not None and pending_path.name == "build.internal.json":
             setup.pop("pending_build", None)
@@ -3002,7 +4405,8 @@ def build_setup(
             setup["state"] = "BUILD_REQUIRED"
             _save_setup(directory, setup)
             raise StateError(
-                "direct staged setup is invalid and requires one fresh bounded repair: "
+                "direct staged setup is invalid; inspect the complete deterministic "
+                "finding set before starting a new immutable build attempt: "
                 + str(first_error)
             ) from first_error
         if progress is not None:
@@ -3067,8 +4471,9 @@ def build_setup(
                 "contract_sha256": contract_digest,
             }
             _save_setup(directory, setup)
-            task_value, manifest_value, task = _validate_build_contract(value, setup)
-            _validate_authorized_design_match(directory, task_value, manifest_value)
+            task_value, manifest_value, task = _validate_complete_build_contract(
+                value, setup, directory
+            )
         except (StateError, ValidationError) as repair_error:
             if progress is not None:
                 progress(
@@ -3110,6 +4515,7 @@ def build_setup(
             {"path": "_arctl/hook.py", "content": value["evaluator_hook"]},
             {"path": "_arctl/api.py", "content": SETUP_API_MODULE},
             {"path": "_arctl/evaluator.py", "content": EVALUATOR_ENTRYPOINT},
+            {"path": "_arctl/unittest_runner.py", "content": UNITTEST_ENTRYPOINT},
             {"path": "test_generated_evaluator.py", "content": value["evaluator_test"]},
         ],
     }
@@ -3150,6 +4556,54 @@ def build_setup(
         + "\n"
     )
     atomic_write_text(runtime / "pyproject.toml", pyproject)
+    deterministic_findings = _cross_artifact_findings(
+        value,
+        requirements,
+        subject=subject,
+        environment=environment,
+    )
+    if deterministic_findings:
+        _invalidate_pending_build(directory, setup, deterministic_findings)
+        raise StateError(
+            "generated setup failed deterministic cross-artifact validation: "
+            + "; ".join(deterministic_findings)
+        )
+    if command_builder is None:
+        value = _targeted_behavior_repair(
+            directory,
+            setup,
+            requirements,
+            value,
+            subject=subject,
+            environment=environment,
+            evaluator=evaluator,
+            requirements_digest=requirements_digest,
+            progress=progress,
+        )
+    for collection, root in (
+        ("subject_files", subject),
+        ("environment_files", environment),
+        ("evaluator_files", evaluator),
+    ):
+        for record in generated[collection]:
+            path = root / record["path"]
+            if path.is_file() and not path.is_symlink():
+                record["content"] = path.read_text(encoding="utf-8")
+    prior_reviewer_candidates: list[Mapping[str, Any]] = []
+    for output in sorted(
+        (directory / "setup" / "review" / "attempts").glob(
+            "*/output/review.public.json"
+        )
+    ):
+        try:
+            prior_review = json.loads(output.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        prior_reviewer_candidates.extend(
+            finding
+            for finding in prior_review.get("findings", [])
+            if isinstance(finding, Mapping)
+        )
     review_prompt = (
         "Review this generated arctl setup before any dependency is installed or generated "
         "code is executed. Inspect the subject integration, public environment, evaluator "
@@ -3158,7 +4612,14 @@ def build_setup(
         "trial_independence, scoring_statistics, seed_handling, and runtime_behavior. Each "
         "pass or failure needs a short evidence citation to an inspected file; "
         "not_applicable needs a cogent reason. Report every concrete defect. Do not treat an "
-        "empty findings list as sufficient coverage. Return only JSON.\n\n"
+        "empty findings list as sufficient coverage. Treat the controller-provided mechanical "
+        "attestations as authoritative: do not recompute canonical hashes from raw file bytes or "
+        "consult superseded build-finding records. Policy prohibitions are enforced by the outer "
+        "subject sandbox and later candidate review; here verify process separation, seedless "
+        "policy protocol, bounds, and the inspected generated code. JSON artifacts are "
+        "serialized on one physical line, so cite them as line 1. Inspect and explicitly "
+        "resolve or repeat every prior reviewer candidate; never silently drop one. Return "
+        "only JSON.\n\n"
         + json.dumps(
             {
                 "requirements": requirements,
@@ -3168,6 +4629,19 @@ def build_setup(
                 "evaluator": str(evaluator),
                 "runtime_project": str(runtime / "pyproject.toml"),
                 "controller_owned_contract": SETUP_CONTROLLER_CONTRACT,
+                "mechanical_attestations": {
+                    "authorization_integrity": "verified",
+                    "canonical_design_sha256": hashlib.sha256(
+                        json.dumps(
+                            requirements,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode()
+                    ).hexdigest(),
+                    "source_provenance": "verified",
+                    "cross_artifact_lint": "passed",
+                },
+                "prior_reviewer_candidates": prior_reviewer_candidates,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -3175,27 +4649,94 @@ def build_setup(
     )
     review_attempts = directory / "setup" / "review" / "attempts"
     review_attempt = 1 + len(tuple(review_attempts.glob("*"))) if review_attempts.is_dir() else 1
+    review_roots = (
+        subject.parent,
+        subject,
+        environment,
+        evaluator,
+        directory,
+        runtime,
+    )
+    review_identity = _json_sha256(
+        {
+            "authorized_design_sha256": _json_sha256(requirements),
+            "build": value,
+            "task": task_value,
+            "manifest": manifest_value,
+        }
+    )
+
+    def load_clean_review(path: Path) -> dict[str, Any] | None:
+        try:
+            candidate = json.loads(path.read_text(encoding="utf-8"))
+            Draft202012Validator(review_schema()).validate(candidate)
+            if candidate["findings"]:
+                return None
+            _validate_review_evidence(candidate, roots=review_roots)
+        except (OSError, json.JSONDecodeError, JsonSchemaError, ValidationError):
+            return None
+        current_staging = subject.parent.resolve()
+        for result in candidate["coverage"].values():
+            for citation in result["evidence"]:
+                cited = Path(citation["path"])
+                if (
+                    cited.is_absolute()
+                    and "staging" in cited.parts
+                    and cited.resolve() != current_staging
+                    and current_staging not in cited.resolve().parents
+                ):
+                    return None
+        return candidate
+
+    static_review: dict[str, Any] | None = None
+    cached_review = setup.get("clean_review")
+    if (
+        command_builder is None
+        and isinstance(cached_review, Mapping)
+        and cached_review.get("identity_sha256") == review_identity
+        and isinstance(cached_review.get("output"), str)
+    ):
+        static_review = load_clean_review(Path(cached_review["output"]))
+    if static_review is None and command_builder is None and prior_build_findings:
+        for output in reversed(
+            sorted(review_attempts.glob("*/output/review.public.json"))
+        ):
+            static_review = load_clean_review(output)
+            if static_review is not None:
+                setup["clean_review"] = {
+                    "identity_sha256": review_identity,
+                    "output": str(output),
+                }
+                _save_setup(directory, setup)
+                break
     if progress is not None:
-        progress({"stage": "setup review", "status": "started"})
-    try:
-        static_review = _agent_run(
-            root=review_attempts / f"{review_attempt:04d}",
-            worktree=subject,
-            schema_value=review_schema(),
-            output_name="review.public.json",
-            prompt=review_prompt,
-            writable_worktree=False,
-            read_paths=(
-                subject,
-                environment,
-                directory,
-                runtime / "pyproject.toml",
-                *_public_files(evaluator, exclude_private=True),
-            ),
-            command_builder=review_command_builder,
-            offline=offline,
-            validate_output=review_command_builder is None,
+        progress(
+            {
+                "stage": "setup review",
+                "status": "reused" if static_review is not None else "started",
+            }
         )
+    try:
+        if static_review is None:
+            static_review = _agent_run(
+                root=review_attempts / f"{review_attempt:04d}",
+                worktree=subject,
+                schema_value=review_schema(),
+                output_name="review.public.json",
+                prompt=review_prompt,
+                writable_worktree=False,
+                read_paths=(
+                    subject,
+                    environment,
+                    directory / "task.draft.yaml",
+                    directory / "setup" / "authorized-design.public.json",
+                    runtime / "pyproject.toml",
+                    *_public_files(evaluator, exclude_private=True),
+                ),
+                command_builder=review_command_builder,
+                offline=offline,
+                validate_output=review_command_builder is None,
+            )
         if static_review.get("schema_version") == 1 and review_command_builder is not None:
             legacy_findings = static_review.get("findings", [])
             failed_area = "intent_fidelity" if legacy_findings else None
@@ -3229,7 +4770,7 @@ def build_setup(
             }
         _validate_review_evidence(
             static_review,
-            roots=(subject, environment, evaluator, directory, runtime),
+            roots=review_roots,
         )
     except Exception:
         if progress is not None:
@@ -3240,10 +4781,21 @@ def build_setup(
     if progress is not None:
         progress({"stage": "setup review", "status": "completed"})
     if static_review["findings"]:
+        setup.pop("clean_review", None)
         setup["state"] = "REVIEW_FAILED"
         setup["prior_review_findings"] = static_review["findings"]
         _save_setup(directory, setup)
         raise StateError("generated setup failed static review before provisioning")
+    if command_builder is None:
+        review_output = review_attempts / f"{review_attempt:04d}" / "output" / "review.public.json"
+        if not review_output.is_file() and isinstance(cached_review, Mapping):
+            review_output = Path(str(cached_review.get("output", "")))
+        if review_output.is_file():
+            setup["clean_review"] = {
+                "identity_sha256": review_identity,
+                "output": str(review_output),
+            }
+            _save_setup(directory, setup)
     uv = shutil.which("uv")
     if uv is None:
         raise StateError("uv is required for Python workspace setup")
@@ -3264,26 +4816,36 @@ def build_setup(
     ]
     uv_home = runtime / "home"
     uv_home.mkdir(parents=True, exist_ok=True)
+    uv_codex_home = runtime / "codex-home"
+    uv_codex_home.mkdir(parents=True, exist_ok=True)
     uv_environment = sanitized_environment(
-        codex_home=runtime / "codex-home",
+        codex_home=uv_codex_home,
         writable_home=uv_home,
     )
     uv_environment["UV_CACHE_DIR"] = str(runtime / ".uv-cache")
     uv_environment["UV_PROJECT_ENVIRONMENT"] = str(Path(setup["workspace"]) / ".venv")
     if progress is not None:
         progress({"stage": "dependencies", "status": "started"})
-    sync_command = (
-        sandbox_command(
+    if command_builder is None and not offline:
+        atomic_write_text(runtime / "uv-sync.started", "started")
+        sync_command = networked_dependency_command(
+            sync,
+            cwd=runtime,
+            write_paths=(runtime, Path(setup["workspace"]) / ".venv"),
+        )
+    elif command_builder is None:
+        sync_command = sandbox_command(
             marked_command(sync, runtime / "uv-sync.started"),
             cwd=runtime,
-            read_paths=(),
+            # The marker wrapper is the outer executable, so sandbox_command
+            # cannot discover the wrapped uv runtime on its own.
+            read_paths=command_runtime_read_paths(sync),
             write_paths=(runtime, Path(setup["workspace"]) / ".venv"),
             profile="arctl-setup-dependencies",
-            network_enabled=not offline,
+            network_enabled=False,
         )
-        if command_builder is None
-        else tuple(sync)
-    )
+    else:
+        sync_command = tuple(sync)
     completed = subprocess.run(
         sync_command,
         check=False,
@@ -3305,9 +4867,17 @@ def build_setup(
         progress({"stage": "dependencies", "status": "completed"})
         progress({"stage": "evaluator checks", "status": "started"})
     try:
+        _dependency_import_checks(
+            directory,
+            requirements,
+            subject=subject,
+            runtime_python=runtime_python,
+            sandboxed=command_builder is None,
+        )
         _evaluator_checks(
             directory,
             evaluator,
+            subject,
             runtime_python,
             sandboxed=command_builder is None,
         )
@@ -3396,6 +4966,7 @@ def build_setup(
     setup["acceptance_token"] = token
     setup.pop("pending_build", None)
     setup.pop("prior_build_findings", None)
+    setup.pop("prior_review_findings", None)
     _save_setup(directory, setup)
     return readiness
 
@@ -3432,10 +5003,12 @@ def _reviewed_artifacts(
         for source in task.environment_sources
         if source.path is not None
     }
-    if (
-        (Path(setup["subject"]), "SETUP_SUBJECT_COMMIT") not in locks
-        or (Path(setup["environment"]), "SETUP_ENVIRONMENT_COMMIT") not in locks
-    ):
+    prior_locks = {
+        (source.path, source.commit)
+        for source in TaskConfig.from_mapping(prior_task).environment_sources
+        if source.path is not None
+    }
+    if locks != prior_locks:
         raise StateError("edited setup changed controller-owned environment locks")
 
     staging = readiness.get("staging")
@@ -3477,6 +5050,7 @@ def _reviewed_artifacts(
         roots["subject_files"] / "_arctl" / "subject.py": SUBJECT_ENTRYPOINT,
         roots["evaluator_files"] / "_arctl" / "api.py": SETUP_API_MODULE,
         roots["evaluator_files"] / "_arctl" / "evaluator.py": EVALUATOR_ENTRYPOINT,
+        roots["evaluator_files"] / "_arctl" / "unittest_runner.py": UNITTEST_ENTRYPOINT,
     }
     for path, expected in fixed.items():
         if path.read_text(encoding="utf-8") != expected:
@@ -3619,6 +5193,7 @@ def review_setup_edits(
             _evaluator_checks(
                 directory,
                 evaluator,
+                subject,
                 runtime_python,
                 sandboxed=review_command_builder is None,
             )
@@ -3854,10 +5429,13 @@ def accept_setup(directory: Path, setup: dict[str, Any], token: str) -> TaskConf
         for source in task.environment_sources
         if source.path is not None
     }
-    if (environment.resolve(), environment_commit) not in environment_locks:
-        raise StateError("accepted task does not lock the generated environment")
     if (subject.resolve(), subject_commit) not in environment_locks:
         raise StateError("accepted task does not lock the subject interface source")
+    if any(
+        source.path is not None and source.path.resolve() == environment.resolve()
+        for source in task.environment_sources
+    ) and (environment.resolve(), environment_commit) not in environment_locks:
+        raise StateError("accepted task does not lock the generated environment")
     setup["state"] = "READY_FOR_APPROVAL"
     design_path = directory / "setup" / "authorized-design.public.json"
     if design_path.is_file():

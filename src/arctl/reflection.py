@@ -34,6 +34,8 @@ def reflection_schema(
     strategy_behavior_id: str | None = None,
     history_entry_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
+    if version == 3 and metric_names is None:
+        raise ValueError("reflection schema version 3 requires metric_names")
     text = {"type": "string", "minLength": 1}
 
     def strict(properties: Mapping[str, Any]) -> dict[str, Any]:

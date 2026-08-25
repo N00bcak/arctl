@@ -14,6 +14,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as JsonSchemaError
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.utils import canonicalize_name
 
 from .errors import StateError, ValidationError
 from .storage import atomic_write_json, atomic_write_text
@@ -40,17 +42,23 @@ def _object(properties: Mapping[str, Any], *, required: Sequence[str] | None = N
     }
 
 
-def batch_schema() -> dict[str, Any]:
+def batch_schema(
+    *,
+    revision: int | None = None,
+    decision_ids: Sequence[str] | None = None,
+) -> dict[str, Any]:
     text = {"type": "string", "minLength": 1}
     repository_citation = _object(
         {
             "kind": {"type": "string", "const": "repository"},
             "path": text,
-            "location": text,
+            "location": {"type": "string", "pattern": _LINE.pattern},
             "finding": text,
-            "excerpt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "excerpt_sha256": {
+                "type": ["string", "null"],
+                "pattern": "^[0-9a-f]{64}$",
+            },
         },
-        required=("kind", "path", "location", "finding"),
     )
     controller_citation = _object(
         {
@@ -84,15 +92,21 @@ def batch_schema() -> dict[str, Any]:
             "allow_custom": {"type": "boolean", "const": True},
         }
     )
+    decision_refs: dict[str, Any] = {
+        "type": "array",
+        "items": {"type": "string", "pattern": _ID.pattern},
+    }
+    if decision_ids is not None:
+        if decision_ids:
+            decision_refs["items"] = {"type": "string", "enum": list(decision_ids)}
+        else:
+            decision_refs["maxItems"] = 0
     provenance = {
         "source": {
             "type": "string",
             "enum": ["human", "repository", "controller", "derived"],
         },
-        "decision_refs": {
-            "type": "array",
-            "items": {"type": "string", "pattern": _ID.pattern},
-        },
+        "decision_refs": decision_refs,
         "citations": {"type": "array", "items": citation},
     }
     objective = _object(
@@ -169,6 +183,11 @@ def batch_schema() -> dict[str, Any]:
     dependency = _object(
         {
             "requirement": text,
+            "imports": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"type": "string", "pattern": r"^[A-Za-z_]\w*$"},
+            },
             "reason": text,
             "origin": {"type": "string", "enum": ["repository", "proposed"]},
             "authorization_decision": {
@@ -202,7 +221,11 @@ def batch_schema() -> dict[str, Any]:
     return _object(
         {
             "schema_version": {"type": "integer", "const": 1},
-            "revision": {"type": "integer", "minimum": 1},
+            "revision": (
+                {"type": "integer", "const": revision}
+                if revision is not None
+                else {"type": "integer", "minimum": 1}
+            ),
             "summary": text,
             "questions": {
                 "type": "array",
@@ -220,7 +243,7 @@ def finalized_design_schema() -> dict[str, Any]:
     text = {"type": "string", "minLength": 1}
     properties.update(
         {
-            "schema_version": {"type": "integer", "const": 2},
+            "schema_version": {"type": "integer", "const": 3},
             "revision": {"type": "integer", "minimum": 1},
             "decision_revision": {"type": "integer", "minimum": 1},
             "source_provenance": _object(
@@ -298,6 +321,9 @@ def validate_batch(value: Mapping[str, Any], *, subject: Path, revision: int) ->
                     f"setup design section {section} lacks grounded support"
                 )
         _validate_editable_paths(design["policy"]["editable_paths"])
+        _validate_direct_dependencies(
+            design["direct_dependencies"], subject=subject
+        )
         for editable in design["policy"]["editable_paths"]:
             if editable["origin"] == "existing" and not any(
                 path.is_file() for path in subject.glob(editable["pattern"])
@@ -307,9 +333,21 @@ def validate_batch(value: Mapping[str, Any], *, subject: Path, revision: int) ->
                     + editable["pattern"]
                 )
         adapter = design["environment_adapter"]
+        adapter_relative = Path(adapter["source_path"])
+        if (
+            adapter_relative.is_absolute()
+            or adapter_relative == Path(".")
+            or ".." in adapter_relative.parts
+            or re.fullmatch(r"\.[A-Za-z0-9]+", adapter_relative.suffix) is None
+        ):
+            raise ValidationError(
+                "setup design environment adapter source_path must be one file path"
+            )
         if adapter["owner"] == "subject":
-            adapter_path = subject / adapter["source_path"]
-            if adapter_path.is_symlink() or not adapter_path.is_file():
+            adapter_path = subject / adapter_relative
+            if adapter_path.is_symlink() or (
+                not adapter_path.is_file() and adapter["source"] != "derived"
+            ):
                 raise ValidationError(
                     "setup design subject adapter source does not exist: "
                     + adapter["source_path"]
@@ -364,6 +402,64 @@ def _validate_editable_paths(paths: Sequence[Mapping[str, Any]]) -> None:
         ):
             raise ValidationError(f"setup design has an unsafe editable path: {pattern}")
         seen.add(pattern)
+
+
+def _validate_direct_dependencies(
+    dependencies: Sequence[Mapping[str, Any]], *, subject: Path
+) -> None:
+    findings: list[str] = []
+    names: set[str] = set()
+    local_names = {
+        canonicalize_name(path.name)
+        for path in subject.iterdir()
+        if path.is_dir() and (path / "__init__.py").is_file()
+    }
+    for dependency in dependencies:
+        requirement = dependency["requirement"]
+        try:
+            parsed = Requirement(requirement)
+        except InvalidRequirement:
+            findings.append(f"dependency is not valid PEP 508: {requirement!r}")
+            continue
+        if str(parsed) != requirement:
+            findings.append(
+                f"dependency must use canonical PEP 508 text {str(parsed)!r}"
+            )
+        name = canonicalize_name(parsed.name)
+        if name in names:
+            findings.append(f"dependency name is duplicated: {parsed.name}")
+        names.add(name)
+        if name in local_names and parsed.url is None:
+            findings.append(
+                f"dependency {parsed.name!r} is supplied by the subject tree"
+            )
+        imports = dependency["imports"]
+        if len(imports) != len(set(imports)):
+            findings.append(f"dependency {requirement!r} repeats an import name")
+        if "cv2" in imports and name != "opencv-python-headless":
+            findings.append(
+                "the cv2 import must use opencv-python-headless; GUI OpenCV is not authorized"
+            )
+    if findings:
+        raise ValidationError("; ".join(findings))
+
+
+def _validate_dependency_decision_refs(
+    design: Mapping[str, Any], decision_ids: set[str]
+) -> None:
+    findings: list[str] = []
+    for dependency in design["direct_dependencies"]:
+        decision = dependency["authorization_decision"]
+        if decision is not None and decision not in decision_ids:
+            findings.append(
+                f"dependency {dependency['requirement']!r} references unknown decision {decision!r}"
+            )
+        if dependency["origin"] == "proposed" and decision is None:
+            findings.append(
+                f"proposed dependency {dependency['requirement']!r} requires an explicit decision"
+            )
+    if findings:
+        raise ValidationError("; ".join(findings))
 
 
 def save_batch(directory: Path, value: Mapping[str, Any]) -> None:
@@ -482,7 +578,7 @@ def finalize_design(
         )
     design = {
         **deepcopy(batch["design"]),
-        "schema_version": 2,
+        "schema_version": 3,
         "revision": batch["revision"],
         "decision_revision": decisions["revision"],
         "source_provenance": {
@@ -498,6 +594,7 @@ def finalize_design(
         "dependency_source_policy": _index_binding(),
     }
     decision_ids = ids
+    _validate_dependency_decision_refs(design, decision_ids)
     for section in _provenance_sections(design):
         unknown = set(section["decision_refs"]) - decision_ids
         if unknown:
@@ -539,6 +636,27 @@ def authorize_design(directory: Path, setup: dict[str, Any], token: str) -> None
         Draft202012Validator(finalized_design_schema()).validate(design)
     except (OSError, json.JSONDecodeError, JsonSchemaError) as error:
         raise ValidationError("setup design awaiting authorization is invalid") from error
+    try:
+        _validate_direct_dependencies(
+            design["direct_dependencies"], subject=Path(setup["subject"])
+        )
+        _validate_dependency_decision_refs(
+            design,
+            {
+                item["id"]
+                for item in load_decisions(directory)["decisions"]
+                if isinstance(item, Mapping) and isinstance(item.get("id"), str)
+            },
+        )
+    except ValidationError as error:
+        setup["state"] = "DISCOVERY_REQUIRED"
+        setup["prior_design_findings"] = [f"DESIGN_DEPENDENCY {error}"]
+        setup.pop("design_authorization_token", None)
+        atomic_write_json(directory / "setup.json", setup)
+        raise ValidationError(
+            "setup design dependency contract is invalid; discovery must revise it: "
+            f"{error}"
+        ) from error
     expected = _design_token(design)
     saved = setup.get("design_authorization_token")
     if (
@@ -568,8 +686,10 @@ def authorize_design(directory: Path, setup: dict[str, Any], token: str) -> None
     setup["state"] = "BUILD_REQUIRED"
     setup.pop("design_authorization_token", None)
     setup.pop("late_dependencies", None)
+    setup.pop("prior_design_findings", None)
     atomic_write_json(directory / "setup.json", setup)
     (directory / "setup" / "late-dependencies.public.json").unlink(missing_ok=True)
+    (directory / "setup" / "design-findings.public.json").unlink(missing_ok=True)
 
 
 def render_setup_note(directory: Path, setup: Mapping[str, Any]) -> Path:

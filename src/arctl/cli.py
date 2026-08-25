@@ -847,6 +847,8 @@ class _ProgressView:
                 }[stage]
         if "trial_count" in event and stage in ("champion_pilot", "subject"):
             label += f" · {event['trial_count']} trials"
+        if "workers" in event and stage in ("champion_pilot", "subject"):
+            label += f" · {event['workers']} workers"
         return label
 
 
@@ -1066,73 +1068,109 @@ def _print_question_batch(batch: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _design_summary(design: Mapping[str, Any]) -> str:
+    from tabulate import tabulate
+
     from .dossier import safe_terminal_text
 
     adapter = design["environment_adapter"]
     outcome = design["outcome"]
     trial = design["trial"]
-    lines = [
-        safe_terminal_text(design["summary"]),
-        "- Objective: " + safe_terminal_text(design["objective"]["value"]),
-        "- Editable paths: "
-        + ", ".join(
-            safe_terminal_text(f"{item['pattern']} ({item['origin']})")
-            for item in design["policy"]["editable_paths"]
-        ),
-        "- Policy rationale: " + safe_terminal_text(design["policy"]["rationale"]),
-        "- Environment: "
-        + safe_terminal_text(
-            f"{adapter['entrypoint']} [{adapter['interface']}; {adapter['owner']}]; "
-            f"source={adapter['source_path']}; rationale={adapter['rationale']}"
-        ),
-        "- Outcome: "
-        + safe_terminal_text(
-            f"{outcome['statistic']} ({outcome['direction']}; "
-            f"{outcome['aggregation']}; {outcome['unit']}); "
-            f"extraction={outcome['extraction']}; path={'.'.join(outcome['result_path'])}"
-        ),
-        "- Trial: "
-        + safe_terminal_text(
-            f"{trial['unit']}; {trial['termination']}; maximum "
-            f"{trial['horizon']['limit']} {trial['horizon']['unit']} in "
-            f"{trial['horizon']['case_field']}; seeds: {trial['seed_handling']}"
-        ),
-        "- Conformance: seeded variation="
-        f"{design['conformance']['seeded_variation']}; arm symmetry="
-        f"{design['conformance']['arm_symmetry']}; rationale="
-        + safe_terminal_text(design["conformance"]["arm_symmetry_rationale"]),
-        "- Package index: "
-        + safe_terminal_text(design["dependency_source_policy"]["index"]),
-        "- Controller contract: v"
-        f"{design['controller_contract']['version']} "
-        f"{design['controller_contract']['sha256'][:12]}",
-    ]
     derived = design["derived_setup"]
-    lines.append(
-        "- Hard rules: "
-        + "; ".join(safe_terminal_text(rule) for rule in derived["hard_rules"])
-        if derived["hard_rules"]
-        else "- Hard rules: none"
-    )
-    lines.append(
-        "- Derived setup: "
-        + safe_terminal_text(
-            f"{derived['evaluator_pattern']}; hidden data: {derived['hidden_data']}; "
-            f"runtime: {', '.join(derived['runtime_limits'])}; "
-            f"telemetry: {', '.join(derived['telemetry']) or 'none'}"
-        )
-    )
     dependencies = design.get("direct_dependencies", [])
-    if dependencies:
-        lines.append("- Direct dependencies:")
-        for dependency in dependencies:
-            lines.append(
-                "  - "
-                + safe_terminal_text(dependency["requirement"])
-                + f" ({dependency['origin']}): "
-                + safe_terminal_text(dependency["reason"], limit=180)
+
+    def bullets(values: Sequence[Any], *, empty: str = "None") -> str:
+        return (
+            "\n".join(f"• {safe_terminal_text(value)}" for value in values)
+            if values
+            else empty
+        )
+
+    rows = [
+        ("Summary", safe_terminal_text(design["summary"])),
+        ("Objective", safe_terminal_text(design["objective"]["value"])),
+        (
+            "Policy boundary",
+            "Editable paths:\n"
+            + bullets(
+                [
+                    f"{item['pattern']} ({item['origin']})"
+                    for item in design["policy"]["editable_paths"]
+                ]
             )
-    return "\n".join(lines)
+            + "\nRationale: "
+            + safe_terminal_text(design["policy"]["rationale"]),
+        ),
+        (
+            "Environment",
+            "Entrypoint: " + safe_terminal_text(adapter["entrypoint"])
+            + "\nInterface: " + safe_terminal_text(adapter["interface"])
+            + "\nOwner: " + safe_terminal_text(adapter["owner"])
+            + "\nSource: " + safe_terminal_text(adapter["source_path"])
+            + "\nRationale: " + safe_terminal_text(adapter["rationale"]),
+        ),
+        (
+            "Outcome",
+            "Statistic: " + safe_terminal_text(outcome["statistic"])
+            + "\nDirection / unit: "
+            + safe_terminal_text(f"{outcome['direction']} / {outcome['unit']}")
+            + "\nAggregation: " + safe_terminal_text(outcome["aggregation"])
+            + "\nExtraction: " + safe_terminal_text(outcome["extraction"])
+            + "\nResult path: "
+            + safe_terminal_text(".".join(outcome["result_path"])),
+        ),
+        (
+            "Trial",
+            "Unit: " + safe_terminal_text(trial["unit"])
+            + "\nTermination: " + safe_terminal_text(trial["termination"])
+            + "\nSafety horizon: "
+            + safe_terminal_text(
+                f"{trial['horizon']['limit']} {trial['horizon']['unit']} "
+                f"via {trial['horizon']['case_field']}"
+            )
+            + "\nSeed handling: " + safe_terminal_text(trial["seed_handling"]),
+        ),
+        (
+            "Conformance",
+            f"Seeded variation: {design['conformance']['seeded_variation']}"
+            f"\nArm symmetry: {design['conformance']['arm_symmetry']}"
+            "\nRationale: "
+            + safe_terminal_text(design["conformance"]["arm_symmetry_rationale"]),
+        ),
+        ("Hard rules", bullets(derived["hard_rules"])),
+        (
+            "Derived setup",
+            "Evaluator pattern: " + safe_terminal_text(derived["evaluator_pattern"])
+            + "\nHidden data: " + safe_terminal_text(derived["hidden_data"])
+            + "\nRuntime limits:\n" + bullets(derived["runtime_limits"])
+            + "\nTelemetry:\n" + bullets(derived["telemetry"]),
+        ),
+        (
+            "Dependencies",
+            bullets(
+                [
+                    f"{dependency['requirement']} ({dependency['origin']}) — "
+                    f"{dependency['reason']}"
+                    for dependency in dependencies
+                ]
+            ),
+        ),
+        (
+            "Authorization",
+            "Package index: "
+            + safe_terminal_text(design["dependency_source_policy"]["index"])
+            + "\nController contract: v"
+            + str(design["controller_contract"]["version"])
+            + " "
+            + safe_terminal_text(design["controller_contract"]["sha256"][:12]),
+        ),
+    ]
+    return tabulate(
+        rows,
+        headers=("Setup item", "Authorized value"),
+        tablefmt="simple_grid",
+        disable_numparse=True,
+        maxcolwidths=(20, 110),
+    )
 
 
 def _setup(
@@ -1151,6 +1189,7 @@ def _setup(
         build_setup_direct,
         discover_setup_batch,
         load_setup,
+        reopen_review_decision_batch,
         review_setup_edits,
     )
     from .setup_conversation import (
@@ -1166,10 +1205,10 @@ def _setup(
             f"it was not changed (state: {directory / 'setup.json'})"
         )
     identifier = record["task_id"]
+    if reopen_review_decision_batch(directory, record) is not None:
+        record = json.loads((directory / "setup.json").read_text(encoding="utf-8"))
     submitted = _read_setup_submission(answers_path) if answers_path is not None else None
     readiness: dict[str, Any] | None = None
-    automatic_repairs = 0
-
     while True:
         state = record["state"]
         if state == "DISCOVERY_REQUIRED":
@@ -1283,12 +1322,6 @@ def _setup(
                     (directory / "setup.json").read_text(encoding="utf-8")
                 )
                 if record.get("state") == "DISCOVERY_REQUIRED":
-                    continue
-                if automatic_repairs < 1 and record.get("state") in {
-                    "BUILD_REQUIRED",
-                    "REVIEW_FAILED",
-                }:
-                    automatic_repairs += 1
                     continue
                 raise
             record = json.loads((directory / "setup.json").read_text(encoding="utf-8"))

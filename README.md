@@ -101,6 +101,10 @@ each stage lifecycle and persists the draw for recovery. Exhausting every
 current direction refreshes the environment strategy rather than ending the
 search.
 
+Evaluation keeps experiments and the champion/candidate arms serial, while each
+arm partitions its ordered cases across at most 16 isolated subject workers.
+The controller reassembles worker results in original case order before scoring.
+
 Tasks may also require a pre-trial candidate review contract. Approval-locked
 deterministic checks catch obvious violations, then a fresh read-only execution
 session reviews the candidate diff and implementation audit. One configured
