@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -230,9 +231,35 @@ class SandboxCommandTests(unittest.TestCase):
             )
             self.assertEqual(
                 set(environment),
-                {"PATH", "HOME", "CODEX_HOME", "TMPDIR"}
+                {"PATH", "HOME", "CODEX_HOME", "TMPDIR", "PYTHONPYCACHEPREFIX"}
                 | ({"LANG"} if "LANG" in environment else set())
                 | ({"LC_ALL"} if "LC_ALL" in environment else set())
                 | ({"TZ"} if "TZ" in environment else set()),
             )
             self.assertNotIn("OPENAI_API_KEY", environment)
+
+    def test_environment_routes_compiled_python_outside_the_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            worktree = root / "worktree"
+            writable_home = root / "output"
+            worktree.mkdir()
+            writable_home.mkdir()
+            source = worktree / "policy.py"
+            source.write_text("VALUE = 1\n", encoding="utf-8")
+
+            completed = subprocess.run(
+                (sys.executable, "-m", "py_compile", source.name),
+                cwd=worktree,
+                env=sanitized_environment(
+                    codex_home=root / "codex-home",
+                    writable_home=writable_home,
+                ),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(list(worktree.rglob("*.pyc")), [])
+            self.assertNotEqual(list((writable_home / "pycache").rglob("*.pyc")), [])

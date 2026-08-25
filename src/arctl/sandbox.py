@@ -226,11 +226,13 @@ def sanitized_environment(
     codex_home: Path,
     writable_home: Path,
 ) -> dict[str, str]:
+    resolved_home = writable_home.resolve()
     environment = {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "HOME": str(writable_home.resolve()),
+        "HOME": str(resolved_home),
         "CODEX_HOME": str(codex_home.resolve()),
-        "TMPDIR": str(writable_home.resolve()),
+        "TMPDIR": str(resolved_home),
+        "PYTHONPYCACHEPREFIX": str(resolved_home / "pycache"),
     }
     for name in ("LANG", "LC_ALL", "TZ"):
         if value := os.environ.get(name):
