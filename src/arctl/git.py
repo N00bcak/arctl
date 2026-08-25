@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from fnmatch import fnmatchcase
+from importlib.util import source_from_cache
 from pathlib import Path
-from typing import Sequence
+from stat import S_ISREG
+from typing import Sequence, cast
 
 from .errors import ResearchMiss, StateError
+from .storage import atomic_write_json
 
 
 def _git(repo: Path, arguments: Sequence[str], *, check: bool = True) -> str:
@@ -21,6 +25,150 @@ def _git(repo: Path, arguments: Sequence[str], *, check: bool = True) -> str:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise StateError(f"git {' '.join(arguments)} failed: {detail}")
     return completed.stdout.strip()
+
+
+def _git_paths(repo: Path, arguments: Sequence[str]) -> tuple[str, ...]:
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *arguments],
+        check=False,
+        capture_output=True,
+    )
+    if completed.returncode:
+        detail = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise StateError(f"git {' '.join(arguments)} failed: {detail}")
+    return tuple(
+        item.decode("utf-8", errors="surrogateescape")
+        for item in completed.stdout.split(b"\0")
+        if item
+    )
+
+
+def _untracked_paths(repo: Path) -> tuple[str, ...]:
+    visible = _git_paths(
+        repo, ["ls-files", "--others", "--exclude-standard", "-z"]
+    )
+    ignored = _git_paths(
+        repo,
+        ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+    )
+    return tuple(sorted(set((*visible, *ignored))))
+
+
+def _is_regular_file(path: Path) -> bool:
+    try:
+        return S_ISREG(path.lstat().st_mode)
+    except FileNotFoundError:
+        return False
+
+
+def _is_python_cache_artifact(repo: Path, path: str) -> bool:
+    relative = Path(path)
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or relative.parent.name != "__pycache__"
+        or relative.suffix != ".pyc"
+    ):
+        return False
+    target = repo / relative
+    if not _is_regular_file(target):
+        return False
+    try:
+        source = Path(source_from_cache(str(target)))
+    except ValueError:
+        return False
+    return source.parent == target.parent.parent and _is_regular_file(source)
+
+
+def _load_runtime_artifact_events(path: Path) -> list[dict[str, object]]:
+    if not path.is_file():
+        return []
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise StateError(f"runtime artifact audit is invalid: {path}") from error
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema_version", "events"}
+        or value["schema_version"] != 1
+        or not isinstance(value["events"], list)
+    ):
+        raise StateError(f"runtime artifact audit is invalid: {path}")
+    events: list[dict[str, object]] = []
+    stages: set[str] = set()
+    for event in value["events"]:
+        if (
+            not isinstance(event, dict)
+            or set(event) != {"stage", "discarded_paths"}
+            or not isinstance(event["stage"], str)
+            or not event["stage"]
+            or event["stage"] in stages
+            or not isinstance(event["discarded_paths"], list)
+            or any(not isinstance(item, str) or not item for item in event["discarded_paths"])
+            or event["discarded_paths"] != sorted(set(event["discarded_paths"]))
+        ):
+            raise StateError(f"runtime artifact audit is invalid: {path}")
+        stages.add(event["stage"])
+        events.append(event)
+    return events
+
+
+def normalize_runtime_artifacts(
+    repo: Path,
+    *,
+    stage: str,
+    audit_path: Path | None = None,
+) -> tuple[str, ...]:
+    """Discard canonical untracked Python caches without relaxing candidate scope."""
+    if not stage:
+        raise ValueError("runtime artifact stage must not be empty")
+    if audit_path is not None:
+        resolved_repo = repo.resolve()
+        resolved_audit = audit_path.resolve()
+        if resolved_audit == resolved_repo or resolved_repo in resolved_audit.parents:
+            raise ValueError("runtime artifact audit must be outside the candidate worktree")
+
+    eligible = tuple(
+        path
+        for path in _untracked_paths(repo)
+        if _is_python_cache_artifact(repo, path)
+    )
+    discarded = eligible
+    if audit_path is not None:
+        events = _load_runtime_artifact_events(audit_path)
+        saved = next((event for event in events if event["stage"] == stage), None)
+        if saved is not None:
+            discarded = tuple(cast(list[str], saved["discarded_paths"]))
+            unexpected = sorted(set(eligible) - set(discarded))
+            if unexpected:
+                raise StateError(
+                    "runtime artifact set changed while recovering stage "
+                    f"{stage}: {unexpected[0]}"
+                )
+        elif discarded:
+            events.append({"stage": stage, "discarded_paths": list(discarded)})
+            atomic_write_json(
+                audit_path,
+                {"schema_version": 1, "events": events},
+            )
+
+    eligible_set = set(eligible)
+    parents: set[Path] = set()
+    for relative in discarded:
+        target = repo / relative
+        if not target.exists() and not target.is_symlink():
+            continue
+        if relative not in eligible_set:
+            raise StateError(
+                "recorded runtime artifact is no longer an untracked canonical "
+                f"Python cache: {relative}"
+            )
+        target.unlink()
+        parents.add(target.parent)
+    for parent in sorted(parents, key=lambda item: len(item.parts), reverse=True):
+        if parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+    return discarded
 
 
 def resolve_commit(repo: Path, revision: str) -> str:
@@ -106,10 +254,16 @@ def create_candidate_commit(
     denied_paths: Sequence[str],
     prior_candidate_ref_prefix: str,
     message: str,
+    runtime_artifact_audit: Path | None = None,
 ) -> tuple[str, tuple[str, ...]]:
     champion_commit = resolve_commit(worktree, champion)
     if resolve_commit(worktree, "HEAD") != champion_commit:
         raise StateError("research worktree no longer points at the starting champion")
+    normalize_runtime_artifacts(
+        worktree,
+        stage="candidate-staging",
+        audit_path=runtime_artifact_audit,
+    )
     _git(worktree, ["add", "--all"])
     output = _git(worktree, ["diff", "--cached", "--name-only", "-z", champion_commit])
     paths = tuple(path for path in output.split("\0") if path)
