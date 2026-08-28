@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import shutil
 import sys
 from pathlib import Path
@@ -135,16 +136,32 @@ def networked_dependency_command(
     command: Sequence[str],
     *,
     cwd: Path,
+    read_paths: Sequence[Path] = (),
     write_paths: Sequence[Path],
 ) -> tuple[str, ...]:
     """Confine an online package installer without hiding host DNS/networking."""
     if not command:
         raise ValueError("networked dependency command must not be empty")
+    system = platform.system()
+    if system not in {"Linux", "Darwin"}:
+        raise StateError(
+            f"unsupported operating system {system or 'unknown'}; "
+            "arctl supports Linux and macOS"
+        )
+    for path in write_paths:
+        path.mkdir(parents=True, exist_ok=True)
+    if system == "Darwin":
+        return sandbox_command(
+            command,
+            cwd=cwd,
+            read_paths=read_paths,
+            write_paths=write_paths,
+            profile="arctl-setup-dependencies",
+            network_enabled=True,
+        )
     bubblewrap = shutil.which("bwrap")
     if bubblewrap is None:
         raise StateError("bwrap is required for networked dependency provisioning")
-    for path in write_paths:
-        path.mkdir(parents=True, exist_ok=True)
     arguments = [
         bubblewrap,
         "--die-with-parent",
@@ -190,7 +207,7 @@ def networked_dependency_command(
         if path.exists():
             arguments.extend(("--ro-bind", str(path), str(path)))
     mounted_roots: list[Path] = [path.resolve() for path in system_paths if path.is_dir()]
-    for path in command_runtime_read_paths(command):
+    for path in (*read_paths, *command_runtime_read_paths(command)):
         resolved = path.resolve()
         if resolved == executable or not resolved.exists() or any(
             resolved == root or root in resolved.parents for root in mounted_roots

@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-from arctl.sandbox import sandbox_command, sanitized_environment
+from arctl.sandbox import (
+    networked_dependency_command,
+    sandbox_command,
+    sanitized_environment,
+)
 
 
 @unittest.skipUnless(
@@ -15,6 +21,61 @@ from arctl.sandbox import sandbox_command, sanitized_environment
     "requires a host that can create a Codex sandbox",
 )
 class HostSandboxTests(unittest.TestCase):
+    def test_networked_dependency_profile_runs_uv_sync(self) -> None:
+        uv = shutil.which("uv")
+        self.assertIsNotNone(uv, "uv is required for the host sandbox gate")
+        assert uv is not None
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "runtime"
+            runtime.mkdir()
+            (runtime / "pyproject.toml").write_text(
+                "[project]\n"
+                'name = "arctl-host-probe"\n'
+                'version = "0.0.0"\n'
+                'requires-python = ">=3.11"\n'
+                'dependencies = ["packaging==24.2"]\n',
+                encoding="utf-8",
+            )
+            (runtime / "codex-home").mkdir()
+            (runtime / "home").mkdir()
+            environment = sanitized_environment(
+                codex_home=runtime / "codex-home",
+                writable_home=runtime / "home",
+            )
+            environment["UV_CACHE_DIR"] = str(runtime / ".uv-cache")
+            environment["UV_PROJECT_ENVIRONMENT"] = str(runtime / ".venv")
+            command = networked_dependency_command(
+                (
+                    uv,
+                    "sync",
+                    "--project",
+                    str(runtime),
+                    "--no-install-project",
+                    "--default-index",
+                    "https://pypi.org/simple",
+                ),
+                cwd=runtime,
+                write_paths=(runtime,),
+            )
+
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                env=environment,
+                timeout=60,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            probe = subprocess.run(
+                (str(runtime / ".venv" / "bin" / "python"), "-c", "import packaging"),
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(probe.returncode, 0, probe.stderr)
+
     def test_reflection_profile_reads_both_arms_without_mutating_them(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -59,7 +120,7 @@ result.write_text(json.dumps(checks))
 """
             command = sandbox_command(
                 (
-                    "python3",
+                    sys.executable,
                     "-c",
                     script,
                     str(candidate),
@@ -131,7 +192,7 @@ result.write_text(json.dumps(checks))
 """
             command = sandbox_command(
                 (
-                    "python3",
+                    sys.executable,
                     "-c",
                     script,
                     str(batch),
@@ -198,7 +259,7 @@ result.write_text(json.dumps(checks))
 """
             command = sandbox_command(
                 (
-                    "python3",
+                    sys.executable,
                     "-c",
                     script,
                     str(worktree),

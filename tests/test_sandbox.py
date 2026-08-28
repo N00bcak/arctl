@@ -38,11 +38,23 @@ class SandboxCommandTests(unittest.TestCase):
             root = Path(temporary)
             runtime = root / "runtime"
             environment = root / "venv"
-            command = networked_dependency_command(
-                ("/bin/true", "sync"),
-                cwd=runtime,
-                write_paths=(runtime, environment),
-            )
+            interpreter = root / "existing-python"
+            interpreter.write_text("runtime")
+            with (
+                mock.patch("arctl.sandbox.platform.system", return_value="Linux"),
+                mock.patch(
+                    "arctl.sandbox.shutil.which",
+                    side_effect=lambda name: "/usr/bin/bwrap"
+                    if name == "bwrap"
+                    else "/bin/true",
+                ),
+            ):
+                command = networked_dependency_command(
+                    ("/bin/true", "sync"),
+                    cwd=runtime,
+                    read_paths=(interpreter,),
+                    write_paths=(runtime, environment),
+                )
 
         self.assertEqual(command[0], "/usr/bin/bwrap")
         self.assertNotIn("--unshare-net", command)
@@ -54,9 +66,44 @@ class SandboxCommandTests(unittest.TestCase):
         )
         self.assertIn(str(runtime.resolve()), command)
         self.assertIn(str(environment.resolve()), command)
+        self.assertIn(str(interpreter.resolve()), command)
         self.assertEqual(
             command[-3:], ("--", "/arctl-tools/true", "sync")
         )
+
+    def test_macos_networked_dependencies_use_codex_seatbelt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            environment = root / "venv"
+            runtime.mkdir()
+            environment.mkdir()
+            with (
+                mock.patch("arctl.sandbox.platform.system", return_value="Darwin"),
+                mock.patch(
+                    "arctl.sandbox.shutil.which", return_value="/usr/bin/codex"
+                ),
+            ):
+                command = networked_dependency_command(
+                    ("/bin/true", "sync"),
+                    cwd=runtime,
+                    write_paths=(runtime, environment),
+                )
+
+        self.assertEqual(command[:2], ("codex", "sandbox"))
+        self.assertIn("arctl-setup-dependencies", command)
+        self.assertIn("permissions.arctl-setup-dependencies.network.enabled=true", command)
+        self.assertIn(str(runtime.resolve()), "\n".join(command))
+        self.assertIn(str(environment.resolve()), "\n".join(command))
+
+    def test_networked_dependencies_reject_unsupported_platform(self) -> None:
+        with (
+            mock.patch("arctl.sandbox.platform.system", return_value="Windows"),
+            self.assertRaisesRegex(StateError, "Linux and macOS"),
+        ):
+            networked_dependency_command(
+                ("python", "-V"), cwd=Path.cwd(), write_paths=()
+            )
 
     def test_runtime_paths_include_the_active_virtual_environment(self) -> None:
         paths = command_runtime_read_paths((sys.executable, "-V"))
@@ -159,9 +206,9 @@ class SandboxCommandTests(unittest.TestCase):
             joined = "\n".join(command)
             self.assertIn('":minimal"="read"', joined)
             self.assertIn('":root"="deny"', joined)
-            self.assertIn(f'"{worktree}"="read"', joined)
-            self.assertIn(f'"{batch}"="read"', joined)
-            self.assertIn(f'"{output}"="write"', joined)
+            self.assertIn(f'"{worktree.resolve()}"="read"', joined)
+            self.assertIn(f'"{batch.resolve()}"="read"', joined)
+            self.assertIn(f'"{output.resolve()}"="write"', joined)
             self.assertIn("permissions.arctl-subject.network.enabled=false", joined)
             self.assertNotIn("--sandbox", command)
 

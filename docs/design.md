@@ -161,6 +161,11 @@ compact report rather than source code in JSON. The controller validates and
 reviews the resulting files before provisioning authorized direct dependencies,
 then locks the resolved graph and permits one error-directed repair. Invalid
 retries preserve their immutable diagnostics.
+If review demonstrates a contradiction between authorized guarantees, setup
+reopens the implicated decision as a new revision. A replacement authorization
+archives the previous signed pair under `setup/authorization-history/` and
+invalidates derived pending-build, repair, review, and acceptance pointers; it
+does not rewrite prior attempts or reviewer evidence.
 An unfinished contract repair resumes from the saved generation instead of
 rerunning the expensive generation stage.
 Generated tests, protocol hooks, public checks, and the public probe run as

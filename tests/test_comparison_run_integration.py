@@ -9,7 +9,11 @@ import unittest
 from pathlib import Path
 
 from arctl.comparison import reserve_comparison
-from arctl.comparison_run import ComparisonFailure, run_comparison
+from arctl.comparison_run import (
+    ComparisonFailure,
+    _subject_case_shards,
+    run_comparison,
+)
 from arctl.manifest import EvaluatorManifest
 
 from .test_manifest import valid_manifest
@@ -245,6 +249,15 @@ class ComparisonRunIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(combined["trial_count"], 4)
 
+    def test_subject_cases_support_an_eight_worker_cap(self) -> None:
+        shards = _subject_case_shards(tuple(range(64)), subject_workers=8)
+
+        self.assertEqual(len(shards), 8)
+        self.assertEqual([len(shard) for shard in shards], [8] * 8)
+        self.assertEqual(
+            tuple(item for shard in shards for item in shard), tuple(range(64))
+        )
+
     def test_subject_worker_count_is_capped_at_sixteen(self) -> None:
         self.comparison = self.root / "comparison-sixteen-workers"
         self.reservation = reserve_comparison(
@@ -285,19 +298,29 @@ class ComparisonRunIntegrationTests(unittest.TestCase):
         for subject, bias in (("champion", 0), ("candidate", 1)):
             output = self.comparison / "outputs" / subject / "result.json"
             output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(json.dumps({
-                "schema_version": 1,
-                "trial_count": 4,
-                "results": [{"score": value + bias} for value in values],
-            }))
+            output.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "trial_count": 4,
+                        "results": [{"score": value + bias} for value in values],
+                    }
+                )
+            )
 
         evidence = self.execute_comparison()
 
         self.assertEqual(evidence.effect_estimate, 1)
-        self.assertFalse((self.comparison / "outputs" / "champion" / "workers").exists())
-        self.assertFalse((self.comparison / "outputs" / "candidate" / "workers").exists())
+        self.assertFalse(
+            (self.comparison / "outputs" / "champion" / "workers").exists()
+        )
+        self.assertFalse(
+            (self.comparison / "outputs" / "candidate" / "workers").exists()
+        )
 
-    def test_incomplete_legacy_serial_process_fails_without_starting_workers(self) -> None:
+    def test_incomplete_legacy_serial_process_fails_without_starting_workers(
+        self,
+    ) -> None:
         for subject in ("champion", "candidate"):
             process = self.comparison / "process" / subject
             process.mkdir(parents=True, exist_ok=True)
@@ -309,8 +332,12 @@ class ComparisonRunIntegrationTests(unittest.TestCase):
         ):
             self.execute_comparison()
 
-        self.assertFalse((self.comparison / "outputs" / "champion" / "workers").exists())
-        self.assertFalse((self.comparison / "outputs" / "candidate" / "workers").exists())
+        self.assertFalse(
+            (self.comparison / "outputs" / "champion" / "workers").exists()
+        )
+        self.assertFalse(
+            (self.comparison / "outputs" / "candidate" / "workers").exists()
+        )
 
     def test_invalid_candidate_output_is_reject_domain_and_never_reruns(self) -> None:
         (self.candidate / "subject.py").write_text(
@@ -349,7 +376,9 @@ class ComparisonRunIntegrationTests(unittest.TestCase):
             "commands",
             {**self.reservation.commands, "score": ("python3", "other.py")},
         )
-        with self.assertRaisesRegex(ComparisonFailure, "differ from the manifest") as error:
+        with self.assertRaisesRegex(
+            ComparisonFailure, "differ from the manifest"
+        ) as error:
             self.execute_comparison()
         self.assertEqual(error.exception.source, "evidence")
         self.assertFalse((self.comparison / "process").exists())
@@ -360,7 +389,9 @@ class ComparisonRunIntegrationTests(unittest.TestCase):
                 return ("false",)
             return command
 
-        with self.assertRaisesRegex(ComparisonFailure, "sandbox did not start") as error:
+        with self.assertRaisesRegex(
+            ComparisonFailure, "sandbox did not start"
+        ) as error:
             run_comparison(
                 self.comparison,
                 self.reservation,
@@ -380,7 +411,9 @@ class ComparisonRunIntegrationTests(unittest.TestCase):
             ["git", "-C", str(self.candidate), "commit", "-qm", "post-freeze change"],
             check=True,
         )
-        with self.assertRaisesRegex(ComparisonFailure, "differs from the reservation") as error:
+        with self.assertRaisesRegex(
+            ComparisonFailure, "differs from the reservation"
+        ) as error:
             self.execute_comparison()
         self.assertEqual(error.exception.source, "candidate")
         self.assertFalse((self.comparison / "process").exists())

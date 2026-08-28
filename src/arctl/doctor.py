@@ -10,10 +10,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
-from .errors import ProcessError, StateError
+from .errors import PreflightError, ProcessError, StateError
+from .platform_process import inspect_process, process_backend
 from .process import run_once
 from .sandbox import (
     command_runtime_read_paths,
@@ -63,7 +65,7 @@ def _profile_probe(
     denied_write: Path,
     read_paths: tuple[Path, ...],
     write_paths: tuple[Path, ...],
-) -> bool:
+) -> tuple[bool, str | None]:
     result = allowed_write / "probe.json"
     marker = allowed_write / "execution.started"
     probe = (
@@ -95,12 +97,24 @@ def _profile_probe(
         timeout=10,
     )
     if completed.returncode or not marker.is_file() or not result.is_file():
-        return False
+        detail = (completed.stderr or completed.stdout).strip()
+        if "sandbox_apply: Operation not permitted" in detail:
+            return (
+                False,
+                "macOS Seatbelt could not be nested; run arctl from a normal "
+                "unsandboxed Terminal or CI process",
+            )
+        return False, detail.splitlines()[0] if detail else "sandbox command did not run"
     try:
         checks = json.loads(result.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return False
-    return isinstance(checks, dict) and bool(checks) and all(checks.values())
+        return False, "sandbox probe did not produce valid JSON"
+    passed = isinstance(checks, dict) and bool(checks) and all(checks.values())
+    return (
+        (True, None)
+        if passed
+        else (False, "sandbox profile did not enforce every required boundary")
+    )
 
 
 def _process_cleanup_probe(root: Path) -> bool:
@@ -115,7 +129,11 @@ def _process_cleanup_probe(root: Path) -> bool:
         run_once(
             root / "timeout-process",
             ("python3", "-c", script),
-            timeout_seconds=0.3,
+            # Leave enough time for the gated runner and nested interpreter to
+            # start and publish child.pid before exercising timeout cleanup.
+            # A shorter window made this probe report a cleanup failure when
+            # the descendant had never actually been created on a busy host.
+            timeout_seconds=1.0,
             max_output_bytes=1000,
         )
     except ProcessError:
@@ -126,25 +144,127 @@ def _process_cleanup_probe(root: Path) -> bool:
         child = int(pid_file.read_text())
     except (OSError, ValueError):
         return False
-    try:
-        os.kill(child, 0)
-    except ProcessLookupError:
-        return True
-    stat = Path(f"/proc/{child}/stat")
-    return stat.is_file() and stat.read_text().split()[2] == "Z"
+    # Group SIGKILL delivery and orphan/zombie bookkeeping are asynchronous on
+    # macOS.  The managed runner has already waited for the group leader, but a
+    # descendant can remain observable as running for a few scheduler ticks.
+    # Give the kernel a short bounded convergence window before failing doctor.
+    deadline = time.monotonic() + 1.0
+    while True:
+        identity = inspect_process(child)
+        if identity is None or not identity.alive:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+
+
+def doctor_succeeded(report: dict[str, Any]) -> bool:
+    checks = report.get("checks")
+    return isinstance(checks, dict) and bool(checks) and all(checks.values())
+
+
+def require_doctor() -> dict[str, Any]:
+    report = run_doctor()
+    if doctor_succeeded(report):
+        return report
+    failed = [name for name, passed in report["checks"].items() if not passed]
+    raise PreflightError(
+        "runtime or sandbox preflight failed: " + ", ".join(failed),
+        report,
+    )
 
 
 def run_doctor() -> dict[str, Any]:
+    system = platform.system()
+    supported = system in {"Linux", "Darwin"}
+    backend: str | None = None
+    process_available = False
+    diagnostics: dict[str, str] = {}
+    if supported:
+        try:
+            backend = process_backend(system)
+            identity = inspect_process(os.getpid())
+            process_available = (
+                identity is not None
+                and identity.alive
+                and identity.platform == system
+            )
+        except (ProcessError, StateError) as error:
+            diagnostics["process_backend"] = str(error)
+    else:
+        diagnostics["supported_platform"] = (
+            f"unsupported operating system {system or 'unknown'}; "
+            "arctl supports Linux and macOS"
+        )
+
+    sandbox_backend = (
+        "bubblewrap" if system == "Linux" else "seatbelt" if system == "Darwin" else None
+    )
+    sandbox_available = (
+        shutil.which("bwrap") is not None
+        if system == "Linux"
+        else Path("/usr/bin/sandbox-exec").is_file()
+        if system == "Darwin"
+        else False
+    )
     checks: dict[str, bool] = {
-        "linux": platform.system() == "Linux",
+        "supported_platform": supported,
+        "process_backend": process_available,
+        "sandbox_backend": sandbox_available,
         "python_3_11": sys.version_info >= (3, 11),
         "git": shutil.which("git") is not None,
         "codex": shutil.which("codex") is not None,
+        "uv": shutil.which("uv") is not None,
         "pyyaml": importlib.util.find_spec("yaml") is not None,
         "jsonschema": importlib.util.find_spec("jsonschema") is not None,
+        "research_profile": False,
+        "subject_profile": False,
+        "evaluator_profile": False,
+        "timeout_child_cleanup": False,
     }
-    if not all(checks.values()):
-        return checks
+    if not process_available and "process_backend" not in diagnostics:
+        diagnostics["process_backend"] = "managed process identity probe failed"
+    if not sandbox_available:
+        diagnostics["sandbox_backend"] = (
+            "Bubblewrap is required for Linux online dependency provisioning"
+            if system == "Linux"
+            else "the built-in macOS Seatbelt executable is unavailable"
+            if system == "Darwin"
+            else "no supported sandbox backend is available"
+        )
+    prerequisite_names = (
+        "supported_platform",
+        "process_backend",
+        "sandbox_backend",
+        "python_3_11",
+        "git",
+        "codex",
+        "uv",
+        "pyyaml",
+        "jsonschema",
+    )
+    for name in prerequisite_names:
+        if not checks[name] and name not in diagnostics:
+            diagnostics[name] = f"required prerequisite failed: {name}"
+    if not all(checks[name] for name in prerequisite_names):
+        for name in (
+            "research_profile",
+            "subject_profile",
+            "evaluator_profile",
+            "timeout_child_cleanup",
+        ):
+            diagnostics[name] = "not run because a required prerequisite failed"
+        return {
+            "schema_version": 2,
+            "runtime": {
+                "system": system,
+                "architecture": platform.machine(),
+                "process_backend": backend,
+                "sandbox_backend": sandbox_backend,
+            },
+            "checks": checks,
+            "diagnostics": diagnostics,
+        }
 
     with tempfile.TemporaryDirectory(prefix="arctl-doctor-") as temporary:
         root = Path(temporary)
@@ -178,43 +298,72 @@ def run_doctor() -> dict[str, Any]:
         evaluator_output = root / "evaluator-output"
         for directory in (research_scratch, subject_output, evaluator_output):
             directory.mkdir()
+        profiles = (
+            (
+                "research_profile",
+                {
+                    "profile": "arctl-research",
+                    "cwd": research,
+                    "allowed_read": allowed[research],
+                    "denied_read": secret,
+                    "allowed_write": research_scratch,
+                    "denied_write": private,
+                    "read_paths": (),
+                    "write_paths": (research, research_scratch),
+                },
+            ),
+            (
+                "subject_profile",
+                {
+                    "profile": "arctl-subject",
+                    "cwd": subject,
+                    "allowed_read": allowed[subject],
+                    "denied_read": secret,
+                    "allowed_write": subject_output,
+                    "denied_write": subject,
+                    "read_paths": (subject,),
+                    "write_paths": (subject_output,),
+                },
+            ),
+            (
+                "evaluator_profile",
+                {
+                    "profile": "arctl-evaluator",
+                    "cwd": evaluator,
+                    "allowed_read": allowed[evaluator],
+                    "denied_read": target / "hidden",
+                    "allowed_write": evaluator_output,
+                    "denied_write": target,
+                    "read_paths": (evaluator, private),
+                    "write_paths": (evaluator_output,),
+                },
+            ),
+        )
+        for name, arguments in profiles:
+            try:
+                passed, diagnostic = _profile_probe(root, **arguments)
+            except (OSError, StateError, subprocess.SubprocessError) as error:
+                passed, diagnostic = False, str(error)
+            checks[name] = passed
+            if diagnostic is not None:
+                diagnostics[name] = diagnostic
         try:
-            checks["research_profile"] = _profile_probe(
-                root,
-                profile="arctl-research",
-                cwd=research,
-                allowed_read=allowed[research],
-                denied_read=secret,
-                allowed_write=research_scratch,
-                denied_write=private,
-                read_paths=(),
-                write_paths=(research, research_scratch),
+            checks["timeout_child_cleanup"] = _process_cleanup_probe(root)
+        except (OSError, ProcessError, StateError, subprocess.SubprocessError) as error:
+            diagnostics["timeout_child_cleanup"] = str(error)
+        if not checks["timeout_child_cleanup"]:
+            diagnostics.setdefault(
+                "timeout_child_cleanup",
+                "managed process timeout did not clean up its descendant",
             )
-            checks["subject_profile"] = _profile_probe(
-                root,
-                profile="arctl-subject",
-                cwd=subject,
-                allowed_read=allowed[subject],
-                denied_read=secret,
-                allowed_write=subject_output,
-                denied_write=subject,
-                read_paths=(subject,),
-                write_paths=(subject_output,),
-            )
-            checks["evaluator_profile"] = _profile_probe(
-                root,
-                profile="arctl-evaluator",
-                cwd=evaluator,
-                allowed_read=allowed[evaluator],
-                denied_read=target / "hidden",
-                allowed_write=evaluator_output,
-                denied_write=target,
-                read_paths=(evaluator, private),
-                write_paths=(evaluator_output,),
-            )
-        except (OSError, StateError, subprocess.SubprocessError):
-            checks["research_profile"] = False
-            checks["subject_profile"] = False
-            checks["evaluator_profile"] = False
-        checks["timeout_child_cleanup"] = _process_cleanup_probe(root)
-    return checks
+    return {
+        "schema_version": 2,
+        "runtime": {
+            "system": system,
+            "architecture": platform.machine(),
+            "process_backend": backend,
+            "sandbox_backend": sandbox_backend,
+        },
+        "checks": checks,
+        "diagnostics": diagnostics,
+    }

@@ -13,6 +13,14 @@ class StateError(ArctlError):
     """A requested state transition is not valid."""
 
 
+class PreflightError(StateError):
+    """The supported-host runtime is not ready for managed execution."""
+
+    def __init__(self, message: str, report: dict[str, object]):
+        super().__init__(message)
+        self.report = report
+
+
 class ProcessError(ArctlError):
     """A managed process could not produce a valid result."""
 

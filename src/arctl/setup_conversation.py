@@ -33,7 +33,9 @@ _ID = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 _LINE = re.compile(r"^lines?\s+(\d+)(?:-(\d+))?$", re.IGNORECASE)
 
 
-def _object(properties: Mapping[str, Any], *, required: Sequence[str] | None = None) -> dict[str, Any]:
+def _object(
+    properties: Mapping[str, Any], *, required: Sequence[str] | None = None
+) -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
@@ -287,18 +289,24 @@ def load_decisions(directory: Path) -> dict[str, Any]:
     return value
 
 
-def validate_batch(value: Mapping[str, Any], *, subject: Path, revision: int) -> dict[str, Any]:
+def validate_batch(
+    value: Mapping[str, Any], *, subject: Path, revision: int
+) -> dict[str, Any]:
     normalized = deepcopy(value)
     try:
         Draft202012Validator(batch_schema()).validate(normalized)
     except JsonSchemaError as error:
-        raise ValidationError(f"setup question batch is invalid: {error.message}") from error
+        raise ValidationError(
+            f"setup question batch is invalid: {error.message}"
+        ) from error
     if normalized["revision"] != revision:
         raise ValidationError("setup question batch has the wrong revision")
     questions = normalized["questions"]
     design = normalized["design"]
     if bool(questions) == (design is not None):
-        raise ValidationError("setup batch must contain questions or one complete design")
+        raise ValidationError(
+            "setup batch must contain questions or one complete design"
+        )
     question_ids: set[str] = set()
     for question in questions:
         if question["id"] in question_ids:
@@ -306,24 +314,39 @@ def validate_batch(value: Mapping[str, Any], *, subject: Path, revision: int) ->
         question_ids.add(question["id"])
         option_ids = [option["id"] for option in question["options"]]
         if len(option_ids) != len(set(option_ids)):
-            raise ValidationError(f"setup question {question['id']} has duplicate option IDs")
+            raise ValidationError(
+                f"setup question {question['id']} has duplicate option IDs"
+            )
         if question["recommended_option_id"] not in option_ids:
-            raise ValidationError(f"setup question {question['id']} recommends an unknown option")
+            raise ValidationError(
+                f"setup question {question['id']} recommends an unknown option"
+            )
         for option in question["options"]:
             _validate_citations(option["citations"], subject)
     if design is not None:
-        for section in ("objective", "policy", "environment_adapter", "outcome", "trial"):
+        for dependency in design["direct_dependencies"]:
+            try:
+                dependency["requirement"] = str(Requirement(dependency["requirement"]))
+            except InvalidRequirement:
+                # The dependency validator below reports the domain-specific error.
+                pass
+        for section in (
+            "objective",
+            "policy",
+            "environment_adapter",
+            "outcome",
+            "trial",
+        ):
             _validate_citations(design[section]["citations"], subject)
-            if design[section]["source"] in {"repository", "controller"} and not design[
-                section
-            ]["citations"]:
+            if (
+                design[section]["source"] in {"repository", "controller"}
+                and not design[section]["citations"]
+            ):
                 raise ValidationError(
                     f"setup design section {section} lacks grounded support"
                 )
         _validate_editable_paths(design["policy"]["editable_paths"])
-        _validate_direct_dependencies(
-            design["direct_dependencies"], subject=subject
-        )
+        _validate_direct_dependencies(design["direct_dependencies"], subject=subject)
         for editable in design["policy"]["editable_paths"]:
             if editable["origin"] == "existing" and not any(
                 path.is_file() for path in subject.glob(editable["pattern"])
@@ -366,7 +389,11 @@ def _validate_citations(citations: Sequence[dict[str, Any]], subject: Path) -> N
         if relative.is_absolute() or ".." in relative.parts:
             raise ValidationError("setup citation path must be repository-relative")
         path = subject / relative
-        if path.is_symlink() or not path.is_file() or subject.resolve() not in path.resolve().parents:
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or subject.resolve() not in path.resolve().parents
+        ):
             raise ValidationError(f"setup citation path does not exist: {path_text}")
         matched = _LINE.fullmatch(citation["location"].strip())
         if matched is None:
@@ -400,7 +427,9 @@ def _validate_editable_paths(paths: Sequence[Mapping[str, Any]]) -> None:
             or pattern.startswith("_arctl/")
             or pattern in seen
         ):
-            raise ValidationError(f"setup design has an unsafe editable path: {pattern}")
+            raise ValidationError(
+                f"setup design has an unsafe editable path: {pattern}"
+            )
         seen.add(pattern)
 
 
@@ -484,7 +513,9 @@ def answer_batch(
         raise ValidationError("setup answers must contain one answers object")
     questions = {question["id"]: question for question in batch["questions"]}
     if set(answers) != set(questions):
-        raise ValidationError("setup answers must resolve exactly the current question batch")
+        raise ValidationError(
+            "setup answers must resolve exactly the current question batch"
+        )
     decisions = load_decisions(directory)
     existing = {item["id"] for item in decisions["decisions"]}
     for identifier, raw in answers.items():
@@ -494,7 +525,9 @@ def answer_batch(
         citations: list[dict[str, str]]
         if isinstance(raw, str):
             if raw not in options:
-                raise ValidationError(f"setup answer for {identifier} names an unknown option")
+                raise ValidationError(
+                    f"setup answer for {identifier} names an unknown option"
+                )
             option_id = raw
             value = options[raw]["value"]
             citations = list(options[raw]["citations"])
@@ -612,12 +645,15 @@ def finalize_design(
     )
     if missing_refs:
         raise ValidationError(
-            "setup design lacks human decision references for: " + ", ".join(missing_refs)
+            "setup design lacks human decision references for: "
+            + ", ".join(missing_refs)
         )
     try:
         Draft202012Validator(finalized_design_schema()).validate(design)
     except JsonSchemaError as error:
-        raise ValidationError(f"final setup design is invalid: {error.message}") from error
+        raise ValidationError(
+            f"final setup design is invalid: {error.message}"
+        ) from error
     atomic_write_json(directory / "setup" / "design.public.json", design)
     token = _design_token(design)
     setup["state"] = "DESIGN_AUTHORIZATION_REQUIRED"
@@ -635,7 +671,9 @@ def authorize_design(directory: Path, setup: dict[str, Any], token: str) -> None
         )
         Draft202012Validator(finalized_design_schema()).validate(design)
     except (OSError, json.JSONDecodeError, JsonSchemaError) as error:
-        raise ValidationError("setup design awaiting authorization is invalid") from error
+        raise ValidationError(
+            "setup design awaiting authorization is invalid"
+        ) from error
     try:
         _validate_direct_dependencies(
             design["direct_dependencies"], subject=Path(setup["subject"])
@@ -664,10 +702,48 @@ def authorize_design(directory: Path, setup: dict[str, Any], token: str) -> None
         or not hmac.compare_digest(token, saved)
         or not hmac.compare_digest(token, expected)
     ):
-        raise ValidationError("setup design authorization token does not match current design")
+        raise ValidationError(
+            "setup design authorization token does not match current design"
+        )
     digest = hashlib.sha256(_canonical_bytes(design)).hexdigest()
     authorized_path = directory / "setup" / "authorized-design.public.json"
     authorization_path = directory / "setup" / "authorization.public.json"
+    previous_design: dict[str, Any] | None = None
+    previous_authorization: dict[str, Any] | None = None
+    if authorized_path.is_file() or authorization_path.is_file():
+        try:
+            previous_design = json.loads(authorized_path.read_text(encoding="utf-8"))
+            previous_authorization = json.loads(
+                authorization_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as error:
+            raise StateError(
+                "previous setup authorization is invalid and was not replaced"
+            ) from error
+        previous_digest = hashlib.sha256(
+            _canonical_bytes(previous_design)
+        ).hexdigest()
+        if (
+            not isinstance(previous_authorization, Mapping)
+            or previous_authorization.get("design_sha256") != previous_digest
+            or previous_authorization.get("authorized") is not True
+        ):
+            raise StateError(
+                "previous setup authorization is inconsistent and was not replaced"
+            )
+        if previous_digest != digest:
+            history = (
+                directory
+                / "setup"
+                / "authorization-history"
+                / (
+                    f"{int(previous_design.get('decision_revision', 0)):04d}-"
+                    f"{previous_digest[:12]}"
+                )
+            )
+            history.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(history / "authorized-design.public.json", previous_design)
+            atomic_write_json(history / "authorization.public.json", previous_authorization)
     try:
         atomic_write_json(authorized_path, design)
         atomic_write_json(
@@ -684,9 +760,19 @@ def authorize_design(directory: Path, setup: dict[str, Any], token: str) -> None
         authorization_path.unlink(missing_ok=True)
         raise
     setup["state"] = "BUILD_REQUIRED"
-    setup.pop("design_authorization_token", None)
-    setup.pop("late_dependencies", None)
-    setup.pop("prior_design_findings", None)
+    for key in (
+        "design_authorization_token",
+        "late_dependencies",
+        "prior_design_findings",
+        "pending_build",
+        "prior_build_findings",
+        "prior_review_findings",
+        "behavior_repair_attempted_for",
+        "behavior_repair_completed_for",
+        "clean_review",
+        "acceptance_token",
+    ):
+        setup.pop(key, None)
     atomic_write_json(directory / "setup.json", setup)
     (directory / "setup" / "late-dependencies.public.json").unlink(missing_ok=True)
     (directory / "setup" / "design-findings.public.json").unlink(missing_ok=True)
@@ -696,7 +782,9 @@ def render_setup_note(directory: Path, setup: Mapping[str, Any]) -> Path:
     destination = Path(setup["workspace"]) / "ARCTL_SETUP.md"
     decisions = load_decisions(directory)
     design = json.loads(
-        (directory / "setup" / "authorized-design.public.json").read_text(encoding="utf-8")
+        (directory / "setup" / "authorized-design.public.json").read_text(
+            encoding="utf-8"
+        )
     )
     if destination.exists():
         raise StateError(f"setup summary output already exists: {destination}")
@@ -709,7 +797,9 @@ def render_setup_note(directory: Path, setup: Mapping[str, Any]) -> Path:
         "",
     ]
     for decision in decisions["decisions"]:
-        lines.append(f"- **{decision['id'].replace('_', ' ').title()}:** {decision['answer']}")
+        lines.append(
+            f"- **{decision['id'].replace('_', ' ').title()}:** {decision['answer']}"
+        )
     lines.extend(["", "## Authorized setup", "", design["summary"], ""])
     lines.extend(
         [

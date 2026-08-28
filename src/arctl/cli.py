@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, TextIO, Sequence
 
-from .errors import ArctlError, StateError, TransientDownstreamError
+from .errors import ArctlError, PreflightError, StateError, TransientDownstreamError
 from .git import resolve_commit
 from .models import validate_task_id
 from .registry import locate_task
@@ -66,7 +66,9 @@ def _data_root(argument: Path | None) -> Path:
                 value = yaml.safe_load(workspace.read_text(encoding="utf-8"))
             except (OSError, yaml.YAMLError):
                 value = None
-            configured_root = value.get("data_root") if isinstance(value, dict) else None
+            configured_root = (
+                value.get("data_root") if isinstance(value, dict) else None
+            )
             if isinstance(configured_root, str) and configured_root:
                 configured_path = Path(configured_root)
                 return (
@@ -130,8 +132,7 @@ def _result_line(result: dict[str, Any]) -> str:
         return (
             f"{result['experiment_id']:>3}  {result['decision']:<7} · "
             f"{result['operational_status']} / {result['scientific_status']} · "
-            "no score: "
-            + safe_terminal_text(result["failure_detail"], limit=100)
+            "no score: " + safe_terminal_text(result["failure_detail"], limit=100)
         )
     measurement = (
         f" · effect {final.get('effect_estimate')} · lower bound "
@@ -242,8 +243,7 @@ def _status_table(payload: dict[str, Any]) -> str:
                 "Latest result",
                 f"Expt #{latest['experiment_id']} · {latest['decision']} · "
                 f"{latest['operational_status']} / {latest['scientific_status']}"
-                f"{evidence}\n"
-                + safe_terminal_text(latest["hypothesis"], limit=180),
+                f"{evidence}\n" + safe_terminal_text(latest["hypothesis"], limit=180),
             )
         )
     completed = status.get("completed_experiments", 0)
@@ -285,8 +285,7 @@ def _report_table(report: dict[str, Any]) -> str:
             f"LB {_short_number(final.get('one_sided_lower_bound'))}"
             if isinstance(final, dict)
             else (
-                "No score\n"
-                + safe_terminal_text(result["failure_detail"], limit=80)
+                "No score\n" + safe_terminal_text(result["failure_detail"], limit=80)
                 if result.get("failure_detail")
                 else "—"
             )
@@ -331,15 +330,33 @@ def _approval_table(payload: dict[str, Any]) -> str:
                 for metric in metrics
             )
     rows = [
-        ("Objective", safe_terminal_text(summary.get("objective", "See approved task"))),
-        ("Outcome", safe_terminal_text(summary.get("outcome", "See evaluator manifest"))),
-        ("Trial unit", safe_terminal_text(summary.get("trial_unit", "See evaluator manifest"))),
+        (
+            "Objective",
+            safe_terminal_text(summary.get("objective", "See approved task")),
+        ),
+        (
+            "Outcome",
+            safe_terminal_text(summary.get("outcome", "See evaluator manifest")),
+        ),
+        (
+            "Trial unit",
+            safe_terminal_text(summary.get("trial_unit", "See evaluator manifest")),
+        ),
         ("Score", safe_terminal_text(summary.get("score", "See evaluator manifest"))),
-        ("Uncertainty", safe_terminal_text(summary.get("uncertainty", "See evaluator manifest"))),
-        ("Hidden data", safe_terminal_text(summary.get("hidden_data", "Evaluator-private"))),
+        (
+            "Uncertainty",
+            safe_terminal_text(summary.get("uncertainty", "See evaluator manifest")),
+        ),
+        (
+            "Hidden data",
+            safe_terminal_text(summary.get("hidden_data", "Evaluator-private")),
+        ),
         ("Method", safe_terminal_text(summary.get("method", "serial-v1"))),
         ("Models", safe_terminal_text(summary["models"])),
-        ("Backends", safe_terminal_text(summary.get("backends", "codex-cli-v1 (verified)"))),
+        (
+            "Backends",
+            safe_terminal_text(summary.get("backends", "codex-cli-v1 (verified)")),
+        ),
         ("Environment", safe_terminal_text(summary["environment"])),
         (
             "Editable paths",
@@ -352,14 +369,28 @@ def _approval_table(payload: dict[str, Any]) -> str:
         ("Success criterion", safe_terminal_text(summary["success_criterion"])),
         ("Telemetry", "\n".join(telemetry) if telemetry else "None declared"),
         ("Variance risks", safe_terminal_text(summary["variance_risks"])),
-        ("Evaluator commit", safe_terminal_text(summary.get("evaluator_commit", "See token"))),
-        ("Repository commits", safe_terminal_text(summary.get("repository_commits", "See token"))),
-        ("Dependency lock", safe_terminal_text(summary.get("dependency_lock", "Not recorded"))),
-        ("Approval token", safe_terminal_text(payload["approval"]["confirmation_token"])),
+        (
+            "Evaluator commit",
+            safe_terminal_text(summary.get("evaluator_commit", "See token")),
+        ),
+        (
+            "Repository commits",
+            safe_terminal_text(summary.get("repository_commits", "See token")),
+        ),
+        (
+            "Dependency lock",
+            safe_terminal_text(summary.get("dependency_lock", "Not recorded")),
+        ),
+        (
+            "Approval token",
+            safe_terminal_text(payload["approval"]["confirmation_token"]),
+        ),
         ("Approval command", safe_terminal_text(payload["next_command"])),
     ]
     if summary.get("candidate_review"):
-        rows.insert(3, ("Policy guard", safe_terminal_text(summary["candidate_review"])))
+        rows.insert(
+            3, ("Policy guard", safe_terminal_text(summary["candidate_review"]))
+        )
     if summary.get("evaluator_pattern"):
         rows.insert(
             4,
@@ -414,8 +445,7 @@ def _emit_human(
                 print(f"Retries exhausted: {used}/{maximum}.", file=sys.stderr)
             else:
                 print(
-                    "Retryable: use arctl run --retries N "
-                    "[--retry-delay SECONDS].",
+                    "Retryable: use arctl run --retries N " "[--retry-delay SECONDS].",
                     file=sys.stderr,
                 )
         if payload["evidence_valid"] is not None:
@@ -510,9 +540,7 @@ def _emit_human(
             )
         if state == "LIMIT_REACHED":
             limit = payload["experiment_limit"]
-            print(
-                f"Experiment limit reached: {limit['completed']}/{limit['maximum']}."
-            )
+            print(f"Experiment limit reached: {limit['completed']}/{limit['maximum']}.")
     elif state == "STOPPED":
         print(payload["message"])
     elif state == "SEARCH_STALLED":
@@ -524,7 +552,9 @@ def _emit_human(
         for entry in history["entries"]:
             detail = entry.get("claim") or entry.get("kind")
             outcome = entry.get("decision") or entry.get("rejection_code") or "saved"
-            print(f"- {entry['entry_id']} · {outcome} · {safe_terminal_text(str(detail))}")
+            print(
+                f"- {entry['entry_id']} · {outcome} · {safe_terminal_text(str(detail))}"
+            )
     elif state == "SETUP_ANSWERS_REQUIRED":
         print(payload["message"])
         print(_setup_proposal_table(payload["proposal"]))
@@ -633,9 +663,7 @@ class _ProgressView:
     ) -> None:
         self.stream = sys.stdout if stream is None else stream
         self.clock = clock
-        self.interactive = (
-            self.stream.isatty() if interactive is None else interactive
-        )
+        self.interactive = self.stream.isatty() if interactive is None else interactive
         self._active: tuple[str, float, str] | None = None
         self._lock = threading.Lock()
         self._closed = threading.Event()
@@ -753,16 +781,13 @@ class _ProgressView:
             elif kind == "search_miss":
                 self._finish("failed")
                 self._line(
-                    "    Miss: "
-                    + safe_terminal_text(event["message"], limit=120)
+                    "    Miss: " + safe_terminal_text(event["message"], limit=120)
                 )
             elif kind == "research":
                 self._start("RESEARCHING")
             elif kind == "candidate_review":
                 self._finish()
-                self._start(
-                    f"policy review · round {event['round']}/{event['rounds']}"
-                )
+                self._start(f"policy review · round {event['round']}/{event['rounds']}")
             elif kind == "candidate_repair":
                 self._finish("failed")
                 self._start(
@@ -772,8 +797,7 @@ class _ProgressView:
                 self._finish()
                 self._line("  ✓ CANDIDATE_FROZEN")
                 self._line(
-                    "    Proposed: "
-                    + safe_terminal_text(event["claim"], limit=180)
+                    "    Proposed: " + safe_terminal_text(event["claim"], limit=180)
                 )
                 self._line(f"    Candidate: {event['candidate'][:12]}")
             elif kind == "public_checks":
@@ -789,9 +813,7 @@ class _ProgressView:
                     if event["kind"] == "primary"
                     else "SUSPECT_RESERVED"
                 )
-                self._line(
-                    f"  › {label} · {event['trial_count']} paired trial(s)"
-                )
+                self._line(f"  › {label} · {event['trial_count']} paired trial(s)")
             elif kind == "stage":
                 label = self._stage_label(event)
                 if event["status"] == "started":
@@ -812,8 +834,7 @@ class _ProgressView:
             elif kind == "reflection_failed":
                 self._finish("failed")
                 self._line(
-                    "    Reason: "
-                    + safe_terminal_text(event["message"], limit=180)
+                    "    Reason: " + safe_terminal_text(event["message"], limit=180)
                 )
             elif kind == "result":
                 self._finish()
@@ -887,7 +908,9 @@ def _rewrite_next_command(
     data_root: Path | None = None,
 ) -> None:
     command = payload.get("next_command")
-    if isinstance(command, str) and (command == "arctl" or command.startswith("arctl ")):
+    if isinstance(command, str) and (
+        command == "arctl" or command.startswith("arctl ")
+    ):
         prefix = program
         if data_root is not None and not command.startswith("arctl --data "):
             prefix += " --data " + shlex.quote(str(data_root))
@@ -895,28 +918,56 @@ def _rewrite_next_command(
 
 
 def _doctor() -> dict[str, Any]:
-    from .doctor import run_doctor
+    from .doctor import doctor_succeeded, run_doctor
 
-    checks = run_doctor()
-    success = all(checks.values())
+    report = run_doctor()
+    checks = report["checks"]
+    success = doctor_succeeded(report)
     failed = [name for name, passed in checks.items() if not passed]
+    installable = {
+        "python_3_11",
+        "git",
+        "codex",
+        "uv",
+        "pyyaml",
+        "jsonschema",
+        "sandbox_backend",
+    }
+    needs_install = checks.get("supported_platform", False) and any(
+        name in installable for name in failed
+    )
+    diagnostic_summary = "; ".join(dict.fromkeys(report["diagnostics"].values()))
     message = (
         "Runtime and Codex sandbox profile checks passed."
         if success
         else f"Runtime or sandbox checks failed: {', '.join(failed)}."
+        + (f" {diagnostic_summary}." if diagnostic_summary else "")
     )
-    return {
+    payload = {
         **_payload(
             success=success,
             state="DOCTOR_OK" if success else "DOCTOR_FAILED",
             task_id=None,
             action_required=not success,
-            allowed_actions=("install",) if not success else ("init",),
-            next_command="./install.sh" if not success else "arctl init",
+            allowed_actions=(
+                (("install",) if needs_install else ("doctor",))
+                if not success
+                else ("init",)
+            ),
+            next_command=(
+                ("./install.sh" if needs_install else "arctl doctor --json")
+                if not success
+                else "arctl init"
+            ),
             message=message,
+            can_continue=success,
         ),
         "checks": checks,
+        "runtime": report["runtime"],
+        "diagnostics": report["diagnostics"],
     }
+    payload["schema_version"] = 2
+    return payload
 
 
 def _create_task_draft(
@@ -937,7 +988,9 @@ def _create_task_draft(
     try:
         validate_task_id(identifier)
     except ArctlError as error:
-        raise StateError("task ID contains unsafe path or Git-ref characters") from error
+        raise StateError(
+            "task ID contains unsafe path or Git-ref characters"
+        ) from error
     data_root = _data_root(data_argument)
     task_directory = data_root / "tasks" / identifier
     task_file = task_directory / "task.yaml"
@@ -982,8 +1035,14 @@ def _init(
     try:
         validate_task_id(identifier)
     except ArctlError as error:
-        raise StateError("task ID contains unsafe path or Git-ref characters") from error
-    data_root = data_argument.resolve() if data_argument is not None else workspace / ".arctl-data"
+        raise StateError(
+            "task ID contains unsafe path or Git-ref characters"
+        ) from error
+    data_root = (
+        data_argument.resolve()
+        if data_argument is not None
+        else workspace / ".arctl-data"
+    )
     record = initialize_setup(
         data_root=data_root,
         workspace=workspace,
@@ -1040,15 +1099,12 @@ def _print_question_batch(batch: Mapping[str, Any]) -> dict[str, Any]:
             print("      " + safe_terminal_text(option["consequence"], limit=220))
             for citation in option["citations"]:
                 if citation["kind"] == "controller":
-                    evidence = f"[controller:{citation['rule_id']}] {citation['finding']}"
-                else:
                     evidence = (
-                        f"[{citation['path']}:{citation['location']}] {citation['finding']}"
+                        f"[controller:{citation['rule_id']}] {citation['finding']}"
                     )
-                print(
-                    "      "
-                    + safe_terminal_text(evidence, limit=240)
-                )
+                else:
+                    evidence = f"[{citation['path']}:{citation['location']}] {citation['finding']}"
+                print("      " + safe_terminal_text(evidence, limit=240))
         custom_number = len(question["options"]) + 1
         print(f"   {custom_number}) Give a custom answer")
         while True:
@@ -1102,32 +1158,43 @@ def _design_summary(design: Mapping[str, Any]) -> str:
         ),
         (
             "Environment",
-            "Entrypoint: " + safe_terminal_text(adapter["entrypoint"])
-            + "\nInterface: " + safe_terminal_text(adapter["interface"])
-            + "\nOwner: " + safe_terminal_text(adapter["owner"])
-            + "\nSource: " + safe_terminal_text(adapter["source_path"])
-            + "\nRationale: " + safe_terminal_text(adapter["rationale"]),
+            "Entrypoint: "
+            + safe_terminal_text(adapter["entrypoint"])
+            + "\nInterface: "
+            + safe_terminal_text(adapter["interface"])
+            + "\nOwner: "
+            + safe_terminal_text(adapter["owner"])
+            + "\nSource: "
+            + safe_terminal_text(adapter["source_path"])
+            + "\nRationale: "
+            + safe_terminal_text(adapter["rationale"]),
         ),
         (
             "Outcome",
-            "Statistic: " + safe_terminal_text(outcome["statistic"])
+            "Statistic: "
+            + safe_terminal_text(outcome["statistic"])
             + "\nDirection / unit: "
             + safe_terminal_text(f"{outcome['direction']} / {outcome['unit']}")
-            + "\nAggregation: " + safe_terminal_text(outcome["aggregation"])
-            + "\nExtraction: " + safe_terminal_text(outcome["extraction"])
+            + "\nAggregation: "
+            + safe_terminal_text(outcome["aggregation"])
+            + "\nExtraction: "
+            + safe_terminal_text(outcome["extraction"])
             + "\nResult path: "
             + safe_terminal_text(".".join(outcome["result_path"])),
         ),
         (
             "Trial",
-            "Unit: " + safe_terminal_text(trial["unit"])
-            + "\nTermination: " + safe_terminal_text(trial["termination"])
+            "Unit: "
+            + safe_terminal_text(trial["unit"])
+            + "\nTermination: "
+            + safe_terminal_text(trial["termination"])
             + "\nSafety horizon: "
             + safe_terminal_text(
                 f"{trial['horizon']['limit']} {trial['horizon']['unit']} "
                 f"via {trial['horizon']['case_field']}"
             )
-            + "\nSeed handling: " + safe_terminal_text(trial["seed_handling"]),
+            + "\nSeed handling: "
+            + safe_terminal_text(trial["seed_handling"]),
         ),
         (
             "Conformance",
@@ -1139,10 +1206,14 @@ def _design_summary(design: Mapping[str, Any]) -> str:
         ("Hard rules", bullets(derived["hard_rules"])),
         (
             "Derived setup",
-            "Evaluator pattern: " + safe_terminal_text(derived["evaluator_pattern"])
-            + "\nHidden data: " + safe_terminal_text(derived["hidden_data"])
-            + "\nRuntime limits:\n" + bullets(derived["runtime_limits"])
-            + "\nTelemetry:\n" + bullets(derived["telemetry"]),
+            "Evaluator pattern: "
+            + safe_terminal_text(derived["evaluator_pattern"])
+            + "\nHidden data: "
+            + safe_terminal_text(derived["hidden_data"])
+            + "\nRuntime limits:\n"
+            + bullets(derived["runtime_limits"])
+            + "\nTelemetry:\n"
+            + bullets(derived["telemetry"]),
         ),
         (
             "Dependencies",
@@ -1183,7 +1254,9 @@ def _setup(
     design_authorization: str | None,
     interactive: bool,
     progress: Callable[[dict[str, Any]], None] | None = None,
+    preflight: bool = True,
 ) -> dict[str, Any]:
+    from .doctor import require_doctor
     from .setup import (
         accept_setup,
         build_setup_direct,
@@ -1198,8 +1271,13 @@ def _setup(
         render_setup_note,
     )
 
+    if preflight:
+        require_doctor()
     directory, record = load_setup(data_root, task_id)
-    if record.get("schema_version") != 2 or record.get("setup_contract") != "conversation-v2":
+    if (
+        record.get("schema_version") != 2
+        or record.get("setup_contract") != "conversation-v2"
+    ):
         raise StateError(
             "legacy guided-setup state is not supported; create a fresh workspace with arctl init; "
             f"it was not changed (state: {directory / 'setup.json'})"
@@ -1207,7 +1285,9 @@ def _setup(
     identifier = record["task_id"]
     if reopen_review_decision_batch(directory, record) is not None:
         record = json.loads((directory / "setup.json").read_text(encoding="utf-8"))
-    submitted = _read_setup_submission(answers_path) if answers_path is not None else None
+    submitted = (
+        _read_setup_submission(answers_path) if answers_path is not None else None
+    )
     readiness: dict[str, Any] | None = None
     while True:
         state = record["state"]
@@ -1229,8 +1309,13 @@ def _setup(
             )
 
         if submitted is not None and state != "QUESTIONS_REQUIRED":
-            raise StateError("setup answers were supplied but no question batch is pending")
-        if design_authorization is not None and state != "DESIGN_AUTHORIZATION_REQUIRED":
+            raise StateError(
+                "setup answers were supplied but no question batch is pending"
+            )
+        if (
+            design_authorization is not None
+            and state != "DESIGN_AUTHORIZATION_REQUIRED"
+        ):
             raise StateError(
                 "setup design authorization was supplied but no design is awaiting it"
             )
@@ -1240,11 +1325,15 @@ def _setup(
             if submitted is not None:
                 answer_batch(directory, record, submitted)
                 submitted = None
-                record = json.loads((directory / "setup.json").read_text(encoding="utf-8"))
+                record = json.loads(
+                    (directory / "setup.json").read_text(encoding="utf-8")
+                )
                 continue
             if interactive and sys.stdin.isatty():
                 answer_batch(directory, record, _print_question_batch(batch))
-                record = json.loads((directory / "setup.json").read_text(encoding="utf-8"))
+                record = json.loads(
+                    (directory / "setup.json").read_text(encoding="utf-8")
+                )
                 continue
             return {
                 **_payload(
@@ -1268,7 +1357,9 @@ def _setup(
                         "revision": {"const": batch["revision"]},
                         "answers": {
                             "type": "object",
-                            "required": [question["id"] for question in batch["questions"]],
+                            "required": [
+                                question["id"] for question in batch["questions"]
+                            ],
                         },
                     },
                 },
@@ -1282,13 +1373,17 @@ def _setup(
             if design_authorization is not None:
                 authorize_design(directory, record, design_authorization)
                 design_authorization = None
-                record = json.loads((directory / "setup.json").read_text(encoding="utf-8"))
+                record = json.loads(
+                    (directory / "setup.json").read_text(encoding="utf-8")
+                )
                 continue
             if interactive and sys.stdin.isatty():
                 print("\nAuthorized setup proposal\n" + _design_summary(design))
                 if input("\nUse this setup? [y/N]: ").strip().lower() in {"y", "yes"}:
                     authorize_design(directory, record, token)
-                    record = json.loads((directory / "setup.json").read_text(encoding="utf-8"))
+                    record = json.loads(
+                        (directory / "setup.json").read_text(encoding="utf-8")
+                    )
                     continue
                 raise StateError("setup design authorization cancelled")
             return {
@@ -1334,21 +1429,32 @@ def _setup(
                 else None
             )
 
-        if state in {
-            "READY_FOR_SETUP_ACCEPTANCE",
-            "SETUP_EDIT_REVIEW_REQUIRED",
-            "EDIT_REVIEW_FAILED",
-        } and acceptance is None:
+        if (
+            state
+            in {
+                "READY_FOR_SETUP_ACCEPTANCE",
+                "SETUP_EDIT_REVIEW_REQUIRED",
+                "EDIT_REVIEW_FAILED",
+            }
+            and acceptance is None
+        ):
             readiness = review_setup_edits(
                 directory, record, offline=offline, progress=progress
             )
             record = json.loads((directory / "setup.json").read_text(encoding="utf-8"))
             state = record["state"]
 
-        if state == "READY_FOR_SETUP_ACCEPTANCE" and acceptance is None and interactive and sys.stdin.isatty():
+        if (
+            state == "READY_FOR_SETUP_ACCEPTANCE"
+            and acceptance is None
+            and interactive
+            and sys.stdin.isatty()
+        ):
             assert readiness is not None
             print("\nVerified setup is ready for acceptance.")
-            if input("Accept and commit this verified setup? [y/N]: ").strip().lower() in {"y", "yes"}:
+            if input(
+                "Accept and commit this verified setup? [y/N]: "
+            ).strip().lower() in {"y", "yes"}:
                 acceptance = readiness["acceptance_token"]
 
         if state == "READY_FOR_SETUP_ACCEPTANCE" and acceptance is not None:
@@ -1652,11 +1758,7 @@ def _status(data_root: Path, task_id: str | None) -> dict[str, Any]:
         last.get("evaluation", {}).get("comparisons", []) if last is not None else []
     )
     effect = comparisons[-1].get("effect_estimate", "n/a") if comparisons else "n/a"
-    last_text = (
-        "none"
-        if last is None
-        else f"{last.get('decision')} (effect {effect})"
-    )
+    last_text = "none" if last is None else f"{last.get('decision')} (effect {effect})"
     payload = _payload(
         success=True,
         state=status["state"],
@@ -1739,9 +1841,7 @@ def _inspect(
     )
     payload["experiment_id"] = selected
     payload["result"] = inspection["result"]
-    payload["champion_after_provenance"] = inspection[
-        "champion_after_provenance"
-    ]
+    payload["champion_after_provenance"] = inspection["champion_after_provenance"]
     payload["dossier_path"] = inspection["dossier_path"]
     return payload
 
@@ -1775,11 +1875,12 @@ def _run(
     *,
     retries: int = 0,
     retry_delay: float = 60.0,
+    workers: int = 16,
     preflight: bool = True,
     progress=None,
 ) -> dict[str, Any]:
     from .downstream import RetryPolicy
-    from .doctor import run_doctor
+    from .doctor import require_doctor
     from .runner import RunOutcome, run_task
 
     if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
@@ -1791,6 +1892,12 @@ def _run(
     ):
         raise StateError("max experiments must be a positive integer")
     if (
+        isinstance(workers, bool)
+        or not isinstance(workers, int)
+        or not 1 <= workers <= 16
+    ):
+        raise StateError("workers must be between 1 and 16")
+    if (
         isinstance(retry_delay, bool)
         or not isinstance(retry_delay, (int, float))
         or not math.isfinite(retry_delay)
@@ -1799,15 +1906,12 @@ def _run(
         raise StateError("retry delay must be non-negative")
     task = _located(data_root, task_id)
     if preflight:
-        checks = run_doctor()
-        failed = [name for name, passed in checks.items() if not passed]
-        if failed:
-            raise StateError(
-                "runtime or sandbox preflight failed: " + ", ".join(failed)
-            )
-    initial_results = sorted(
-        (task.directory / "experiments").glob("[0-9]" * 6)
-    ) if (task.directory / "experiments").is_dir() else []
+        require_doctor()
+    initial_results = (
+        sorted((task.directory / "experiments").glob("[0-9]" * 6))
+        if (task.directory / "experiments").is_dir()
+        else []
+    )
     initial_completed = sum(
         (directory / "published").is_file() for directory in initial_results
     )
@@ -1857,6 +1961,7 @@ def _run(
                     task,
                     max_experiments=remaining,
                     progress=tracked_progress,
+                    subject_workers=workers,
                 )
             except TransientDownstreamError as error:
                 policy.wait(error)
@@ -1882,13 +1987,15 @@ def _run(
     state = (
         "STOPPED"
         if outcome.stopped
-        else "REFLECTION_FAILED"
-        if outcome.reflection_failed
-        else "SEARCH_STALLED"
-        if outcome.stalled
-        else "LIMIT_REACHED"
-        if outcome.limit_reached
-        else "RUN_COMPLETE"
+        else (
+            "REFLECTION_FAILED"
+            if outcome.reflection_failed
+            else (
+                "SEARCH_STALLED"
+                if outcome.stalled
+                else "LIMIT_REACHED" if outcome.limit_reached else "RUN_COMPLETE"
+            )
+        )
     )
     next_command = f"arctl status {identifier}"
     payload = _payload(
@@ -1916,15 +2023,17 @@ def _run(
                     else ""
                 )
                 if outcome.reflection_failed
-                else
-                f"Candidate search for {identifier} stalled after six attempts; "
-                "the exploration history was preserved."
-                if outcome.stalled
-                else
-                f"Task {identifier} reached its approved experiment limit "
-                f"({task.config.max_experiments}/{task.config.max_experiments})."
-                if outcome.limit_reached
-                else f"Task {identifier} completed {len(results)} experiments."
+                else (
+                    f"Candidate search for {identifier} stalled after six attempts; "
+                    "the exploration history was preserved."
+                    if outcome.stalled
+                    else (
+                        f"Task {identifier} reached its approved experiment limit "
+                        f"({task.config.max_experiments}/{task.config.max_experiments})."
+                        if outcome.limit_reached
+                        else f"Task {identifier} completed {len(results)} experiments."
+                    )
+                )
             )
         ),
         evidence_valid=True if results else None,
@@ -2088,7 +2197,9 @@ def build_parser() -> argparse.ArgumentParser:
         "manage explicitly authored task contracts",
         "Create a manually editable task contract without guided workspace setup.",
     )
-    task_commands = task.add_subparsers(dest="task_command", required=True, metavar="COMMAND")
+    task_commands = task.add_subparsers(
+        dest="task_command", required=True, metavar="COMMAND"
+    )
     task_create = task_commands.add_parser(
         "create",
         help="create a manually editable task.yaml",
@@ -2165,6 +2276,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         metavar="N",
         help="maximum experiments for this invocation; cannot exceed the approved task limit",
+    )
+    run.add_argument(
+        "--workers",
+        type=int,
+        default=16,
+        metavar="N",
+        help="isolated subject workers per arm, from 1 to 16 (default: 16)",
     )
     run.add_argument(
         "--retries",
@@ -2270,9 +2388,7 @@ def render_cli_reference() -> str:
         "# arctl command reference\n\n"
         "This file mirrors the built-in CLI help. Regenerate it with "
         "`.venv/bin/python tools/generate_cli_reference.py`.\n\n"
-        "## `arctl -h`\n\n```text\n"
-        + parser.format_help().rstrip()
-        + "\n```\n"
+        "## `arctl -h`\n\n```text\n" + parser.format_help().rstrip() + "\n```\n"
     ]
     for name, child in subparsers.choices.items():
         sections.append(
@@ -2287,9 +2403,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     program = _invoked_program(argv)
     arguments = build_parser().parse_args(argv)
     progress_view = (
-        _ProgressView()
-        if arguments.command == "run" and not arguments.json
-        else None
+        _ProgressView() if arguments.command == "run" and not arguments.json else None
     )
     setup_progress = (
         _SetupProgressView()
@@ -2376,6 +2490,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 arguments.max_experiments,
                 retries=arguments.retries,
                 retry_delay=arguments.retry_delay,
+                workers=arguments.workers,
                 progress=progress_view,
             )
         else:
@@ -2411,6 +2526,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 arguments.max_experiments,
                 retries=arguments.retries,
                 retry_delay=arguments.retry_delay,
+                workers=arguments.workers,
                 preflight=False,
                 progress=progress_view,
             )
@@ -2427,7 +2543,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if identifier is not None
             else None
         )
-        if arguments.command == "doctor":
+        preflight_error = error if isinstance(error, PreflightError) else None
+        if preflight_error is not None:
+            next_command = "arctl doctor --json"
+        elif arguments.command == "doctor":
             next_command = "./install.sh"
         elif arguments.command == "init":
             next_command = "arctl doctor"
@@ -2442,21 +2561,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             next_command = (
                 f"arctl status {identifier}" if identifier else "arctl status"
             )
-        transient = (
-            error if isinstance(error, TransientDownstreamError) else None
-        )
+        transient = error if isinstance(error, TransientDownstreamError) else None
         payload = _payload(
             success=False,
-            state="ERROR",
+            state="PREFLIGHT_FAILED" if preflight_error is not None else "ERROR",
             task_id=identifier,
             action_required=True,
             allowed_actions=(
-                ("status", "run")
-                if transient
+                ("doctor",)
+                if preflight_error is not None
                 else (
-                    ("setup", "status")
-                    if arguments.command == "setup"
-                    else ("status",)
+                    ("status", "run")
+                    if transient
+                    else (
+                        ("setup", "status")
+                        if arguments.command == "setup"
+                        else ("status",)
+                    )
                 )
             ),
             next_command=(
@@ -2465,14 +2586,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else next_command
             ),
             message=(
-                f"Failed: {transient.stage} · {transient.detail}."
-                if transient
-                else f"Failed: {error}."
+                f"Failed: {preflight_error}. Run arctl doctor --json for diagnostics."
+                if preflight_error is not None
+                else (
+                    f"Failed: {transient.stage} · {transient.detail}."
+                    if transient
+                    else f"Failed: {error}."
+                )
             ),
             evidence_valid=True,
-            can_continue=transient is not None or arguments.command == "setup",
+            can_continue=(
+                False
+                if preflight_error is not None
+                else transient is not None or arguments.command == "setup"
+            ),
             log_path=transient.artifact_path if transient else log_path,
         )
+        if preflight_error is not None:
+            payload["preflight"] = preflight_error.report
         if transient is not None:
             payload["failure"] = {
                 "stage": transient.stage,
@@ -2493,8 +2624,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     _emit(
         payload,
         as_json=arguments.json,
-        show_artifacts=bool(
-            arguments.command == "inspect" and arguments.artifacts
-        ),
+        show_artifacts=bool(arguments.command == "inspect" and arguments.artifacts),
     )
     return 0 if payload["success"] else 1

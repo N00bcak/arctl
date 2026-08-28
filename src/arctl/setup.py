@@ -249,7 +249,7 @@ SETUP_BUILD_CONTRACT = {
         "evaluator.manifest.json",
     ],
 }
-SETUP_BUILD_CONTROLLER_VERSION = b"setup-controller-v3"
+SETUP_BUILD_CONTROLLER_VERSION = b"setup-controller-v5"
 _SETUP_TEMPLATE = """# ARCTL setup
 
 <!-- Fill what you know. arctl will inspect the repository and ask only about
@@ -1018,6 +1018,7 @@ def _agent_run(
     command_builder: SetupCommandBuilder | None = None,
     offline: bool = False,
     validate_output: bool = True,
+    normalize_output: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     scratch = root / "output"
     scratch.mkdir(parents=True, exist_ok=True)
@@ -1077,6 +1078,8 @@ def _agent_run(
         raise StateError(f"setup agent failed{suffix}; inspect {root / 'process'}")
     try:
         value = json.loads((scratch / output_name).read_text(encoding="utf-8"))
+        if normalize_output is not None:
+            value = normalize_output(value)
         if validate_output:
             Draft202012Validator(schema_value).validate(value)
     except (OSError, json.JSONDecodeError) as error:
@@ -1401,7 +1404,15 @@ def discover_setup_batch(
         "boundary must be explicit human decisions; ask them if they are not already in "
         "confirmed_decisions. Other implementation details should be derived when the "
         "repository and confirmed choices make them unambiguous. Never accept silence as "
-        "confirmation and never combine several fields into one prose answer. Cite the "
+        "confirmation and never combine several fields into one prose answer. When a "
+        "confirmed seed_isolation decision exists, make the environment-adapter interface, "
+        "trial seed handling, hidden-data statement, telemetry, public case shape, and "
+        "subject result shape mutually consistent with it; do not retain superseded "
+        "in-process or raw-result prose from an earlier authorization. Inspect Python package "
+        "initialization before choosing the adapter entrypoint: the declared entrypoint must be "
+        "the exact executable path the subject will use and must not execute editable policy "
+        "code in the seed-bearing interpreter. Prefer direct execution of a frozen adapter file "
+        "when module execution would import editable code through package __init__.py. Cite the "
         "controller failure rule for any late_dependency_requirements and ask an "
         "explicit allow-or-reject question for each new direct dependency before returning "
         "another design. Never invent dependency authorization decision IDs: a non-null "
@@ -1460,6 +1471,7 @@ def discover_setup_batch(
             command_builder=command_builder,
             offline=True,
         )
+        value = _normalize_entrypoint_design_revision(directory, setup, value)
         value = validate_batch(value, subject=subject, revision=revision)
         value = _controller_dependency_questions(value, decisions=decisions)
         value = validate_batch(value, subject=subject, revision=revision)
@@ -1481,6 +1493,53 @@ def discover_setup_batch(
     if progress is not None:
         progress({"stage": "repository inspection", "status": "completed"})
     return value
+
+
+def _normalize_entrypoint_design_revision(
+    directory: Path,
+    setup: Mapping[str, Any],
+    batch: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Limit entrypoint rediscovery to the reviewed derived-field correction."""
+    findings = setup.get("prior_design_findings", [])
+    if not (
+        isinstance(findings, list)
+        and findings
+        and all(
+            isinstance(finding, str)
+            and finding.startswith("AUTHORIZED_ENTRYPOINT_MISMATCH ")
+            for finding in findings
+        )
+        and isinstance(batch.get("design"), Mapping)
+    ):
+        return deepcopy(dict(batch))
+    authorized_path = directory / "setup" / "authorized-design.public.json"
+    try:
+        authorized = json.loads(authorized_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise StateError(
+            "entrypoint design revision cannot load the prior authorization"
+        ) from error
+    corrected = deepcopy(authorized)
+    for controller_field in (
+        "schema_version",
+        "revision",
+        "decision_revision",
+        "source_provenance",
+        "controller_contract",
+        "dependency_source_policy",
+    ):
+        corrected.pop(controller_field, None)
+    source_path = _authorized_adapter_source_path(corrected["environment_adapter"])
+    corrected["environment_adapter"]["entrypoint"] = f"python {source_path}"
+    normalized = deepcopy(dict(batch))
+    normalized["questions"] = []
+    normalized["design"] = corrected
+    normalized["summary"] = (
+        "Correct only the reviewed environment-adapter entrypoint while preserving "
+        "all settled authorized design fields."
+    )
+    return normalized
 
 
 def _controller_dependency_questions(
@@ -1579,68 +1638,166 @@ def reopen_review_decision_batch(
     directory: Path, setup: dict[str, Any]
 ) -> dict[str, Any] | None:
     """Reopen a cited human decision when review proves two choices conflict."""
-    if setup.get("state") != "REVIEW_FAILED" or not any(
-        isinstance(finding, Mapping)
-        and finding.get("code") == "INTENT_OBJECTIVE_OUTCOME_MISMATCH"
+    decisions = load_decisions(directory)
+    decision_ids = {
+        item.get("id")
+        for item in decisions.get("decisions", [])
+        if isinstance(item, Mapping)
+    }
+    if setup.get("state") == "QUESTIONS_REQUIRED" and "seed_isolation" in decision_ids:
+        batch_path = directory / "setup" / "question-batch.public.json"
+        try:
+            pending_batch = json.loads(batch_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pending_batch = None
+        pending_ids = {
+            question.get("id")
+            for question in (
+                pending_batch.get("questions", [])
+                if isinstance(pending_batch, Mapping)
+                else []
+            )
+            if isinstance(question, Mapping)
+        }
+        if pending_ids == {"seed_isolation"}:
+            setup["state"] = "REVIEW_FAILED"
+            _save_setup(directory, setup)
+            return dict(pending_batch)
+    if setup.get("state") != "REVIEW_FAILED":
+        return None
+    review_findings = [
+        finding
         for finding in setup.get("prior_review_findings", [])
-    ):
+        if isinstance(finding, Mapping)
+    ]
+    codes = {
+        finding.get("code")
+        for finding in review_findings
+        if isinstance(finding.get("code"), str)
+    }
+    objective_conflict = "INTENT_OBJECTIVE_OUTCOME_MISMATCH" in codes
+    protocol_conflict = bool(
+        codes
+        & {
+            "AUTHORIZED_ADAPTER_CONTRACT_MISMATCH",
+            "AUTHORIZED_TELEMETRY_CONTRACT_MISMATCH",
+        }
+    ) and "seed_isolation" not in decision_ids
+    if not objective_conflict and not protocol_conflict:
         return None
     design_path = directory / "setup" / "authorized-design.public.json"
     try:
         design = json.loads(design_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise StateError("reviewed setup design cannot reopen its objective decision") from error
-    decisions = load_decisions(directory)
+        raise StateError("reviewed setup design cannot reopen its conflicting decision") from error
     revision = decisions["revision"] + 1
-    lines_citations = deepcopy(design["outcome"]["citations"])
-    reward_citations = deepcopy(design["objective"]["citations"])
+    if objective_conflict:
+        lines_citations = deepcopy(design["outcome"]["citations"])
+        reward_citations = deepcopy(design["objective"]["citations"])
+        summary = (
+            "Static review proved that environment reward and total lines cleared are "
+            "not equivalent primary objectives."
+        )
+        question = {
+            "id": "objective",
+            "prompt": "Which quantity is the primary optimization objective?",
+            "why": (
+                "The environment includes alive and game-over reward terms, so maximizing "
+                "reward can rank policies differently from maximizing total lines cleared."
+            ),
+            "options": [
+                {
+                    "id": "total_lines_cleared",
+                    "label": "Total lines cleared",
+                    "value": (
+                        "Maximize total lines cleared per seeded episode over at most "
+                        "1000 block placements."
+                    ),
+                    "consequence": (
+                        "The objective matches the confirmed primary outcome and paired "
+                        "acceptance statistic."
+                    ),
+                    "citations": lines_citations,
+                },
+                {
+                    "id": "environment_reward",
+                    "label": "Environment reward",
+                    "value": (
+                        "Maximize cumulative environment reward per seeded episode over at "
+                        "most 1000 block placements."
+                    ),
+                    "consequence": (
+                        "Discovery must replace the primary outcome and acceptance statistic "
+                        "with environment reward."
+                    ),
+                    "citations": reward_citations,
+                },
+            ],
+            "recommended_option_id": "total_lines_cleared",
+            "allow_custom": True,
+        }
+        reopened = "objective"
+    else:
+        controller_seed_citation = {
+            "kind": "controller",
+            "rule_id": "seeds",
+            "finding": (
+                "Reserved seeds must not be exposed as illegitimate hidden information "
+                "to editable policy code."
+            ),
+        }
+        summary = (
+            "Static review proved that the authorized in-process policy call conflicts "
+            "with the authorized hidden-seed guarantee."
+        )
+        question = {
+            "id": "seed_isolation",
+            "prompt": "How must editable policy code be isolated from reserved seeds?",
+            "why": (
+                "An editable policy sharing the seeded adapter interpreter can inspect stack "
+                "frames or monkeypatch parsing code and recover the reserved case seed."
+            ),
+            "options": [
+                {
+                    "id": "secure_seedless_subprocess",
+                    "label": "Seedless subprocess",
+                    "value": (
+                        "Run editable policy code in a separate seedless subprocess. The frozen "
+                        "seeded adapter may receive case_id, seed, policy_path, and max_pieces, "
+                        "but sends only the current policy observation and legal-action metadata "
+                        "to the policy worker. Return case_id, lines_cleared, and validated "
+                        "termination telemetry; no seed, comparator output, reserved batch, or "
+                        "aggregate result crosses into the policy process."
+                    ),
+                    "consequence": (
+                        "Discovery must replace the superseded in-process adapter and raw-result "
+                        "prose with one consistent seedless JSONL protocol."
+                    ),
+                    "citations": [controller_seed_citation],
+                },
+                {
+                    "id": "in_process_policy",
+                    "label": "In-process policy",
+                    "value": (
+                        "Run editable policy code in the seeded adapter interpreter and accept "
+                        "that the reserved case seed cannot be hidden from adversarial policy code."
+                    ),
+                    "consequence": (
+                        "The setup cannot claim seed secrecy and may fail the research-integrity "
+                        "review for hidden-data leakage."
+                    ),
+                    "citations": [controller_seed_citation],
+                },
+            ],
+            "recommended_option_id": "secure_seedless_subprocess",
+            "allow_custom": True,
+        }
+        reopened = "seed_isolation"
     batch = {
         "schema_version": 1,
         "revision": revision,
-        "summary": (
-            "Static review proved that environment reward and total lines cleared are "
-            "not equivalent primary objectives."
-        ),
-        "questions": [
-            {
-                "id": "objective",
-                "prompt": "Which quantity is the primary optimization objective?",
-                "why": (
-                    "The environment includes alive and game-over reward terms, so maximizing "
-                    "reward can rank policies differently from maximizing total lines cleared."
-                ),
-                "options": [
-                    {
-                        "id": "total_lines_cleared",
-                        "label": "Total lines cleared",
-                        "value": (
-                            "Maximize total lines cleared per seeded episode over at most "
-                            "1000 block placements."
-                        ),
-                        "consequence": (
-                            "The objective matches the confirmed primary outcome and paired "
-                            "acceptance statistic."
-                        ),
-                        "citations": lines_citations,
-                    },
-                    {
-                        "id": "environment_reward",
-                        "label": "Environment reward",
-                        "value": (
-                            "Maximize cumulative environment reward per seeded episode over at "
-                            "most 1000 block placements."
-                        ),
-                        "consequence": (
-                            "Discovery must replace the primary outcome and acceptance statistic "
-                            "with environment reward."
-                        ),
-                        "citations": reward_citations,
-                    },
-                ],
-                "recommended_option_id": "total_lines_cleared",
-                "allow_custom": True,
-            }
-        ],
+        "summary": summary,
+        "questions": [question],
         "design": None,
     }
     normalized = validate_batch(
@@ -1648,7 +1805,11 @@ def reopen_review_decision_batch(
     )
     save_batch(directory, normalized)
     setup["state"] = "QUESTIONS_REQUIRED"
-    setup["review_decision_reopened"] = "objective"
+    setup["review_decision_reopened"] = reopened
+    setup["prior_design_findings"] = [
+        f"{finding.get('code', 'REVIEW_FINDING')} {finding.get('message', '')}".strip()
+        for finding in review_findings
+    ]
     _save_setup(directory, setup)
     return normalized
 
@@ -2188,9 +2349,11 @@ def _validate_complete_build_contract(
         validated = _validate_build_contract(value, setup)
     except ValidationError as error:
         findings.append(str(error))
-    task = validated[0] if validated is not None else value.get("task")
-    evaluator = validated[1] if validated is not None else value.get("evaluator")
-    if isinstance(task, Mapping) and isinstance(evaluator, Mapping):
+    # Authorization matching consumes the parsed contracts (resolved
+    # repository roots and decoded JSON Schemas).  Applying it to the raw wire
+    # response after typed validation failed creates false, cascaded findings.
+    if validated is not None:
+        task, evaluator, _ = validated
         try:
             _validate_authorized_design_match(directory, task, evaluator)
         except ValidationError as error:
@@ -3033,7 +3196,9 @@ def _dependency_import_checks(
     )
     if not imports:
         return
-    root = directory / "setup" / "dependency-imports"
+    attempts = directory / "setup" / "dependency-imports" / "attempts"
+    attempt = 1 + len(tuple(attempts.glob("*"))) if attempts.is_dir() else 1
+    root = attempts / f"{attempt:04d}"
     expression = (
         "import importlib;"
         + ";".join(
@@ -3506,6 +3671,28 @@ def _apply_authorized_build_fields(
                     "include": [adapter_source_path],
                 }
             )
+    # The build wire contract permits a repository declaration with no files,
+    # while TaskConfig correctly rejects empty codebase evidence.  Once the
+    # authorized adapter has been inserted, discard only unused empty sources.
+    normalized_task["environment"]["codebases"] = [
+        source for source in codebases if source.get("include")
+    ]
+    retained_source_ids = {
+        source["id"] for source in normalized_task["environment"]["codebases"]
+    }
+    normalized_probes = []
+    for probe in normalized_task["environment"]["probes"]:
+        probe["backed_by"] = [
+            source_id
+            for source_id in probe.get("backed_by", [])
+            if source_id in retained_source_ids
+        ]
+        # A probe backed only by editable policy code is not fixed environment
+        # evidence.  Discard it after that codebase is removed rather than
+        # preserving a dangling reference or inventing unrelated backing.
+        if probe["backed_by"]:
+            normalized_probes.append(probe)
+    normalized_task["environment"]["probes"] = normalized_probes
     normalized_evaluator["public"]["statistic"] = requirements["outcome"][
         "statistic"
     ]
@@ -3543,160 +3730,11 @@ def _apply_authorized_build_fields(
     normalized_evaluator["schemas"]["public_case_json"] = json.dumps(
         public_case, sort_keys=True, separators=(",", ":")
     )
-    outcome_path = requirements["outcome"]["result_path"]
-    outcome_name = outcome_path[-1]
-    legacy_result = json.loads(
-        normalized_evaluator["schemas"].get("subject_result_json", "{}")
-    )
-
-    def matching_numeric_schemas(node: Any) -> list[dict[str, Any]]:
-        if not isinstance(node, Mapping):
-            return []
-        matches: list[dict[str, Any]] = []
-        properties = node.get("properties")
-        if isinstance(properties, Mapping):
-            candidate = properties.get(outcome_name)
-            if (
-                isinstance(candidate, Mapping)
-                and candidate.get("type") in {"integer", "number"}
-            ):
-                matches.append(
-                    {
-                        key: deepcopy(candidate[key])
-                        for key in ("type", "minimum", "maximum")
-                        if key in candidate
-                    }
-                )
-            for child in properties.values():
-                matches.extend(matching_numeric_schemas(child))
-        return matches
-
-    numeric_matches = matching_numeric_schemas(legacy_result)
-    outcome_value_schema: dict[str, Any] = {
-        "type": (
-            "integer"
-            if any(item["type"] == "integer" for item in numeric_matches)
-            else "number"
-        )
-    }
-    minima = [item["minimum"] for item in numeric_matches if "minimum" in item]
-    maxima = [item["maximum"] for item in numeric_matches if "maximum" in item]
-    if minima:
-        outcome_value_schema["minimum"] = max(minima)
-    if maxima:
-        outcome_value_schema["maximum"] = min(maxima)
-    if (
-        "minimum" in outcome_value_schema
-        and "maximum" in outcome_value_schema
-        and outcome_value_schema["minimum"] > outcome_value_schema["maximum"]
-    ):
-        raise ValidationError(
-            "generated outcome schemas have incompatible numeric bounds"
-        )
-    normalized_evaluator["public"]["telemetry"] = [
-        {
-            "name": outcome_name,
-            "description": "Arithmetic mean primary outcome for each paired arm.",
-            "unit": requirements["outcome"]["unit"],
-            "scope": "paired",
-            "role": "outcome",
-            "value_type": "number",
-            "direction": requirements["outcome"]["direction"],
-        },
-        {
-            "name": "placements",
-            "description": "Arithmetic mean placements executed by each paired arm.",
-            "unit": requirements["trial"]["horizon"]["unit"],
-            "scope": "paired",
-            "role": "implementation",
-            "value_type": "number",
-            "direction": "contextual",
-        },
-        {
-            "name": "terminated_rate",
-            "description": "Fraction of paired episodes terminated by the environment.",
-            "unit": "proportion",
-            "scope": "paired",
-            "role": "implementation",
-            "value_type": "number",
-            "direction": "contextual",
-        },
-        {
-            "name": "truncated_rate",
-            "description": "Fraction of paired episodes truncated by the environment.",
-            "unit": "proportion",
-            "scope": "paired",
-            "role": "implementation",
-            "value_type": "number",
-            "direction": "contextual",
-        },
-        {
-            "name": "paired_standard_error",
-            "description": "Sample standard error of the ordered paired differences.",
-            "unit": requirements["outcome"]["unit"],
-            "scope": "comparison",
-            "role": "uncertainty",
-            "value_type": "number",
-            "direction": "lower",
-        },
-    ]
-    normalized_evaluator["suspect_test"] = {
-        "trigger": None,
-        "reason_codes": [],
-    }
-    subject_result: dict[str, Any] = {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["case_id", outcome_path[0], "telemetry"],
-        "properties": {
-            "case_id": {"type": "string", "minLength": 1},
-            "telemetry": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": [
-                    "placements",
-                    "terminated",
-                    "truncated",
-                    "termination_reason",
-                ],
-                "properties": {
-                    "placements": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "maximum": horizon["limit"],
-                    },
-                    "terminated": {"type": "boolean"},
-                    "truncated": {"type": "boolean"},
-                    "termination_reason": {"type": "string", "minLength": 1},
-                },
-            },
-        },
-    }
-    cursor: dict[str, Any] = subject_result
-    for segment in outcome_path[:-1]:
-        properties = cursor.setdefault("properties", {})
-        required = cursor.setdefault("required", [])
-        if segment not in required:
-            required.append(segment)
-        child = properties.get(segment)
-        if not isinstance(child, dict) or child.get("type") != "object":
-            child = {
-                "type": "object",
-                "additionalProperties": False,
-                "required": [],
-                "properties": {},
-            }
-            properties[segment] = child
-        cursor = child
-    leaf = outcome_path[-1]
-    properties = cursor.setdefault("properties", {})
-    required = cursor.setdefault("required", [])
-    if leaf not in required:
-        required.append(leaf)
-    properties[leaf] = outcome_value_schema
-    normalized_evaluator["schemas"]["subject_result_json"] = json.dumps(
-        subject_result, sort_keys=True, separators=(",", ":")
-    )
+    # The subject-result schema and telemetry declarations describe generated
+    # executable behavior. Preserve the builder's typed values here: replacing
+    # them with a controller-invented generic shape can contradict the signed
+    # adapter interface. The complete build validator and independent setup
+    # review verify these fields against the authorized outcome and runtime.
     normalized_evaluator["setup_contract"] = {
         "environment_adapter": {
             "entrypoint": adapter["entrypoint"],
@@ -3819,6 +3857,44 @@ def build_setup_direct(
     progress: SetupProgress | None = None,
 ) -> dict[str, Any]:
     """Build disposable repositories with strictly typed task and evaluator designs."""
+    prior_review_findings = [
+        finding
+        for finding in setup.get("prior_review_findings", [])
+        if isinstance(finding, Mapping)
+    ]
+    if (
+        isinstance(setup.get("clean_review"), Mapping)
+        and setup.get("prior_build_findings")
+        and prior_review_findings
+    ):
+        # Migrate states written before a successful clean review cleared the
+        # reviewer candidates. Subsequent provisioning/conformance failures
+        # must not reopen already-resolved behavior findings.
+        setup.pop("prior_review_findings", None)
+        prior_review_findings = []
+        _save_setup(directory, setup)
+    if setup.get("state") == "REVIEW_FAILED" and any(
+        finding.get("code") == "AUTHORIZED_ENTRYPOINT_MISMATCH"
+        for finding in prior_review_findings
+    ):
+        # Migrate preserved failures produced before entrypoint/design
+        # contradictions were routed back through renewed authorization.
+        setup["state"] = "DISCOVERY_REQUIRED"
+        setup["prior_design_findings"] = [
+            (
+                f"{finding.get('code', 'REVIEW_FINDING')} "
+                f"{finding.get('message', '')}"
+            ).strip()
+            for finding in prior_review_findings
+        ]
+        setup.pop("pending_build", None)
+        setup.pop("behavior_repair_attempted_for", None)
+        setup.pop("behavior_repair_completed_for", None)
+        _save_setup(directory, setup)
+        raise StateError(
+            "static review requires a corrected environment-adapter entrypoint "
+            "and renewed setup-design authorization"
+        )
     resolved_path = directory / "setup" / "authorized-design.public.json"
     if not resolved_path.is_file():
         raise StateError("setup design must be authorized before generation")
@@ -3838,13 +3914,39 @@ def build_setup_direct(
     requirements_digest = hashlib.sha256(
         resolved_path.read_bytes() + contract_digest.encode()
     ).hexdigest()
+    previous_pending = setup.get("pending_build")
+    stale_pending_contract = (
+        isinstance(previous_pending, Mapping)
+        and previous_pending.get("requirements_sha256") != requirements_digest
+    )
+    pending_path = (
+        Path(previous_pending["output"])
+        if isinstance(previous_pending, Mapping)
+        and previous_pending.get("requirements_sha256") == requirements_digest
+        and previous_pending.get("contract_sha256", contract_digest) == contract_digest
+        and isinstance(previous_pending.get("output"), str)
+        else None
+    )
+    if (
+        setup.get("state") == "REVIEW_FAILED"
+        and prior_review_findings
+        and pending_path is not None
+        and pending_path.is_file()
+    ):
+        # Static review findings apply to this exact immutable build. Reuse it
+        # so the bounded behavior-repair stage receives those findings instead
+        # of paying for and reviewing an unrelated fresh generation.
+        return build_setup(directory, setup, offline=offline, progress=progress)
     if setup.get("prior_build_findings"):
+        repair_identity = _behavior_repair_identity(
+            requirements_digest, _repairable_review_findings(setup)
+        )
         completed_repair = (
-            setup.get("behavior_repair_completed_for") == requirements_digest
+            setup.get("behavior_repair_completed_for") == repair_identity
         )
         repair_attempts = directory / "setup" / "behavior-repair" / "attempts"
         matching_repairs: list[Path] = []
-        if repair_attempts.is_dir():
+        if completed_repair and repair_attempts.is_dir():
             for internal in reversed(
                 sorted(repair_attempts.glob("*/output/build.internal.json"))
             ):
@@ -3857,8 +3959,23 @@ def build_setup_direct(
                     continue
                 if payload.get("authorized_design") == requirements:
                     matching_repairs.append(internal)
+        conformance_repairs: list[Path] = []
+        if any(
+            isinstance(finding, str)
+            and (
+                "setup evaluator conformance checks failed:" in finding
+                or "setup protocol subject failed:" in finding
+                or "setup authorized dependency import checks failed:" in finding
+            )
+            for finding in setup.get("prior_build_findings", [])
+        ) and repair_attempts.is_dir():
+            conformance_repairs = list(
+                reversed(
+                    sorted(repair_attempts.glob("*/output/build.internal.json"))
+                )
+            )
         repair_expected = completed_repair or bool(matching_repairs)
-        candidate_outputs = matching_repairs or (
+        candidate_outputs = matching_repairs or conformance_repairs or (
             list(reversed(sorted(attempts.glob("*/output/build.internal.json"))))
             if attempts.is_dir()
             else []
@@ -3867,6 +3984,12 @@ def build_setup_direct(
             try:
                 recovered = json.loads(internal.read_text(encoding="utf-8"))
                 recovered = deepcopy(recovered)
+                # build.internal.json is the canonical assembled artifact: its
+                # authorized fields have already been restored after the raw
+                # model report was parsed.  The adjacent public report is
+                # preserved evidence and may contain a truncated model echo of
+                # a long const string, so it must not replace canonical state
+                # during controller-fix recovery.
                 recovered["task"], recovered["evaluator"] = (
                     _apply_authorized_build_fields(
                         recovered["task"], recovered["evaluator"], requirements
@@ -3874,7 +3997,13 @@ def build_setup_direct(
                 )
                 _validate_complete_build_contract(recovered, setup, directory)
                 _validate_dependency_plan(recovered["dependencies"], directory=directory)
-            except (OSError, json.JSONDecodeError, ValidationError, StateError):
+            except (
+                OSError,
+                json.JSONDecodeError,
+                JsonSchemaError,
+                ValidationError,
+                StateError,
+            ):
                 continue
             recovery = (
                 directory
@@ -3893,8 +4022,13 @@ def build_setup_direct(
                 "recovered_after_controller_fix": True,
             }
             if internal in matching_repairs:
-                setup["behavior_repair_attempted_for"] = requirements_digest
-                setup["behavior_repair_completed_for"] = requirements_digest
+                setup["behavior_repair_attempted_for"] = repair_identity
+                setup["behavior_repair_completed_for"] = repair_identity
+            elif stale_pending_contract:
+                setup.pop("behavior_repair_attempted_for", None)
+                setup.pop("behavior_repair_completed_for", None)
+                setup.pop("prior_review_findings", None)
+                setup.pop("prior_build_findings", None)
             _save_setup(directory, setup)
             if progress is not None:
                 progress({"stage": "generation", "status": "recovered"})
@@ -3923,7 +4057,9 @@ def build_setup_direct(
         "the required hooks and do not create environment or evaluator helper files. "
         "Dependencies come only from the authorized design and are not returned by "
         "the builder. Do not put source code in the response. Prefer existing project conventions and change "
-        "no confirmed decision or controller rule.\n\n"
+        "no confirmed decision or controller rule. Paired telemetry values use "
+        "{champion: finite number, candidate: finite number}; comparison telemetry values "
+        "use {value: finite number or boolean}. Never emit a bare telemetry scalar.\n\n"
         + json.dumps(
             {
                 "staging": {
@@ -3960,6 +4096,15 @@ def build_setup_direct(
     if progress is not None:
         progress({"stage": "generation", "status": "started"})
     try:
+        def normalize_report(value: dict[str, Any]) -> dict[str, Any]:
+            normalized = deepcopy(value)
+            normalized["task"], normalized["evaluator"] = (
+                _apply_authorized_build_fields(
+                    normalized["task"], normalized["evaluator"], requirements
+                )
+            )
+            return normalized
+
         report = _agent_run(
             root=attempts / f"{attempt:04d}",
             worktree=staging_root,
@@ -3969,6 +4114,7 @@ def build_setup_direct(
             writable_worktree=True,
             read_paths=(Path(setup["subject"]),),
             offline=True,
+            normalize_output=normalize_report,
         )
         try:
             staged_records = _read_direct_build_files(
@@ -4043,6 +4189,89 @@ def build_setup_direct(
     return build_setup(directory, setup, offline=offline, progress=progress)
 
 
+def _repairable_review_findings(setup: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Return review findings eligible for one bounded behavior repair."""
+    controller_verified_codes = {
+        "AUTHORIZATION_HASH_MISMATCH",
+        "MISSING_SOURCE_PROVENANCE",
+        "SOURCE_EDITABLE_OVERLAP",
+        "IMPORT_UNDECLARED_CHEX",
+        "IMPORT_UNDECLARED_JAX",
+        "VERIFICATION_COMMAND_UNREACHABLE",
+    }
+    findings: list[Mapping[str, Any]] = [
+        finding
+        for finding in setup.get("prior_review_findings", [])
+        if isinstance(finding, Mapping)
+        and finding.get("code") != "INTENT_OBJECTIVE_OUTCOME_MISMATCH"
+        and finding.get("code") not in controller_verified_codes
+    ]
+    if any(
+        isinstance(finding, str)
+        and "setup evaluator conformance checks failed: NO TESTS RAN" in finding
+        for finding in setup.get("prior_build_findings", [])
+    ):
+        findings.append(
+            {
+                "code": "EVALUATOR_TESTS_NOT_DISCOVERED",
+                "location": "evaluator/test_generated_evaluator.py",
+                "message": (
+                    "The controller-owned unittest runner discovered zero tests. "
+                    "Define regression coverage as unittest.TestCase methods and "
+                    "use only standard-library fixtures."
+                ),
+            }
+        )
+    elif any(
+        isinstance(finding, str)
+        and "setup evaluator conformance checks failed:" in finding
+        for finding in setup.get("prior_build_findings", [])
+    ):
+        findings.append(
+            {
+                "code": "EVALUATOR_TEST_FAILURE",
+                "location": "evaluator/test_generated_evaluator.py",
+                "message": (
+                    "A discoverable unittest regression failed. Inspect the preserved "
+                    "unittest traceback and correct the fixture or implementation that "
+                    "contradicts it; do not delete, skip, or weaken behavioral coverage. "
+                    "For composed multiline Python fixtures, keep indentation consistent "
+                    "before textwrap.dedent and execute the full unittest suite."
+                ),
+            }
+        )
+    if any(
+        isinstance(finding, str) and "setup protocol subject failed:" in finding
+        for finding in setup.get("prior_build_findings", [])
+    ):
+        findings.append(
+            {
+                "code": "PROTOCOL_SUBJECT_FAILED",
+                "location": "subject environment adapter",
+                "message": (
+                    "The direct-file subject adapter failed during protocol preflight. "
+                    "Direct file execution changes sys.path[0]; establish the frozen "
+                    "repository root before loading sibling environment dependencies, "
+                    "without importing the editable policy package, and preserve bounded "
+                    "adapter stderr in the subject-hook operational error."
+                ),
+            }
+        )
+    return findings
+
+
+def _behavior_repair_identity(
+    requirements_digest: str, findings: Sequence[Mapping[str, Any]]
+) -> str:
+    """Scope the one-shot repair budget to one design and exact finding set."""
+    payload = json.dumps(
+        list(findings), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return hashlib.sha256(
+        requirements_digest.encode("ascii") + b"\0" + payload.encode("utf-8")
+    ).hexdigest()
+
+
 def _targeted_behavior_repair(
     directory: Path,
     setup: dict[str, Any],
@@ -4056,26 +4285,13 @@ def _targeted_behavior_repair(
     progress: SetupProgress | None,
 ) -> dict[str, Any]:
     """Apply at most one bounded repair to cited generated behavior files."""
-    controller_verified_codes = {
-        "AUTHORIZATION_HASH_MISMATCH",
-        "MISSING_SOURCE_PROVENANCE",
-        "SOURCE_EDITABLE_OVERLAP",
-        "IMPORT_UNDECLARED_CHEX",
-        "IMPORT_UNDECLARED_JAX",
-        "VERIFICATION_COMMAND_UNREACHABLE",
-    }
-    findings = [
-        finding
-        for finding in setup.get("prior_review_findings", [])
-        if isinstance(finding, Mapping)
-        and finding.get("code") != "INTENT_OBJECTIVE_OUTCOME_MISMATCH"
-        and finding.get("code") not in controller_verified_codes
-    ]
+    findings = _repairable_review_findings(setup)
     if not findings:
         return value
-    if setup.get("behavior_repair_completed_for") == requirements_digest:
+    repair_identity = _behavior_repair_identity(requirements_digest, findings)
+    if setup.get("behavior_repair_completed_for") == repair_identity:
         return value
-    if setup.get("behavior_repair_attempted_for") == requirements_digest:
+    if setup.get("behavior_repair_attempted_for") == repair_identity:
         prior_outputs = directory / "setup" / "behavior-repair" / "attempts"
         if any(prior_outputs.glob("*/output/repair.public.json")):
             raise StateError(
@@ -4143,15 +4359,45 @@ def _targeted_behavior_repair(
         "Keep untrusted policy code in a separate seedless process whose protocol contains only "
         "current observations and legal-action masks; candidate code must not share the seeded "
         "adapter interpreter. Bound every child with a timeout and captured-output limit. "
-        "Implement the specified one-sided 95% Student-t bound for every supported trial count "
-        "without adding a dependency or using an asymptotic substitute. Update evaluator tests "
-        "to fail if any repaired guarantee regresses. The evaluator manifest in staging is the "
+        "Implement the exact authorized Student-t confidence contract for every supported "
+        "trial count, including its signed one-sided or two-sided quantile; never substitute "
+        "a different confidence convention, add a dependency, or use an asymptotic substitute. "
+        "Update evaluator tests "
+        "to fail if any repaired guarantee regresses. Tests are executed by the controller-owned "
+        "standard-library unittest discovery runner: define discoverable unittest.TestCase "
+        "methods, do not emit pytest-style free test functions, and do not use pytest fixtures "
+        "such as tmp_path. Use tempfile.TemporaryDirectory for temporary paths. The evaluator "
+        "manifest in staging is the "
         "canonical wire contract: prepare must emit exactly its public-case schema; the adapter "
         "must accept that case and emit exactly its subject-result schema; and the subject and "
         "evaluator hooks must preserve and score that shape without legacy horizon, metrics, or "
         "diagnostics fields. The adapter's JSONL contract is streaming: one process must accept "
         "at least two newline-delimited cases and emit two corresponding newline-delimited "
         "results. Add a regression test that exercises two cases through one adapter process. "
+        "Every comparison telemetry value returned by score must use the controller-owned "
+        "{value: finite number or boolean} object shape; never return a bare scalar. "
+        "When the authorized case schema includes unsigned seed zero but the inspected "
+        "environment treats zero as an unseeded reset, map zero injectively to a deterministic "
+        "nonzero engine seed outside the uint64 case domain (for example 2**64) while leaving "
+        "all nonzero uint64 seeds unchanged. Require prepare and score to consume exactly the "
+        "authorized fixed trial count, not merely a smaller statistically valid batch. For a "
+        "persistent per-episode policy worker, polling before the next write is not sufficient "
+        "to prevent delayed duplicate responses. Use a race-free turn boundary without adding "
+        "policy-visible metadata: after reading one response, stop the worker with uncatchable "
+        "SIGSTOP, wait until it is stopped, reject any response bytes buffered before the stop, "
+        "write the next observation while it remains stopped, then SIGCONT it. Treat inability "
+        "to stop, resume, or cleanly terminate the worker as an unscored operational failure. "
+        "When launching a generated adapter inside a Python package whose __init__.py imports "
+        "editable policy code, do not use python -m package.adapter in the seed-bearing process. "
+        "Launch the frozen adapter by its repository-relative file path, and have that adapter "
+        "load any sibling frozen environment module directly from its file path without importing "
+        "the policy package. Package initialization and editable policy imports are permitted only "
+        "inside the separate seedless worker. Because direct-file execution sets sys.path[0] to "
+        "the adapter directory, explicitly make the frozen repository root importable before the "
+        "directly loaded environment imports sibling top-level packages; do not accomplish this by "
+        "importing the policy package. Preserve a bounded excerpt of adapter stderr when the subject "
+        "hook reports an operational adapter failure. Add a regression test proving adapter startup and "
+        "environment loading cannot execute editable policy import-time code. "
         "Treat controller sandboxing and later candidate review as enforcement "
         "for policy prohibitions; this repair must enforce interpreter separation, a seedless "
         "protocol, and child bounds. Return only JSON.\n\n"
@@ -4182,7 +4428,7 @@ def _targeted_behavior_repair(
             read_paths=(directory / "task.draft.yaml",),
             offline=True,
         )
-        setup["behavior_repair_attempted_for"] = requirements_digest
+        setup["behavior_repair_attempted_for"] = repair_identity
         _save_setup(directory, setup)
         after = snapshot()
         changed = {
@@ -4234,7 +4480,7 @@ def _targeted_behavior_repair(
         "requirements_sha256": requirements_digest,
         "recovered_after_targeted_repair": True,
     }
-    setup["behavior_repair_completed_for"] = requirements_digest
+    setup["behavior_repair_completed_for"] = repair_identity
     _save_setup(directory, setup)
     if progress is not None:
         progress({"stage": "behavior repair", "status": "completed", "detail": "attempt 1/1"})
@@ -4617,7 +4863,11 @@ def build_setup(
         "consult superseded build-finding records. Policy prohibitions are enforced by the outer "
         "subject sandbox and later candidate review; here verify process separation, seedless "
         "policy protocol, bounds, and the inspected generated code. JSON artifacts are "
-        "serialized on one physical line, so cite them as line 1. Inspect and explicitly "
+        "serialized on one physical line, so cite them as line 1. Every evidence location "
+        "must name exactly one contiguous range using only 'line N' or 'lines N-M'; never "
+        "combine disjoint ranges in one evidence item, and verify that N and M are within "
+        "the cited file before returning the report. Use separate evidence items when a "
+        "finding needs disjoint ranges. Inspect and explicitly "
         "resolve or repeat every prior reviewer candidate; never silently drop one. Return "
         "only JSON.\n\n"
         + json.dumps(
@@ -4655,6 +4905,7 @@ def build_setup(
         environment,
         evaluator,
         directory,
+        directory / "setup",
         runtime,
     )
     review_identity = _json_sha256(
@@ -4697,18 +4948,6 @@ def build_setup(
         and isinstance(cached_review.get("output"), str)
     ):
         static_review = load_clean_review(Path(cached_review["output"]))
-    if static_review is None and command_builder is None and prior_build_findings:
-        for output in reversed(
-            sorted(review_attempts.glob("*/output/review.public.json"))
-        ):
-            static_review = load_clean_review(output)
-            if static_review is not None:
-                setup["clean_review"] = {
-                    "identity_sha256": review_identity,
-                    "output": str(output),
-                }
-                _save_setup(directory, setup)
-                break
     if progress is not None:
         progress(
             {
@@ -4782,8 +5021,30 @@ def build_setup(
         progress({"stage": "setup review", "status": "completed"})
     if static_review["findings"]:
         setup.pop("clean_review", None)
-        setup["state"] = "REVIEW_FAILED"
         setup["prior_review_findings"] = static_review["findings"]
+        finding_codes = {
+            finding.get("code")
+            for finding in static_review["findings"]
+            if isinstance(finding, Mapping)
+        }
+        if "AUTHORIZED_ENTRYPOINT_MISMATCH" in finding_codes:
+            # Runtime cannot safely conform to this stale signed entrypoint.
+            # Rediscovery preserves the old authorization and requires the
+            # corrected derived design to be explicitly authorized again.
+            setup["state"] = "DISCOVERY_REQUIRED"
+            setup["prior_design_findings"] = [
+                (
+                    f"{finding.get('code', 'REVIEW_FINDING')} "
+                    f"{finding.get('message', '')}"
+                ).strip()
+                for finding in static_review["findings"]
+                if isinstance(finding, Mapping)
+            ]
+            setup.pop("pending_build", None)
+            setup.pop("behavior_repair_attempted_for", None)
+            setup.pop("behavior_repair_completed_for", None)
+        else:
+            setup["state"] = "REVIEW_FAILED"
         _save_setup(directory, setup)
         raise StateError("generated setup failed static review before provisioning")
     if command_builder is None:
@@ -4795,7 +5056,8 @@ def build_setup(
                 "identity_sha256": review_identity,
                 "output": str(review_output),
             }
-            _save_setup(directory, setup)
+    setup.pop("prior_review_findings", None)
+    _save_setup(directory, setup)
     uv = shutil.which("uv")
     if uv is None:
         raise StateError("uv is required for Python workspace setup")
@@ -4807,6 +5069,7 @@ def build_setup(
     sync = [
         uv,
         "sync",
+        "--no-config",
         "--project",
         str(runtime),
         "--no-install-project",
@@ -4823,7 +5086,19 @@ def build_setup(
         writable_home=uv_home,
     )
     uv_environment["UV_CACHE_DIR"] = str(runtime / ".uv-cache")
-    uv_environment["UV_PROJECT_ENVIRONMENT"] = str(Path(setup["workspace"]) / ".venv")
+    workspace_environment = Path(setup["workspace"]) / ".venv"
+    uv_environment["UV_PROJECT_ENVIRONMENT"] = str(workspace_environment)
+    existing_python = workspace_environment / "bin" / "python"
+    existing_runtime_paths = (
+        tuple(
+            path
+            for path in command_runtime_read_paths((str(existing_python),))
+            if path.resolve() != workspace_environment.resolve()
+            and workspace_environment.resolve() not in path.resolve().parents
+        )
+        if existing_python.exists()
+        else ()
+    )
     if progress is not None:
         progress({"stage": "dependencies", "status": "started"})
     if command_builder is None and not offline:
@@ -4831,7 +5106,8 @@ def build_setup(
         sync_command = networked_dependency_command(
             sync,
             cwd=runtime,
-            write_paths=(runtime, Path(setup["workspace"]) / ".venv"),
+            read_paths=existing_runtime_paths,
+            write_paths=(runtime, workspace_environment),
         )
     elif command_builder is None:
         sync_command = sandbox_command(

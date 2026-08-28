@@ -12,6 +12,19 @@ Install locally:
 arctl doctor
 ```
 
+## Supported hosts
+
+Arctl supports Linux and macOS on the architectures supported by Python 3.11+
+and the installed Codex CLI. Windows and WSL are intentionally unsupported.
+The host must provide Git, `uv`, and Codex CLI. Linux online dependency
+provisioning additionally requires Bubblewrap; macOS uses its built-in Seatbelt
+sandbox and `libproc` process metadata.
+
+On macOS, run arctl from a normal Terminal, iTerm, or unsandboxed CI process.
+A parent application sandbox can prevent Codex from creating the nested
+Seatbelt profile arctl requires. `arctl doctor --json` reports this as a profile
+failure with the remediation instead of treating macOS as unsupported.
+
 Create a visible guided workspace around an existing Python repository:
 
 ```bash
@@ -40,7 +53,10 @@ independence, scoring, seeds, and runtime before package provisioning. New direc
 dependencies are shown in the authorized design; transitive dependencies inherit
 that authorization. Direct URLs, VCS/local sources, and alternate sources require
 a distinct human decision. Provisioning uses a configured package index and the
-resolved lock is bound into setup acceptance.
+resolved lock is bound into setup acceptance. Authorization is completed before
+installation, but installation is still confined: Bubblewrap provides the Linux
+online sandbox and Codex Seatbelt provides the macOS online sandbox. Offline
+provisioning uses the Codex sandbox with networking disabled on both systems.
 
 Controller conformance checks exercise seed-zero and same-reservation repeatability,
 sequential state isolation, identity scoring, evidence shape, and unscored failures.
@@ -68,6 +84,11 @@ shape. One automatic repair receives all contract findings together. A
 ceiling-sized setup batch must then pass the real
 prepare, subject, calibration, scoring, evidence, and telemetry protocol. A
 failed repair or conformance run makes the next invocation generate afresh.
+When static review proves that two authorized guarantees conflict, the next
+`setup` invocation reopens one cited human decision instead of blindly rebuilding.
+Authorizing the revised design archives the previous signed design and
+authorization pair, clears only derived build/review state, and preserves every
+failed attempt as evidence.
 The acceptance token also covers the authorization bundle, task draft, and
 owned-file list. If reviewed artifacts change, `arctl setup` records the edit,
 reruns the affected checks and setup review, and issues a new token. Acceptance
@@ -102,8 +123,10 @@ current direction refreshes the environment strategy rather than ending the
 search.
 
 Evaluation keeps experiments and the champion/candidate arms serial, while each
-arm partitions its ordered cases across at most 16 isolated subject workers.
-The controller reassembles worker results in original case order before scoring.
+arm partitions its ordered cases across isolated subject workers. Select a cap
+from 1 to 16 with `arctl run TASK --workers N`; the default is 16. The controller
+reassembles worker results in original case order before scoring, so changing the
+worker cap changes scheduling rather than the scientific comparison.
 
 Tasks may also require a pre-trial candidate review contract. Approval-locked
 deterministic checks catch obvious violations, then a fresh read-only execution
@@ -153,8 +176,14 @@ fixtures from `tests/fixtures/`. `test_tris/` is an ignored local lab and is
 not required to build, test, or install arctl.
 
 Host-sandbox boundary tests are opt-in because they require a host that can
-create a Codex sandbox:
+create a Codex sandbox. Run them from an unsandboxed host shell; the suite also
+performs a small network-enabled `uv sync` inside the dependency profile:
 
 ```bash
 ARCTL_HOST_SANDBOX_TEST=1 python -m unittest tests.test_sandbox_host -v
 ```
+
+The macOS host merge gate additionally requires `arctl doctor --json` to pass.
+If doctor reports `sandbox_apply: Operation not permitted`, leave the parent
+sandbox and rerun it from Terminal. Missing `uv`, Codex, or Bubblewrap is
+reported as a prerequisite/backend failure before setup creates a new attempt.

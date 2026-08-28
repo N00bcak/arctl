@@ -158,7 +158,9 @@ Approval is a human trust boundary. An AI operator must not confirm without expl
 ## `arctl run -h`
 
 ```text
-usage: arctl run [-h] [--json] [--max-experiments N] [--retries N] [--retry-delay SECONDS] [TASK]
+usage: arctl run [-h] [--json] [--max-experiments N] [--workers N] [--retries N]
+                 [--retry-delay SECONDS]
+                 [TASK]
 
 Resume TASK safely and run a bounded number of new experiments. Existing process records,
 comparisons, reflections, and failed candidate reviews are recovered before new work starts.
@@ -171,6 +173,7 @@ options:
   --json                 emit one stable machine-readable JSON object
   --max-experiments N    maximum experiments for this invocation; cannot exceed the approved task
                          limit
+  --workers N            isolated subject workers per arm, from 1 to 16 (default: 16)
   --retries N            additional consecutive transient attempts (default: 0)
   --retry-delay SECONDS  fixed interruptible delay between transient retries (default: 60)
 

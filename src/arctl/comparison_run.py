@@ -92,7 +92,9 @@ class ComparisonFailure(StateError):
         self.source = source
 
 
-def _load_json_object(path: Path, *, source: FailureSource, label: str) -> dict[str, Any]:
+def _load_json_object(
+    path: Path, *, source: FailureSource, label: str
+) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file():
         raise ComparisonFailure(source, f"{label} was not written to the reserved path")
     try:
@@ -211,12 +213,22 @@ def _validate_prepare_response(
         "trial_count": trial_count,
     }
     if response != expected:
-        raise ComparisonFailure("evaluator", "prepare response does not match its request")
+        raise ComparisonFailure(
+            "evaluator", "prepare response does not match its request"
+        )
 
 
-def _subject_case_shards(cases: Sequence[Any]) -> tuple[tuple[Any, ...], ...]:
-    """Partition ordered cases into at most sixteen balanced contiguous shards."""
-    worker_count = min(SUBJECT_WORKERS, len(cases))
+def _subject_case_shards(
+    cases: Sequence[Any], *, subject_workers: int = SUBJECT_WORKERS
+) -> tuple[tuple[Any, ...], ...]:
+    """Partition ordered cases into balanced contiguous worker shards."""
+    if (
+        isinstance(subject_workers, bool)
+        or not isinstance(subject_workers, int)
+        or not 1 <= subject_workers <= SUBJECT_WORKERS
+    ):
+        raise ValueError(f"subject workers must be between 1 and {SUBJECT_WORKERS}")
+    worker_count = min(subject_workers, len(cases))
     if worker_count == 0:
         return ()
     width, remainder = divmod(len(cases), worker_count)
@@ -241,6 +253,7 @@ def _run_subject_arm(
     command_builder: CommandBuilder,
     codex_home: Path,
     stop_path: Path | None,
+    subject_workers: int = SUBJECT_WORKERS,
 ) -> tuple[Path, bool]:
     """Run one arm in isolated case shards and assemble its canonical ordered output."""
     output_directory = outputs / subject
@@ -260,7 +273,7 @@ def _run_subject_arm(
             f"legacy serial {subject} process started without a recoverable output",
         )
 
-    shards = _subject_case_shards(cases)
+    shards = _subject_case_shards(cases, subject_workers=subject_workers)
 
     def run_worker(index: int, shard: tuple[Any, ...]) -> None:
         worker = f"{index:04d}"
@@ -361,6 +374,7 @@ def run_comparison(
     command_builder: CommandBuilder = _codex_command_builder,
     stop_path: Path | None = None,
     progress: ProgressCallback | None = None,
+    subject_workers: int = SUBJECT_WORKERS,
 ) -> Evidence:
     """Run or recover one immutable comparison without redrawing any process."""
     expected_commands = {
@@ -369,9 +383,13 @@ def run_comparison(
         "score": manifest.score_command,
     }
     if dict(reservation.commands) != expected_commands:
-        raise ComparisonFailure("evidence", "reserved commands differ from the manifest")
+        raise ComparisonFailure(
+            "evidence", "reserved commands differ from the manifest"
+        )
     if manifest_hash != reservation.manifest:
-        raise ComparisonFailure("evidence", "manifest hash differs from the reservation")
+        raise ComparisonFailure(
+            "evidence", "manifest hash differs from the reservation"
+        )
     for source, checkout, revision in (
         ("evaluator", evaluator_directory, reservation.evaluator),
         ("champion", champion_directory, reservation.champion),
@@ -386,7 +404,9 @@ def run_comparison(
                 f"{source} checkout is not a clean Git revision",
             ) from error
         if actual != revision:
-            raise ComparisonFailure(source, f"{source} checkout differs from the reservation")
+            raise ComparisonFailure(
+                source, f"{source} checkout differs from the reservation"
+            )
 
     evidence_path = directory / "evidence.private.json"
     if evidence_path.exists():
@@ -397,7 +417,9 @@ def run_comparison(
             status="recovered",
             trial_count=reservation.trial_count,
         )
-        raw = _load_json_object(evidence_path, source="evidence", label="saved evidence")
+        raw = _load_json_object(
+            evidence_path, source="evidence", label="saved evidence"
+        )
         try:
             return Evidence.from_mapping(
                 raw,
@@ -505,7 +527,7 @@ def run_comparison(
             batch=subject_index,
             batches=2,
             trial_count=reservation.trial_count,
-            workers=min(SUBJECT_WORKERS, reservation.trial_count),
+            workers=min(subject_workers, reservation.trial_count),
         )
         output, subject_recovered = _run_subject_arm(
             directory,
@@ -518,6 +540,7 @@ def run_comparison(
             command_builder=command_builder,
             codex_home=codex_home,
             stop_path=stop_path,
+            subject_workers=subject_workers,
         )
         _notify(
             progress,
@@ -527,7 +550,7 @@ def run_comparison(
             batch=subject_index,
             batches=2,
             trial_count=reservation.trial_count,
-            workers=min(SUBJECT_WORKERS, reservation.trial_count),
+            workers=min(subject_workers, reservation.trial_count),
         )
         subject_outputs[subject] = output
 

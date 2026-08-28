@@ -84,7 +84,11 @@ class CliTests(unittest.TestCase):
             "trial": {
                 "unit": "one map",
                 "termination": "map completion",
-                "horizon": {"limit": 1000, "unit": "actions", "case_field": "max_actions"},
+                "horizon": {
+                    "limit": 1000,
+                    "unit": "actions",
+                    "case_field": "max_actions",
+                },
                 "seed_handling": "seed initializes the map",
             },
             "derived_setup": {
@@ -112,11 +116,21 @@ class CliTests(unittest.TestCase):
         }
         summary = _design_summary(design)
         for expected in (
-            "Keep evaluation fixed.", "env.py", "Use the public adapter.",
-            "read score from each result", "metrics.score", "max_actions",
-            "seed initializes the map", "Do not edit dynamics.",
-            "60 seconds per process", "Labels are exchangeable.", "numpy",
-            "Setup item", "Authorized value", "Policy boundary", "Authorization",
+            "Keep evaluation fixed.",
+            "env.py",
+            "Use the public adapter.",
+            "read score from each result",
+            "metrics.score",
+            "max_actions",
+            "seed initializes the map",
+            "Do not edit dynamics.",
+            "60 seconds per process",
+            "Labels are exchangeable.",
+            "numpy",
+            "Setup item",
+            "Authorized value",
+            "Policy boundary",
+            "Authorization",
         ):
             self.assertIn(expected, summary)
         self.assertTrue(summary.startswith("┌"))
@@ -149,7 +163,7 @@ class CliTests(unittest.TestCase):
             )
             task = root / "data" / "tasks" / "subject" / "task.yaml"
             task_text = task.read_text()
-            self.assertIn(f'repo: "{repo}"', task_text)
+            self.assertIn(f'repo: "{repo.resolve()}"', task_text)
             self.assertIn("schema_version: 4", task_text)
             self.assertIn("codebases:", task_text)
             self.assertIn("profile: serial-v1", task_text)
@@ -236,7 +250,15 @@ class CliTests(unittest.TestCase):
                 ).stdout.strip(),
             )
             configured = subprocess.run(
-                ["git", "-C", str(repo), "config", "--local", "--get", "arctl.dataRoot"],
+                [
+                    "git",
+                    "-C",
+                    str(repo),
+                    "config",
+                    "--local",
+                    "--get",
+                    "arctl.dataRoot",
+                ],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -252,6 +274,31 @@ class CliTests(unittest.TestCase):
         self.assertIn(code, (0, 1))
         next_lines = [line for line in output.splitlines() if line.startswith("Next: ")]
         self.assertEqual(next_lines, [])
+
+    def test_doctor_json_exposes_versioned_runtime_and_diagnostics(self) -> None:
+        report = {
+            "schema_version": 2,
+            "runtime": {
+                "system": "Darwin",
+                "architecture": "arm64",
+                "process_backend": "libproc",
+                "sandbox_backend": "seatbelt",
+            },
+            "checks": {"supported_platform": True, "subject_profile": False},
+            "diagnostics": {"subject_profile": "nested Seatbelt is unavailable"},
+        }
+        with mock.patch("arctl.doctor.run_doctor", return_value=report):
+            code, output = self.run_cli(["doctor", "--json"])
+
+        payload = json.loads(output)
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["runtime"], report["runtime"])
+        self.assertEqual(payload["checks"], report["checks"])
+        self.assertEqual(payload["diagnostics"], report["diagnostics"])
+        self.assertEqual(payload["allowed_actions"], ["doctor"])
+        self.assertEqual(payload["next_command"], "arctl doctor --json")
+        self.assertFalse(payload["can_continue"])
 
     def test_root_help_is_exhaustive_and_cli_reference_is_in_sync(self) -> None:
         help_text = build_parser().format_help()
@@ -404,7 +451,9 @@ class CliTests(unittest.TestCase):
             _emit(payload, as_json=False)
         self.assertIn("│ Experiment limit │ Unlimited", unlimited.getvalue())
 
-    def test_report_table_prints_dossier_root_once_and_preserves_exact_json(self) -> None:
+    def test_report_table_prints_dossier_root_once_and_preserves_exact_json(
+        self,
+    ) -> None:
         root = "/tmp/" + "long-root/" * 10 + "reports/experiments"
         result = {
             "experiment_id": 12,
@@ -527,6 +576,7 @@ class CliTests(unittest.TestCase):
                     1,
                     retries=1,
                     retry_delay=0,
+                    workers=8,
                     preflight=False,
                 )
 
@@ -537,8 +587,14 @@ class CliTests(unittest.TestCase):
                 [call.kwargs["max_experiments"] for call in run.call_args_list],
                 [1, 1],
             )
+            self.assertEqual(
+                [call.kwargs["subject_workers"] for call in run.call_args_list],
+                [8, 8],
+            )
 
-    def test_stop_during_search_does_not_claim_zero_experiments_after_prior_work(self) -> None:
+    def test_stop_during_search_does_not_claim_zero_experiments_after_prior_work(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             task_directory = root / "tasks" / "demo"
@@ -995,9 +1051,7 @@ class CliTests(unittest.TestCase):
             repo.mkdir()
             self.initialize_repo(repo)
             data = root / "data"
-            self.run_cli(
-                ["--data", str(data), "task", "create", str(repo), "--json"]
-            )
+            self.run_cli(["--data", str(data), "task", "create", str(repo), "--json"])
             recovered = {
                 "schema_version": 1,
                 "success": True,
@@ -1025,9 +1079,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(json.loads(output)["state"], "STOPPED")
             self.assertEqual(run.call_count, 2)
             self.assertIsNone(run.call_args_list[0].kwargs["progress"])
-            self.assertTrue(
-                (data / "tasks" / "subject" / "stop.requested").is_file()
-            )
+            self.assertTrue((data / "tasks" / "subject" / "stop.requested").is_file())
 
     def test_inspect_infers_task_when_only_experiment_id_is_given(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1036,9 +1088,7 @@ class CliTests(unittest.TestCase):
             repo.mkdir()
             self.initialize_repo(repo)
             data = root / "data"
-            self.run_cli(
-                ["--data", str(data), "task", "create", str(repo), "--json"]
-            )
+            self.run_cli(["--data", str(data), "task", "create", str(repo), "--json"])
             start_experiment(data / "tasks" / "subject", "a" * 40)
 
             with contextlib.chdir(repo):
@@ -1058,13 +1108,21 @@ class CliTests(unittest.TestCase):
             repo.mkdir()
             self.initialize_repo(repo)
             data = root / "data"
-            self.run_cli(
-                ["--data", str(data), "task", "create", str(repo), "--json"]
-            )
+            self.run_cli(["--data", str(data), "task", "create", str(repo), "--json"])
             with (
                 mock.patch(
                     "arctl.doctor.run_doctor",
-                    return_value={"subject_profile": False},
+                    return_value={
+                        "schema_version": 2,
+                        "runtime": {
+                            "system": "Darwin",
+                            "architecture": "arm64",
+                            "process_backend": "libproc",
+                            "sandbox_backend": "seatbelt",
+                        },
+                        "checks": {"subject_profile": False},
+                        "diagnostics": {"subject_profile": "unavailable"},
+                    },
                 ),
                 mock.patch("arctl.runner.run_task") as run,
             ):
@@ -1075,3 +1133,33 @@ class CliTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("preflight failed", json.loads(output)["message"])
             run.assert_not_called()
+
+    def test_setup_preflight_failure_does_not_create_setup_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            data = Path(temporary) / "data"
+            report = {
+                "schema_version": 2,
+                "runtime": {
+                    "system": "Darwin",
+                    "architecture": "arm64",
+                    "process_backend": "libproc",
+                    "sandbox_backend": "seatbelt",
+                },
+                "checks": {"subject_profile": False},
+                "diagnostics": {
+                    "subject_profile": "run from a normal unsandboxed Terminal"
+                },
+            }
+            with mock.patch("arctl.doctor.run_doctor", return_value=report):
+                code, output = self.run_cli(
+                    ["--data", str(data), "setup", "demo", "--json"]
+                )
+
+            payload = json.loads(output)
+            self.assertEqual(code, 1)
+            self.assertEqual(payload["state"], "PREFLIGHT_FAILED")
+            self.assertEqual(payload["allowed_actions"], ["doctor"])
+            self.assertFalse(payload["can_continue"])
+            self.assertIn(" doctor --json", payload["next_command"])
+            self.assertEqual(payload["preflight"], report)
+            self.assertFalse(data.exists())

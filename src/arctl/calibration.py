@@ -180,7 +180,9 @@ def _run_pilot_process(
             stop_path=stop_path,
         )
     except (ProcessError, StateError) as error:
-        raise StateError(f"calibration {source} failed and cannot be retried") from error
+        raise StateError(
+            f"calibration {source} failed and cannot be retried"
+        ) from error
     if result["return_code"] != 0:
         if not execution_marker.is_file():
             raise StateError(
@@ -225,10 +227,10 @@ def _pilot_selection(
     values: list[float] = []
     counts: list[int] = []
     for assessment in assessments:
-        if (
-            not isinstance(assessment, dict)
-            or set(assessment) != {"trial_count", "diagnostic_value"}
-        ):
+        if not isinstance(assessment, dict) or set(assessment) != {
+            "trial_count",
+            "diagnostic_value",
+        }:
             raise StateError(
                 "calibration response violates the controller-pilot contract"
             )
@@ -252,11 +254,7 @@ def _pilot_selection(
         raise StateError("controller-pilot calibration has no approved maximum")
     passes = [value <= maximum for value in values]
     selected_index = next(
-        (
-            index
-            for index in range(len(passes))
-            if all(passes[index:])
-        ),
+        (index for index in range(len(passes)) if all(passes[index:])),
         len(passes) - 1,
     )
     criterion_met = passes[-1]
@@ -283,6 +281,7 @@ def _calibrate_controller_pilot(
     stop_path: Path,
     command_builder: CalibrationCommandBuilder,
     progress: CalibrationProgress | None,
+    subject_workers: int,
 ) -> int:
     calibration = manifest.calibration
     if (
@@ -466,7 +465,7 @@ def _calibrate_controller_pilot(
         "champion_pilot",
         "started",
         trial_count=calibration.ceiling,
-        workers=min(SUBJECT_WORKERS, calibration.ceiling),
+        workers=min(subject_workers, calibration.ceiling),
     )
     try:
         subject_result, _ = _run_subject_arm(
@@ -480,15 +479,18 @@ def _calibrate_controller_pilot(
             command_builder=command_builder,
             codex_home=codex_home,
             stop_path=stop_path,
+            subject_workers=subject_workers,
         )
     except StateError as error:
-        raise StateError("calibration champion pilot failed and cannot be retried") from error
+        raise StateError(
+            "calibration champion pilot failed and cannot be retried"
+        ) from error
     _notify(
         progress,
         "champion_pilot",
         "complete",
         trial_count=calibration.ceiling,
-        workers=min(SUBJECT_WORKERS, calibration.ceiling),
+        workers=min(subject_workers, calibration.ceiling),
     )
 
     assessment_request = requests / "calibrate.json"
@@ -572,6 +574,7 @@ def calibrate_trial_count(
     stop_path: Path,
     command_builder: CalibrationCommandBuilder = _sandboxed,
     progress: CalibrationProgress | None = None,
+    subject_workers: int = SUBJECT_WORKERS,
 ) -> int:
     """Run or recover the approved calibration exactly once."""
     if task.trials != "auto":
@@ -583,7 +586,8 @@ def calibrate_trial_count(
         raise StateError("approved evaluator does not support automatic calibration")
     if (
         resolve_commit(evaluator_directory, "HEAD") != evaluator_commit
-        or resolve_commit(task.evaluator.repo, task.evaluator.commit) != evaluator_commit
+        or resolve_commit(task.evaluator.repo, task.evaluator.commit)
+        != evaluator_commit
     ):
         raise StateError("calibration evaluator differs from the approved commit")
     ensure_clean_worktree(evaluator_directory)
@@ -602,6 +606,7 @@ def calibrate_trial_count(
             stop_path=stop_path,
             command_builder=command_builder,
             progress=progress,
+            subject_workers=subject_workers,
         )
     champion = resolve_commit(task.repo, approved_champion)
 
@@ -728,7 +733,9 @@ def calibrate_trial_count(
             stop_path=stop_path,
         )
     except (ProcessError, StateError) as error:
-        raise StateError("automatic calibration failed and cannot be retried") from error
+        raise StateError(
+            "automatic calibration failed and cannot be retried"
+        ) from error
     if result["return_code"] != 0:
         detail = primary_process_error(root / "process")
         raise StateError(

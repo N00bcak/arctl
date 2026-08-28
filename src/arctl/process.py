@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import shutil
 import signal
 import selectors
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .errors import ProcessError, StateError, StoppedError
+from .platform_process import inspect_process
 from .storage import atomic_write_json
 
 _GATED_EXEC = """\
@@ -32,15 +34,6 @@ os.execvp(sys.argv[2], sys.argv[2:])
 """
 
 
-def _process_start_time(pid: int) -> int:
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-        fields = stat[stat.rfind(")") + 2 :].split()
-        return int(fields[19])
-    except (OSError, ValueError, IndexError) as error:
-        raise ProcessError("could not identify managed process") from error
-
-
 def _kill_recorded_process(directory: Path) -> None:
     path = directory / "process.json"
     if not path.exists():
@@ -49,35 +42,56 @@ def _kill_recorded_process(directory: Path) -> None:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise StateError("managed process identity is invalid") from error
-    if (
-        not isinstance(value, dict)
-        or set(value) != {"schema_version", "pid", "start_time"}
-        or value["schema_version"] != 1
-        or isinstance(value["pid"], bool)
-        or not isinstance(value["pid"], int)
-        or value["pid"] <= 0
-        or isinstance(value["start_time"], bool)
-        or not isinstance(value["start_time"], int)
-        or value["start_time"] <= 0
+    legacy_fields = {"schema_version", "pid", "start_time"}
+    current_fields = legacy_fields | {"platform", "pgid"}
+    if not isinstance(value, dict) or value.get("schema_version") not in {1, 2}:
+        raise StateError("managed process identity is invalid")
+    version = value["schema_version"]
+    if set(value) != (legacy_fields if version == 1 else current_fields):
+        raise StateError("managed process identity is invalid")
+    integer_fields = ("pid", "start_time") if version == 1 else (
+        "pid",
+        "pgid",
+        "start_time",
+    )
+    if any(
+        isinstance(value[field], bool)
+        or not isinstance(value[field], int)
+        or value[field] <= 0
+        for field in integer_fields
     ):
         raise StateError("managed process identity is invalid")
+    if version == 2 and value["platform"] not in {"Linux", "Darwin"}:
+        raise StateError("managed process identity is invalid")
+    if version == 1 and platform.system() != "Linux":
+        raise StateError("managed process identity schema 1 is supported only on Linux")
     pid = value["pid"]
-    try:
-        current_start = _process_start_time(pid)
-    except ProcessError:
+    current = inspect_process(pid)
+    if current is None or not current.alive:
         return
-    if current_start != value["start_time"]:
+    if version == 1:
+        recorded_pgid = pid
+    else:
+        if current.platform != value["platform"]:
+            return
+        recorded_pgid = value["pgid"]
+    if (
+        current.start_time != value["start_time"]
+        or current.pgid != recorded_pgid
+    ):
         return
     try:
-        os.killpg(pid, signal.SIGKILL)
+        os.killpg(recorded_pgid, signal.SIGKILL)
     except ProcessLookupError:
         return
     deadline = time.monotonic() + 1
     while time.monotonic() < deadline:
-        try:
-            if _process_start_time(pid) != current_start:
-                return
-        except ProcessError:
+        observed = inspect_process(pid)
+        if (
+            observed is None
+            or not observed.alive
+            or observed.start_time != current.start_time
+        ):
             return
         time.sleep(0.01)
 
@@ -161,12 +175,17 @@ def run_once(
             )
             os.close(gate_read)
             gate_read = None
+            identity = inspect_process(process.pid)
+            if identity is None or not identity.alive:
+                raise ProcessError("could not identify managed process")
             atomic_write_json(
                 directory / "process.json",
                 {
-                    "schema_version": 1,
-                    "pid": process.pid,
-                    "start_time": _process_start_time(process.pid),
+                    "schema_version": 2,
+                    "platform": identity.platform,
+                    "pid": identity.pid,
+                    "pgid": identity.pgid,
+                    "start_time": identity.start_time,
                 },
             )
             os.write(gate_write, b"1")

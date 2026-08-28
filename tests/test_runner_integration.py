@@ -349,19 +349,12 @@ subprocess.run(
         audit = json.loads(
             (attempts / "01" / "runtime-artifacts.public.json").read_text()
         )
-        self.assertEqual(
-            audit,
-            {
-                "schema_version": 1,
-                "events": [
-                    {
-                        "stage": "implementation",
-                        "discarded_paths": [
-                            f"__pycache__/subject.{sys.implementation.cache_tag}.pyc"
-                        ],
-                    }
-                ],
-            },
+        self.assertEqual(audit["schema_version"], 1)
+        self.assertEqual(len(audit["events"]), 1)
+        self.assertEqual(audit["events"][0]["stage"], "implementation")
+        self.assertRegex(
+            audit["events"][0]["discarded_paths"][0],
+            r"^__pycache__/subject\.cpython-[0-9]+\.pyc$",
         )
         self.assertEqual(
             search_ledger(

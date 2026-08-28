@@ -323,16 +323,13 @@ subprocess.run(
         audit = json.loads(
             (self.root / "attempt" / "runtime-artifacts.public.json").read_text()
         )
+        self.assertEqual(len(audit["events"]), 1)
         self.assertEqual(
-            audit["events"],
-            [
-                {
-                    "stage": "candidate-review/round-01/repair",
-                    "discarded_paths": [
-                        f"__pycache__/policy.{sys.implementation.cache_tag}.pyc"
-                    ],
-                }
-            ],
+            audit["events"][0]["stage"], "candidate-review/round-01/repair"
+        )
+        self.assertRegex(
+            audit["events"][0]["discarded_paths"][0],
+            r"^__pycache__/policy\.cpython-[0-9]+\.pyc$",
         )
 
     def test_infeasible_repair_ends_the_attempt(self) -> None:

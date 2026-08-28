@@ -29,7 +29,11 @@ from arctl.setup import (
     setup_presentation,
     brief_changed,
     _build_semantic_findings,
+    _behavior_repair_identity,
+    _normalize_entrypoint_design_revision,
     _agent_failure_detail,
+    _agent_run,
+    _apply_authorized_build_fields,
     _upgrade_build_v3,
     _validate_authorized_design_match,
     _validate_build_contract,
@@ -66,6 +70,52 @@ def output_builder(name: str, value: dict):
 
 
 class GuidedSetupTests(unittest.TestCase):
+    def test_behavior_repair_budget_is_scoped_to_exact_findings(self) -> None:
+        first = _behavior_repair_identity(
+            "design-digest", [{"code": "FIRST", "message": "first defect"}]
+        )
+        repeated = _behavior_repair_identity(
+            "design-digest", [{"message": "first defect", "code": "FIRST"}]
+        )
+        second = _behavior_repair_identity(
+            "design-digest", [{"code": "SECOND", "message": "new defect"}]
+        )
+
+        self.assertEqual(first, repeated)
+        self.assertNotEqual(first, second)
+
+    def test_agent_output_is_normalized_before_strict_schema_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            worktree = root / "worktree"
+            worktree.mkdir()
+            schema = {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["locked"],
+                "properties": {
+                    "locked": {"type": "string", "const": "authorized value"}
+                },
+            }
+
+            result = _agent_run(
+                root=root / "attempt",
+                worktree=worktree,
+                schema_value=schema,
+                output_name="report.json",
+                prompt="fixture",
+                writable_worktree=False,
+                command_builder=output_builder(
+                    "report.json", {"locked": "truncated"}
+                ),
+                normalize_output=lambda value: {
+                    **value,
+                    "locked": "authorized value",
+                },
+            )
+
+            self.assertEqual(result, {"locked": "authorized value"})
+
     def test_legacy_authorized_adapter_note_is_not_part_of_source_path(self) -> None:
         self.assertEqual(
             _authorized_adapter_source_path(
@@ -83,6 +133,40 @@ class GuidedSetupTests(unittest.TestCase):
             "nested/adapter.py",
         )
 
+    def test_entrypoint_design_revision_preserves_every_other_authorized_field(self) -> None:
+        authorized_path = self.directory / "setup" / "authorized-design.public.json"
+        authorized = json.loads(authorized_path.read_text())
+        proposal = json.loads(json.dumps(authorized))
+        proposal["summary"] = "Unrelated churn."
+        proposal["outcome"]["statistic"] = "Changed statistic."
+        batch = {
+            "schema_version": 1,
+            "revision": 1,
+            "summary": "Generated revision.",
+            "questions": [],
+            "design": proposal,
+        }
+        self.record["prior_design_findings"] = [
+            "AUTHORIZED_ENTRYPOINT_MISMATCH module execution imports editable code"
+        ]
+
+        normalized = _normalize_entrypoint_design_revision(
+            self.directory, self.record, batch
+        )
+
+        expected = json.loads(json.dumps(authorized))
+        for controller_field in (
+            "schema_version",
+            "revision",
+            "decision_revision",
+            "source_provenance",
+            "controller_contract",
+            "dependency_source_policy",
+        ):
+            expected.pop(controller_field, None)
+        expected["environment_adapter"]["entrypoint"] = "python README.md"
+        self.assertEqual(normalized["design"], expected)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -94,6 +178,7 @@ class GuidedSetupTests(unittest.TestCase):
         (self.source / "README.md").write_text("# Demo policy\n")
         git(self.source, "add", ".")
         git(self.source, "commit", "-qm", "baseline")
+        self.initial_branch = git(self.source, "branch", "--show-current")
         self.workspace = self.root / "demo-research"
         self.data = self.workspace / ".arctl-data"
         initialize_setup(
@@ -417,7 +502,9 @@ class GuidedSetupTests(unittest.TestCase):
             progress=lambda event: events.append(dict(event)),
         )
         self.assertEqual(readiness["review"], "ready")
-        self.assertEqual(git(self.subject, "branch", "--show-current"), "master")
+        self.assertEqual(
+            git(self.subject, "branch", "--show-current"), self.initial_branch
+        )
         _, record = load_setup(self.data, "demo")
         task = accept_setup(self.directory, record, readiness["acceptance_token"])
         self.assertEqual(task.schema_version, 5)
@@ -675,7 +762,9 @@ class GuidedSetupTests(unittest.TestCase):
         _, record = load_setup(self.data, "demo")
         with self.assertRaisesRegex(StateError, "authorized setup design changed"):
             accept_setup(self.directory, record, readiness["acceptance_token"])
-        self.assertEqual(git(self.subject, "branch", "--show-current"), "master")
+        self.assertEqual(
+            git(self.subject, "branch", "--show-current"), self.initial_branch
+        )
 
     def test_acceptance_bundle_rejects_coordinated_authorization_edits(self) -> None:
         readiness = self.ready_setup()
@@ -877,6 +966,52 @@ class GuidedSetupTests(unittest.TestCase):
         attempts = self.directory / "setup" / "review" / "attempts"
         self.assertEqual(
             sorted(path.name for path in attempts.iterdir()), ["0001", "0002"]
+        )
+
+    def test_entrypoint_mismatch_requires_a_new_authorized_design(self) -> None:
+        discover_setup(
+            self.directory,
+            self.record,
+            command_builder=output_builder("discovery.public.json", self.discovery()),
+        )
+        _, record = load_setup(self.data, "demo")
+        save_answers(
+            self.directory,
+            record,
+            {identifier: f"answer {identifier}" for identifier in QUESTION_IDS},
+        )
+        _, record = load_setup(self.data, "demo")
+
+        with self.assertRaisesRegex(StateError, "before provisioning"):
+            build_setup(
+                self.directory,
+                record,
+                offline=False,
+                command_builder=output_builder(
+                    "build.public.json", self.build_value()
+                ),
+                review_command_builder=output_builder(
+                    "review.public.json",
+                    {
+                        "schema_version": 1,
+                        "summary": "The signed entrypoint is stale.",
+                        "findings": [
+                            {
+                                "code": "AUTHORIZED_ENTRYPOINT_MISMATCH",
+                                "location": "authorized-design.public.json: line 1",
+                                "message": "Runtime uses a safer direct-file entrypoint.",
+                            }
+                        ],
+                    },
+                ),
+            )
+
+        _, record = load_setup(self.data, "demo")
+        self.assertEqual(record["state"], "DISCOVERY_REQUIRED")
+        self.assertNotIn("pending_build", record)
+        self.assertIn(
+            "AUTHORIZED_ENTRYPOINT_MISMATCH",
+            " ".join(record["prior_design_findings"]),
         )
 
     def test_invalid_contract_is_repaired_once_before_dependencies(self) -> None:
@@ -1140,7 +1275,7 @@ class GuidedSetupTests(unittest.TestCase):
             {"kind": "module", "target": "unittest", "arguments": ["-q"]},
         )
         task, _, _ = _validate_build_contract(upgraded, self.record)
-        expected_python = str(self.workspace / ".venv" / "bin" / "python")
+        expected_python = str((self.workspace / ".venv" / "bin" / "python").resolve())
         self.assertEqual(task["public_checks"][0][0], expected_python)
         self.assertEqual(task["public_probe"]["command"][0], expected_python)
 
@@ -1166,6 +1301,71 @@ class GuidedSetupTests(unittest.TestCase):
         serialized = json.dumps(task, sort_keys=True)
         self.assertIn("SETUP_SUBJECT_COMMIT", serialized)
         self.assertNotIn("SETUP_ENVIRONMENT_COMMIT", serialized)
+
+    def test_authorized_fields_remove_probe_references_to_editable_codebases(self) -> None:
+        value = self.build_value()
+        requirements = json.loads(
+            (self.directory / "setup" / "authorized-design.public.json").read_text()
+        )
+        requirements["policy"]["editable_paths"] = [
+            {"pattern": "solution/policy.py", "origin": "generated"}
+        ]
+        environment = value["task"]["environment"]
+        retained_id = environment["codebases"][0]["id"]
+        environment["codebases"].append(
+            {
+                "id": "editable-policy",
+                "description": "Editable policy only.",
+                "owner": "subject",
+                "include": ["solution/policy.py"],
+            }
+        )
+        environment["probes"] = [
+            {
+                "id": "mixed",
+                "description": "Mixed evidence.",
+                "execution": {
+                    "kind": "module",
+                    "target": "pytest",
+                    "arguments": [],
+                },
+                "backed_by": ["editable-policy", retained_id],
+            },
+            {
+                "id": "editable-only",
+                "description": "Not fixed environment evidence.",
+                "execution": {
+                    "kind": "module",
+                    "target": "pytest",
+                    "arguments": [],
+                },
+                "backed_by": ["editable-policy"],
+            },
+        ]
+
+        task, _ = _apply_authorized_build_fields(
+            value["task"], value["evaluator"], requirements
+        )
+
+        self.assertNotIn(
+            "editable-policy",
+            {source["id"] for source in task["environment"]["codebases"]},
+        )
+        self.assertEqual(
+            task["environment"]["probes"],
+            [
+                {
+                    "id": "mixed",
+                    "description": "Mixed evidence.",
+                    "execution": {
+                        "kind": "module",
+                        "target": "pytest",
+                        "arguments": [],
+                    },
+                    "backed_by": [retained_id],
+                }
+            ],
+        )
 
     def test_protocol_preflight_failure_forces_fresh_generation(self) -> None:
         discover_setup(

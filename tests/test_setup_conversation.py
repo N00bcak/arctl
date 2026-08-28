@@ -103,7 +103,10 @@ class SetupConversationTests(unittest.TestCase):
     def question_batch(self, revision: int = 1) -> dict:
         questions = []
         for identifier in ("objective", "outcome", "policy_boundary"):
-            options = [self.option(f"{identifier}_a", "First"), self.option(f"{identifier}_b", "Second")]
+            options = [
+                self.option(f"{identifier}_a", "First"),
+                self.option(f"{identifier}_b", "Second"),
+            ]
             questions.append(
                 {
                     "id": identifier,
@@ -136,34 +139,55 @@ class SetupConversationTests(unittest.TestCase):
             "design": {
                 "summary": "Optimize the selected outcome within the selected boundary.",
                 "objective": {
-                    "value": "Improve the demo policy.", "source": "human",
-                    "decision_refs": ["objective"], "citations": [],
+                    "value": "Improve the demo policy.",
+                    "source": "human",
+                    "decision_refs": ["objective"],
+                    "citations": [],
                 },
                 "policy": {
-                    "editable_paths": [{"pattern": "solution/**", "origin": "generated"}],
-                    "rationale": "Keep environment dynamics fixed.", "source": "human",
-                    "decision_refs": ["policy_boundary"], "citations": [],
+                    "editable_paths": [
+                        {"pattern": "solution/**", "origin": "generated"}
+                    ],
+                    "rationale": "Keep environment dynamics fixed.",
+                    "source": "human",
+                    "decision_refs": ["policy_boundary"],
+                    "citations": [],
                 },
                 "environment_adapter": {
-                    "owner": "subject", "source_path": "README.md",
-                    "entrypoint": "demo:Environment", "interface": "Python callable",
-                    "rationale": "Use the documented interface.", **provenance,
+                    "owner": "subject",
+                    "source_path": "README.md",
+                    "entrypoint": "demo:Environment",
+                    "interface": "Python callable",
+                    "rationale": "Use the documented interface.",
+                    **provenance,
                 },
                 "outcome": {
-                    "statistic": "expected score", "direction": "higher", "unit": "score",
-                    "aggregation": "paired mean", "extraction": "subject result score",
+                    "statistic": "expected score",
+                    "direction": "higher",
+                    "unit": "score",
+                    "aggregation": "paired mean",
+                    "extraction": "subject result score",
                     "result_path": ["score"],
-                    "source": "human", "decision_refs": ["outcome"], "citations": [],
+                    "source": "human",
+                    "decision_refs": ["outcome"],
+                    "citations": [],
                 },
                 "trial": {
-                    "unit": "one generated map", "termination": "map completion",
-                    "horizon": {"unit": "actions", "limit": 1000, "case_field": "max_actions"},
-                    "seed_handling": "seed initializes the map generator", **provenance,
+                    "unit": "one generated map",
+                    "termination": "map completion",
+                    "horizon": {
+                        "unit": "actions",
+                        "limit": 1000,
+                        "case_field": "max_actions",
+                    },
+                    "seed_handling": "seed initializes the map generator",
+                    **provenance,
                 },
                 "derived_setup": {
                     "hard_rules": ["Do not edit environment dynamics."],
                     "hidden_data": "Seeds and scoring remain evaluator-private.",
-                    "telemetry": [], "runtime_limits": ["60 seconds per process"],
+                    "telemetry": [],
+                    "runtime_limits": ["60 seconds per process"],
                     "evaluator_pattern": "paired comparison",
                 },
                 "conformance": {
@@ -263,10 +287,13 @@ class SetupConversationTests(unittest.TestCase):
                 acceptance=None,
                 design_authorization=None,
                 interactive=False,
+                preflight=False,
             )
         self.assertEqual(setup_path.read_bytes(), before)
 
-    def test_answers_replace_each_decision_and_reject_stale_or_partial_batches(self) -> None:
+    def test_answers_replace_each_decision_and_reject_stale_or_partial_batches(
+        self,
+    ) -> None:
         batch = validate_batch(self.question_batch(), subject=self.subject, revision=1)
         save_batch(self.directory, batch)
         submission = {
@@ -278,7 +305,10 @@ class SetupConversationTests(unittest.TestCase):
             },
         }
         answer_batch(self.directory, self.record, submission)
-        decisions = {item["id"]: item["answer"] for item in load_decisions(self.directory)["decisions"]}
+        decisions = {
+            item["id"]: item["answer"]
+            for item in load_decisions(self.directory)["decisions"]
+        }
         self.assertEqual(decisions["objective"], "First")
         self.assertEqual(decisions["outcome"], "Maximize cleared lines.")
         self.assertNotIn("Human clarification", json.dumps(decisions))
@@ -291,7 +321,9 @@ class SetupConversationTests(unittest.TestCase):
                 {"revision": 1, "answers": {"objective": "objective_a"}},
             )
 
-    def test_complete_design_requires_human_owned_core_and_authorizes_by_hash(self) -> None:
+    def test_complete_design_requires_human_owned_core_and_authorizes_by_hash(
+        self,
+    ) -> None:
         batch = validate_batch(self.question_batch(), subject=self.subject, revision=1)
         save_batch(self.directory, batch)
         answer_batch(
@@ -318,7 +350,9 @@ class SetupConversationTests(unittest.TestCase):
         authorize_design(self.directory, record, token)
         _, record = load_setup(self.data, "demo")
         self.assertEqual(record["state"], "BUILD_REQUIRED")
-        resolved = json.loads((self.directory / "setup" / "authorized-design.public.json").read_text())
+        resolved = json.loads(
+            (self.directory / "setup" / "authorized-design.public.json").read_text()
+        )
         self.assertEqual(resolved["schema_version"], 3)
         note = render_setup_note(self.directory, record)
         self.assertIn("## Confirmed choices", note.read_text())
@@ -342,7 +376,9 @@ class SetupConversationTests(unittest.TestCase):
             },
         )
         _, record = load_setup(self.data, "demo")
-        design_batch = validate_batch(self.design_batch(), subject=self.subject, revision=2)
+        design_batch = validate_batch(
+            self.design_batch(), subject=self.subject, revision=2
+        )
         token = finalize_design(
             self.directory,
             record,
@@ -359,7 +395,9 @@ class SetupConversationTests(unittest.TestCase):
         self.assertFalse(
             (self.directory / "setup" / "authorized-design.public.json").exists()
         )
-        self.assertEqual(load_setup(self.data, "demo")[1]["state"], "DESIGN_AUTHORIZATION_REQUIRED")
+        self.assertEqual(
+            load_setup(self.data, "demo")[1]["state"], "DESIGN_AUTHORIZATION_REQUIRED"
+        )
 
     def test_design_cannot_invent_dependency_authorization_decisions(self) -> None:
         batch = validate_batch(self.question_batch(), subject=self.subject, revision=1)
@@ -402,7 +440,10 @@ class SetupConversationTests(unittest.TestCase):
         batch["questions"] = [batch["questions"][0]]
         batch["questions"][0]["options"][0]["value"] = exact
         output = io.StringIO()
-        with contextlib.redirect_stdout(output), patch("builtins.input", return_value="1"):
+        with (
+            contextlib.redirect_stdout(output),
+            patch("builtins.input", return_value="1"),
+        ):
             submission = _print_question_batch(batch)
         self.assertIn("Will save (JSON): " + json.dumps(exact), output.getvalue())
         self.assertEqual(submission["answers"]["objective"], "objective_a")
@@ -410,14 +451,14 @@ class SetupConversationTests(unittest.TestCase):
     def test_special_dependency_source_requires_a_separate_human_decision(self) -> None:
         design = self.write_authorized_design(
             [
-                    {
-                        "requirement": "demo @ https://example.invalid/demo.whl",
-                        "imports": ["demo"],
-                        "reason": "Fixture dependency.",
-                        "origin": "proposed",
-                        "authorization_decision": "dependency_source_demo",
-                    }
-                ]
+                {
+                    "requirement": "demo @ https://example.invalid/demo.whl",
+                    "imports": ["demo"],
+                    "reason": "Fixture dependency.",
+                    "origin": "proposed",
+                    "authorization_decision": "dependency_source_demo",
+                }
+            ]
         )
         with self.assertRaisesRegex(ValidationError, "special source"):
             _validate_dependency_plan(
@@ -446,7 +487,9 @@ class SetupConversationTests(unittest.TestCase):
             directory=self.directory,
         )
 
-    def test_late_direct_dependency_reopens_the_decision_flow_before_install(self) -> None:
+    def test_late_direct_dependency_reopens_the_decision_flow_before_install(
+        self,
+    ) -> None:
         self.write_authorized_design([])
         with self.assertRaisesRegex(StateError, "explicit decision"):
             _validate_dependency_plan(["numpy>=2"], directory=self.directory)
@@ -454,7 +497,9 @@ class SetupConversationTests(unittest.TestCase):
         self.assertEqual(record["state"], "DISCOVERY_REQUIRED")
         self.assertEqual(record["late_dependencies"], ["numpy>=2"])
 
-    def test_discovery_binds_the_next_decision_revision_in_the_agent_schema(self) -> None:
+    def test_discovery_binds_the_next_decision_revision_in_the_agent_schema(
+        self,
+    ) -> None:
         atomic_write_json(
             self.directory / "setup" / "decisions.public.json",
             {
@@ -490,7 +535,9 @@ class SetupConversationTests(unittest.TestCase):
             ["objective", "outcome", "policy_boundary"],
         )
 
-    def test_controller_turns_unapproved_proposed_dependency_into_question(self) -> None:
+    def test_controller_turns_unapproved_proposed_dependency_into_question(
+        self,
+    ) -> None:
         decisions = {
             "schema_version": 1,
             "revision": 1,
@@ -500,9 +547,7 @@ class SetupConversationTests(unittest.TestCase):
                 {"id": "policy_boundary"},
             ],
         }
-        atomic_write_json(
-            self.directory / "setup" / "decisions.public.json", decisions
-        )
+        atomic_write_json(self.directory / "setup" / "decisions.public.json", decisions)
         batch = self.design_batch()
         batch["design"]["direct_dependencies"] = [
             {
@@ -522,7 +567,9 @@ class SetupConversationTests(unittest.TestCase):
         question = result["questions"][0]
         self.assertEqual(question["id"], "allow_dependency_opencv_python_headless")
         self.assertEqual(question["recommended_option_id"], "allow")
-        self.assertEqual([item["id"] for item in question["options"]], ["allow", "reject"])
+        self.assertEqual(
+            [item["id"] for item in question["options"]], ["allow", "reject"]
+        )
         _, saved = load_setup(self.data, "demo")
         self.assertEqual(saved["state"], "QUESTIONS_REQUIRED")
 
@@ -571,6 +618,186 @@ class SetupConversationTests(unittest.TestCase):
             "Maximize total lines cleared per seeded episode over at most 1000 block placements.",
         )
 
+    def test_review_conflict_reopens_seed_isolation_decision(self) -> None:
+        self.write_authorized_design([])
+        atomic_write_json(
+            self.directory / "setup" / "decisions.public.json",
+            {
+                "schema_version": 1,
+                "revision": 1,
+                "decisions": [
+                    {"id": "objective", "answer": "Maximize cleared lines."},
+                    {"id": "outcome", "answer": "Total lines cleared."},
+                    {"id": "policy_boundary", "answer": "Edit policy only."},
+                ],
+            },
+        )
+        self.record["state"] = "REVIEW_FAILED"
+        self.record["prior_review_findings"] = [
+            {"code": "AUTHORIZED_ADAPTER_CONTRACT_MISMATCH", "message": "stale"},
+            {"code": "AUTHORIZED_TELEMETRY_CONTRACT_MISMATCH", "message": "stale"},
+        ]
+
+        batch = reopen_review_decision_batch(self.directory, self.record)
+
+        self.assertIsNotNone(batch)
+        assert batch is not None
+        question = batch["questions"][0]
+        self.assertEqual(question["id"], "seed_isolation")
+        self.assertEqual(
+            question["recommended_option_id"], "secure_seedless_subprocess"
+        )
+        _, saved = load_setup(self.data, "demo")
+        self.assertEqual(saved["state"], "QUESTIONS_REQUIRED")
+        self.assertIn(
+            "AUTHORIZED_ADAPTER_CONTRACT_MISMATCH",
+            " ".join(saved["prior_design_findings"]),
+        )
+        decisions = answer_batch(
+            self.directory,
+            saved,
+            {
+                "revision": 2,
+                "answers": {"seed_isolation": "secure_seedless_subprocess"},
+            },
+        )
+        isolation = next(
+            item for item in decisions["decisions"] if item["id"] == "seed_isolation"
+        )
+        self.assertIn("separate seedless subprocess", isolation["answer"])
+
+    def test_existing_seed_isolation_decision_dismisses_redundant_reopen(self) -> None:
+        self.write_authorized_design([])
+        atomic_write_json(
+            self.directory / "setup" / "decisions.public.json",
+            {
+                "schema_version": 1,
+                "revision": 2,
+                "decisions": [
+                    {"id": "seed_isolation", "answer": "Use a seedless process."}
+                ],
+            },
+        )
+        redundant = {
+            "schema_version": 1,
+            "revision": 3,
+            "summary": "Redundant question.",
+            "questions": [
+                {
+                    "id": "seed_isolation",
+                    "prompt": "Repeat the seed decision?",
+                    "why": "A broad review code was repeated.",
+                    "options": [
+                        {
+                            "id": "secure",
+                            "label": "Secure",
+                            "value": "Use a seedless process.",
+                            "consequence": "Preserve isolation.",
+                            "citations": [
+                                {
+                                    "kind": "controller",
+                                    "rule_id": "seeds",
+                                    "finding": "Seeds remain hidden.",
+                                }
+                            ],
+                        },
+                        {
+                            "id": "insecure",
+                            "label": "Insecure",
+                            "value": "Expose the seed.",
+                            "consequence": "Lose isolation.",
+                            "citations": [
+                                {
+                                    "kind": "controller",
+                                    "rule_id": "seeds",
+                                    "finding": "Seeds remain hidden.",
+                                }
+                            ],
+                        },
+                    ],
+                    "recommended_option_id": "secure",
+                    "allow_custom": True,
+                }
+            ],
+            "design": None,
+        }
+        save_batch(self.directory, redundant)
+        self.record["state"] = "QUESTIONS_REQUIRED"
+        atomic_write_json(self.directory / "setup.json", self.record)
+
+        migrated = reopen_review_decision_batch(self.directory, self.record)
+
+        self.assertIsNotNone(migrated)
+        self.assertEqual(load_setup(self.data, "demo")[1]["state"], "REVIEW_FAILED")
+
+    def test_reauthorization_archives_previous_signed_design_and_resets_build_state(
+        self,
+    ) -> None:
+        old_design = self.write_authorized_design([])
+        old_authorization = json.loads(
+            (self.directory / "setup" / "authorization.public.json").read_text()
+        )
+        atomic_write_json(
+            self.directory / "setup" / "decisions.public.json",
+            {
+                "schema_version": 1,
+                "revision": 2,
+                "decisions": [
+                    {"id": "objective", "answer": "Maximize cleared lines."},
+                    {"id": "outcome", "answer": "Total lines cleared."},
+                    {"id": "policy_boundary", "answer": "Edit policy only."},
+                    {"id": "seed_isolation", "answer": "Use a seedless process."},
+                ],
+            },
+        )
+        revised = self.design_batch(revision=3)
+        revised["design"]["summary"] = "Reauthorized seedless design."
+        token = finalize_design(
+            self.directory,
+            self.record,
+            validate_batch(revised, subject=self.subject, revision=3),
+            controller_contract=SETUP_CONTROLLER_CONTRACT,
+        )
+        _, awaiting = load_setup(self.data, "demo")
+        for key in (
+            "pending_build",
+            "prior_build_findings",
+            "prior_review_findings",
+            "behavior_repair_attempted_for",
+            "behavior_repair_completed_for",
+            "clean_review",
+            "acceptance_token",
+        ):
+            awaiting[key] = "stale"
+        atomic_write_json(self.directory / "setup.json", awaiting)
+
+        authorize_design(self.directory, awaiting, token)
+
+        history = list(
+            (self.directory / "setup" / "authorization-history").glob("*")
+        )
+        self.assertEqual(len(history), 1)
+        self.assertEqual(
+            json.loads((history[0] / "authorized-design.public.json").read_text()),
+            old_design,
+        )
+        self.assertEqual(
+            json.loads((history[0] / "authorization.public.json").read_text()),
+            old_authorization,
+        )
+        _, saved = load_setup(self.data, "demo")
+        self.assertEqual(saved["state"], "BUILD_REQUIRED")
+        for key in (
+            "pending_build",
+            "prior_build_findings",
+            "prior_review_findings",
+            "behavior_repair_attempted_for",
+            "behavior_repair_completed_for",
+            "clean_review",
+            "acceptance_token",
+        ):
+            self.assertNotIn(key, saved)
+
     def test_direct_builder_stages_code_and_returns_typed_designs(self) -> None:
         atomic_write_json(
             self.directory / "setup" / "authorized-design.public.json",
@@ -585,7 +812,9 @@ class SetupConversationTests(unittest.TestCase):
             evaluator = staging / "evaluator"
             environment = staging / "environment"
             (subject / "_arctl").mkdir()
-            (subject / "_arctl" / "hook.py").write_text("def run_batch(value): return value\n")
+            (subject / "_arctl" / "hook.py").write_text(
+                "def run_batch(value): return value\n"
+            )
             (evaluator / "_arctl").mkdir()
             (evaluator / "_arctl" / "hook.py").write_text("# evaluator hooks\n")
             (evaluator / "test_generated_evaluator.py").write_text("# tests\n")
@@ -619,12 +848,40 @@ class SetupConversationTests(unittest.TestCase):
                                 "description": "Subject interface.",
                                 "owner": "subject",
                                 "include": [],
-                            }
+                            },
+                            {
+                                "id": "unused-environment",
+                                "description": "No external environment files are used.",
+                                "owner": "environment",
+                                "include": [],
+                            },
                         ]
                     },
                 },
                 "evaluator": {
-                    "public": {"statistic": "Model echo."},
+                    "public": {
+                        "statistic": "Model echo.",
+                        "telemetry": [
+                            {
+                                "name": "mean_score",
+                                "description": "Mean score by arm.",
+                                "unit": "score",
+                                "scope": "paired",
+                                "role": "outcome",
+                                "value_type": "number",
+                                "direction": "higher",
+                            },
+                            {
+                                "name": "cap_rate",
+                                "description": "Fraction reaching the cap.",
+                                "unit": "fraction",
+                                "scope": "paired",
+                                "role": "implementation",
+                                "value_type": "number",
+                                "direction": "contextual",
+                            },
+                        ],
+                    },
                     "trial": {
                         "meaning": "Model echo.",
                         "seed_to_case": "Model echo.",
@@ -641,17 +898,20 @@ class SetupConversationTests(unittest.TestCase):
                         "subject_result_json": json.dumps(
                             {
                                 "type": "object",
+                                "additionalProperties": False,
+                                "required": ["case_id", "score", "telemetry"],
                                 "properties": {
-                                    "metrics": {
+                                    "case_id": {"type": "string"},
+                                    "score": {"type": "integer", "minimum": 0},
+                                    "telemetry": {
                                         "type": "object",
+                                        "additionalProperties": False,
+                                        "required": ["decisions", "capped"],
                                         "properties": {
-                                            "score": {
-                                                "type": "integer",
-                                                "minimum": 0,
-                                            }
+                                            "decisions": {"type": "integer"},
+                                            "capped": {"type": "boolean"},
                                         },
                                     },
-                                    "score": {"type": "number"},
                                 },
                             }
                         ),
@@ -660,8 +920,9 @@ class SetupConversationTests(unittest.TestCase):
                 },
             }
 
-        with patch("arctl.setup._agent_run", side_effect=fake_agent), patch(
-            "arctl.setup.build_setup", return_value={"review": "ready"}
+        with (
+            patch("arctl.setup._agent_run", side_effect=fake_agent),
+            patch("arctl.setup.build_setup", return_value={"review": "ready"}),
         ):
             result = build_setup_direct(
                 self.directory,
@@ -671,6 +932,7 @@ class SetupConversationTests(unittest.TestCase):
         self.assertEqual(result["review"], "ready")
         self.assertTrue(captured["writable_worktree"])
         self.assertTrue(captured["offline"])
+        self.assertTrue(callable(captured["normalize_output"]))
         self.assertEqual(captured["output_name"], "build-report.public.json")
         self.assertEqual(
             captured["schema_value"]["properties"]["schema_version"],
@@ -702,7 +964,9 @@ class SetupConversationTests(unittest.TestCase):
         self.assertIn('"conformance"', captured["prompt"])
         self.assertIn('"direct_dependencies"', captured["prompt"])
         self.assertIn('"horizon"', captured["prompt"])
-        pending = json.loads((self.directory / "setup.json").read_text())["pending_build"]
+        pending = json.loads((self.directory / "setup.json").read_text())[
+            "pending_build"
+        ]
         internal = json.loads(Path(pending["output"]).read_text())
         self.assertEqual(internal["environment_files"], [])
         self.assertEqual(internal["task"]["objective"], "Improve the demo policy.")
@@ -711,14 +975,19 @@ class SetupConversationTests(unittest.TestCase):
             "README.md",
             internal["task"]["environment"]["codebases"][0]["include"],
         )
+        self.assertEqual(
+            [
+                source["id"]
+                for source in internal["task"]["environment"]["codebases"]
+            ],
+            ["subject-interface"],
+        )
         self.assertEqual(internal["evaluator"]["public"]["statistic"], "expected score")
         self.assertEqual(
             internal["evaluator"]["setup_contract"]["hard_rules"],
             ["Do not edit environment dynamics."],
         )
-        public_case = json.loads(
-            internal["evaluator"]["schemas"]["public_case_json"]
-        )
+        public_case = json.loads(internal["evaluator"]["schemas"]["public_case_json"])
         self.assertEqual(
             public_case["properties"]["max_actions"],
             {"type": "integer", "const": 1000},
@@ -734,29 +1003,22 @@ class SetupConversationTests(unittest.TestCase):
         subject_result = json.loads(
             internal["evaluator"]["schemas"]["subject_result_json"]
         )
-        self.assertEqual(
-            subject_result["required"], ["case_id", "score", "telemetry"]
-        )
+        self.assertEqual(subject_result["required"], ["case_id", "score", "telemetry"])
         self.assertEqual(
             subject_result["properties"]["score"],
             {"type": "integer", "minimum": 0},
+        )
+        self.assertEqual(
+            subject_result["properties"]["telemetry"]["required"],
+            ["decisions", "capped"],
         )
         self.assertEqual(
             internal["evaluator"]["public"]["subject_interface"],
             "Python callable",
         )
         self.assertEqual(
-            [
-                item["name"]
-                for item in internal["evaluator"]["public"]["telemetry"]
-            ],
-            [
-                "score",
-                "placements",
-                "terminated_rate",
-                "truncated_rate",
-                "paired_standard_error",
-            ],
+            [item["name"] for item in internal["evaluator"]["public"]["telemetry"]],
+            ["mean_score", "cap_rate"],
         )
 
     def test_direct_builder_rejects_duplicate_fixed_file_declarations(self) -> None:
@@ -773,9 +1035,21 @@ class SetupConversationTests(unittest.TestCase):
         (roots["evaluator"] / "test_generated_evaluator.py").write_text("# test\n")
         declarations = [
             {"repository": "subject", "path": "_arctl/hook.py", "role": "subject_hook"},
-            {"repository": "evaluator", "path": "_arctl/hook.py", "role": "evaluator_hook"},
-            {"repository": "evaluator", "path": "test_generated_evaluator.py", "role": "evaluator_test"},
-            {"repository": "evaluator", "path": "test_generated_evaluator.py", "role": "support"},
+            {
+                "repository": "evaluator",
+                "path": "_arctl/hook.py",
+                "role": "evaluator_hook",
+            },
+            {
+                "repository": "evaluator",
+                "path": "test_generated_evaluator.py",
+                "role": "evaluator_test",
+            },
+            {
+                "repository": "evaluator",
+                "path": "test_generated_evaluator.py",
+                "role": "support",
+            },
         ]
         with self.assertRaisesRegex(ValidationError, "OWN_DUPLICATE_PATH"):
             _read_direct_build_files(roots, declarations)
@@ -802,7 +1076,9 @@ class SetupConversationTests(unittest.TestCase):
             }
         )
 
-    def test_dependency_validation_reports_prose_and_local_source_together(self) -> None:
+    def test_dependency_validation_reports_prose_and_local_source_together(
+        self,
+    ) -> None:
         local = self.subject / "local_demo"
         local.mkdir()
         (local / "__init__.py").write_text("")
@@ -828,7 +1104,9 @@ class SetupConversationTests(unittest.TestCase):
         self.assertIn("not valid PEP 508", str(caught.exception))
         self.assertIn("supplied by the subject tree", str(caught.exception))
 
-    def test_legacy_dependency_design_preserves_decisions_and_reopens_discovery(self) -> None:
+    def test_legacy_dependency_design_preserves_decisions_and_reopens_discovery(
+        self,
+    ) -> None:
         self.write_authorized_design(
             [
                 {
@@ -851,7 +1129,9 @@ class SetupConversationTests(unittest.TestCase):
         self.assertIn("DESIGN_DEPENDENCY", saved["prior_design_findings"][0])
 
     def test_invalid_cross_artifact_fixture_is_portable(self) -> None:
-        fixture = Path(__file__).parent / "fixtures" / "setup" / "invalid_cross_artifact"
+        fixture = (
+            Path(__file__).parent / "fixtures" / "setup" / "invalid_cross_artifact"
+        )
         for path in fixture.rglob("*"):
             self.assertFalse(path.is_symlink(), path)
             self.assertNotIn("__pycache__", path.parts)
@@ -863,19 +1143,28 @@ class SetupConversationTests(unittest.TestCase):
 
     def test_invalid_cross_artifact_fixture_reports_complete_failure_set(self) -> None:
         """Preserve the mechanical regressions reproduced from setup attempt 0006."""
-        fixture = Path(__file__).parent / "fixtures" / "setup" / "invalid_cross_artifact"
+        fixture = (
+            Path(__file__).parent / "fixtures" / "setup" / "invalid_cross_artifact"
+        )
         report = json.loads((fixture / "build-report.public.json").read_text())
         design = json.loads((fixture / "authorized-design.public.json").read_text())
         staging = self.root / "invalid-cross-artifact"
         shutil.copytree(fixture / "staging", staging)
         roots = {
-            name: staging / name
-            for name in ("subject", "environment", "evaluator")
+            name: staging / name for name in ("subject", "environment", "evaluator")
         }
         declarations = [
             {"repository": "subject", "path": "_arctl/hook.py", "role": "subject_hook"},
-            {"repository": "evaluator", "path": "_arctl/hook.py", "role": "evaluator_hook"},
-            {"repository": "evaluator", "path": "test_generated_evaluator.py", "role": "evaluator_test"},
+            {
+                "repository": "evaluator",
+                "path": "_arctl/hook.py",
+                "role": "evaluator_hook",
+            },
+            {
+                "repository": "evaluator",
+                "path": "test_generated_evaluator.py",
+                "role": "evaluator_test",
+            },
             *(
                 {"repository": "subject", "path": path, "role": "support"}
                 for path in report["subject_files"]
@@ -925,9 +1214,9 @@ class SetupConversationTests(unittest.TestCase):
 
     def test_design_rejects_adapter_source_path_with_appended_prose(self) -> None:
         batch = self.design_batch()
-        batch["design"]["environment_adapter"]["source_path"] = (
-            "README.md (subject-owned adapter)"
-        )
+        batch["design"]["environment_adapter"][
+            "source_path"
+        ] = "README.md (subject-owned adapter)"
         with self.assertRaisesRegex(ValidationError, "must be one file path"):
             validate_batch(batch, subject=self.subject, revision=2)
 
@@ -945,10 +1234,34 @@ class SetupConversationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "opencv-python-headless"):
             validate_batch(batch, subject=self.subject, revision=2)
 
+    def test_design_canonicalizes_equivalent_pep508_specifier_order(self) -> None:
+        batch = self.design_batch()
+        batch["design"]["direct_dependencies"] = [
+            {
+                "requirement": "gymnasium>=0.28.1,<2",
+                "imports": ["gymnasium"],
+                "reason": "The repository imports Gymnasium.",
+                "origin": "repository",
+                "authorization_decision": None,
+            }
+        ]
+
+        normalized = validate_batch(batch, subject=self.subject, revision=2)
+
+        self.assertEqual(
+            normalized["design"]["direct_dependencies"][0]["requirement"],
+            "gymnasium<2,>=0.28.1",
+        )
+
     def test_clean_review_requires_complete_cited_coverage(self) -> None:
         areas = (
-            "intent_fidelity", "grounding", "editable_boundary", "dependencies",
-            "trial_independence", "scoring_statistics", "seed_handling",
+            "intent_fidelity",
+            "grounding",
+            "editable_boundary",
+            "dependencies",
+            "trial_independence",
+            "scoring_statistics",
+            "seed_handling",
             "runtime_behavior",
         )
         review = {
@@ -956,25 +1269,46 @@ class SetupConversationTests(unittest.TestCase):
                 area: {
                     "status": "pass",
                     "summary": "Inspected.",
-                    "evidence": [{
-                        "path": "README.md",
-                        "location": "line 1",
-                        "finding": "The public repository was inspected.",
-                    }],
+                    "evidence": [
+                        {
+                            "path": "README.md",
+                            "location": "line 1",
+                            "finding": "The public repository was inspected.",
+                        }
+                    ],
                 }
                 for area in areas
             },
             "findings": [],
         }
         _validate_review_evidence(review, roots=(self.subject,))
+        setup_root = self.directory / "setup"
+        setup_root.mkdir(exist_ok=True)
+        (setup_root / "authorized-design.public.json").write_text("{}\n")
+        review["coverage"]["grounding"]["evidence"] = [
+            {
+                "path": "authorized-design.public.json",
+                "location": "line 1",
+                "finding": "The signed design was inspected.",
+            }
+        ]
+        _validate_review_evidence(review, roots=(self.subject, setup_root))
+        review["coverage"]["editable_boundary"]["evidence"][0]["location"] = (
+            "lines 1-999999"
+        )
+        with self.assertRaisesRegex(ValidationError, "citation is outside"):
+            _validate_review_evidence(review, roots=(self.subject, setup_root))
+        review["coverage"]["editable_boundary"]["evidence"][0]["location"] = (
+            "line 1"
+        )
         review["coverage"]["seed_handling"]["evidence"] = []
         with self.assertRaisesRegex(ValidationError, "requires evidence"):
-            _validate_review_evidence(review, roots=(self.subject,))
+            _validate_review_evidence(review, roots=(self.subject, setup_root))
 
     def test_review_schema_rejects_multi_range_citation_locations(self) -> None:
-        citation = review_schema()["properties"]["coverage"]["properties"][
-            "grounding"
-        ]["properties"]["evidence"]["items"]
+        citation = review_schema()["properties"]["coverage"]["properties"]["grounding"][
+            "properties"
+        ]["evidence"]["items"]
         validator = Draft202012Validator(citation)
         with self.assertRaises(JsonSchemaValidationError):
             validator.validate(

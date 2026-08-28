@@ -11,12 +11,27 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from arctl.errors import ProcessError, StateError, StoppedError
-from arctl.process import read_valid_result, run_once, run_or_load_once
+from arctl.platform_process import ProcessIdentity, inspect_process
+from arctl.process import (
+    _kill_recorded_process,
+    read_valid_result,
+    run_once,
+    run_or_load_once,
+)
 
 
 class ProcessIntegrationTests(unittest.TestCase):
+    def assert_process_dead(self, pid: int, message: str) -> None:
+        for _ in range(20):
+            identity = inspect_process(pid)
+            if identity is None or not identity.alive:
+                return
+            time.sleep(0.05)
+        self.fail(message)
+
     def test_streams_immutable_stdin_and_records_its_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -80,6 +95,12 @@ class ProcessIntegrationTests(unittest.TestCase):
             self.assertGreaterEqual(result["elapsed_seconds"], 0)
             self.assertEqual(read_valid_result(directory), result)
             self.assertEqual((directory / "stdout.bin").read_text(), "ok\n")
+            identity = json.loads((directory / "process.json").read_text())
+            self.assertEqual(identity["schema_version"], 2)
+            self.assertEqual(
+                set(identity),
+                {"schema_version", "platform", "pid", "pgid", "start_time"},
+            )
             with self.assertRaisesRegex(StateError, "cannot be rerun"):
                 run_once(
                     directory,
@@ -151,15 +172,7 @@ class ProcessIntegrationTests(unittest.TestCase):
                     timeout_seconds=0.5,
                 )
             child_pid = int(pid_file.read_text())
-            for _ in range(20):
-                try:
-                    os.kill(child_pid, 0)
-                except ProcessLookupError:
-                    break
-                time.sleep(0.05)
-            else:
-                state = Path(f"/proc/{child_pid}/stat").read_text().split()[2]
-                self.assertEqual(state, "Z", "descendant process remained alive")
+            self.assert_process_dead(child_pid, "descendant process remained alive")
             self.assertFalse((directory / "result.json").exists())
             with self.assertRaisesRegex(StateError, "cannot be rerun"):
                 run_once(
@@ -191,17 +204,10 @@ class ProcessIntegrationTests(unittest.TestCase):
             self.assertEqual((directory / "stdout.bin").read_text(), "main complete\n")
             self.assertTrue((directory / "result.json").is_file())
             child_pid = int(pid_file.read_text())
-            for _ in range(20):
-                try:
-                    os.kill(child_pid, 0)
-                except ProcessLookupError:
-                    break
-                state = Path(f"/proc/{child_pid}/stat").read_text().split()[2]
-                if state == "Z":
-                    break
-                time.sleep(0.05)
-            else:
-                self.fail("descendant process remained alive after the managed command exited")
+            self.assert_process_dead(
+                child_pid,
+                "descendant process remained alive after the managed command exited",
+            )
 
     def test_output_limit_invalidates_completed_process(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -303,12 +309,80 @@ run_once(
                     cwd=root,
                 )
 
-            try:
-                os.kill(child_pid, 0)
-            except ProcessLookupError:
-                return
-            state = Path(f"/proc/{child_pid}/stat").read_text().split()[2]
-            self.assertEqual(state, "Z", "orphaned official process remained alive")
+            self.assert_process_dead(
+                child_pid, "orphaned official process remained alive"
+            )
+
+    def test_recovery_refuses_mismatched_start_time_and_process_group(self) -> None:
+        for field in ("start_time", "pgid"):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                directory = root / "process"
+                directory.mkdir()
+                (directory / "started.json").write_text("{}")
+                child = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    start_new_session=True,
+                )
+                try:
+                    identity = inspect_process(child.pid)
+                    assert identity is not None
+                    record = {
+                        "schema_version": 2,
+                        "platform": identity.platform,
+                        "pid": identity.pid,
+                        "pgid": identity.pgid,
+                        "start_time": identity.start_time,
+                    }
+                    record[field] += 1
+                    (directory / "process.json").write_text(json.dumps(record))
+
+                    with self.assertRaisesRegex(StateError, "cannot be rerun"):
+                        run_or_load_once(
+                            directory,
+                            [sys.executable, "-c", "pass"],
+                            timeout_seconds=2,
+                            max_output_bytes=1000,
+                            cwd=root,
+                        )
+
+                    self.assertIsNone(child.poll(), "mismatched process was killed")
+                finally:
+                    if child.poll() is None:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    child.wait()
+
+    def test_linux_schema_one_identity_remains_recoverable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "process.json").write_text(
+                json.dumps({"schema_version": 1, "pid": 12, "start_time": 34})
+            )
+            identity = ProcessIdentity("Linux", 12, 12, 34, "running")
+            with (
+                mock.patch("arctl.process.platform.system", return_value="Linux"),
+                mock.patch(
+                    "arctl.process.inspect_process", side_effect=(identity, None)
+                ),
+                mock.patch("arctl.process.os.killpg") as kill,
+            ):
+                _kill_recorded_process(directory)
+
+            kill.assert_called_once_with(12, signal.SIGKILL)
+
+    def test_schema_one_identity_is_not_reinterpreted_on_macos(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "process.json").write_text(
+                json.dumps({"schema_version": 1, "pid": 12, "start_time": 34})
+            )
+            with (
+                mock.patch("arctl.process.platform.system", return_value="Darwin"),
+                mock.patch("arctl.process.inspect_process") as inspect,
+                self.assertRaisesRegex(StateError, "only on Linux"),
+            ):
+                _kill_recorded_process(directory)
+            inspect.assert_not_called()
 
     def test_rejects_corrupt_result(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

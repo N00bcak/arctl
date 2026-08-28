@@ -14,7 +14,12 @@ from typing import Any, Mapping
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as JsonSchemaError
 
-from .agent_backend import AgentSessionRequest, agent_command, agent_environment, agent_provenance
+from .agent_backend import (
+    AgentSessionRequest,
+    agent_command,
+    agent_environment,
+    agent_provenance,
+)
 from .agent_selection import select_agent
 from .approval import verify_approval
 from .calibration import CalibrationCommandBuilder, calibrate_trial_count
@@ -22,7 +27,12 @@ from .candidate_review import AgentCommandBuilder as ReviewCommandBuilder
 from .candidate_review import requirement_audit_schema, review_candidate
 from .codex_schema import validate_codex_output_schema
 from .comparison import ComparisonReservation, load_reservation, reserve_comparison
-from .comparison_run import CommandBuilder, ComparisonFailure, run_comparison
+from .comparison_run import (
+    SUBJECT_WORKERS,
+    CommandBuilder,
+    ComparisonFailure,
+    run_comparison,
+)
 from .components import invoke_component
 from .downstream import transient_process_error
 from .errors import (
@@ -101,6 +111,7 @@ def _notify(
 ) -> None:
     if progress is not None:
         progress({"event": event, **fields})
+
 
 def _validate_codex_output_schema(schema: Mapping[str, Any]) -> None:
     validate_codex_output_schema(schema)
@@ -244,8 +255,7 @@ def _research_prompt(task: LocatedTask, manifest: EvaluatorManifest) -> str:
         "statistic": manifest.public_statistic,
         "subject_interface": manifest.subject_interface,
         "telemetry": {
-            name: asdict(metric)
-            for name, metric in manifest.public_telemetry.items()
+            name: asdict(metric) for name, metric in manifest.public_telemetry.items()
         },
         "strategy": strategy,
         "exploration_catalog": str(
@@ -289,9 +299,7 @@ def _run_planning(
     ledger = load_ledger(task.directory)
     scratch = attempt / "planning" / "output"
     scratch.mkdir(parents=True, exist_ok=True)
-    behavior_ids = tuple(
-        item["id"] for item in strategy["successful_policy_behaviors"]
-    )
+    behavior_ids = tuple(item["id"] for item in strategy["successful_policy_behaviors"])
     ledger_ids = tuple(entry["entry_id"] for entry in ledger)
     schema_value = planning_schema(
         manifest,
@@ -403,7 +411,9 @@ def _run_planning(
             raise transient
         raise StateError("fresh planning session exited unsuccessfully")
     try:
-        value = json.loads((scratch / "planning.public.json").read_text(encoding="utf-8"))
+        value = json.loads(
+            (scratch / "planning.public.json").read_text(encoding="utf-8")
+        )
         Draft202012Validator(schema_value).validate(value)
         if not isinstance(value, dict):
             raise ValidationError("planning output is not an object")
@@ -466,9 +476,7 @@ def _validate_implementation_report(value: Any) -> dict[str, Any]:
     if value["status"] == "implemented" and any(
         item["status"] != "verified" for item in value["requirements"]
     ):
-        raise ValidationError(
-            "completed implementation has unverified requirements"
-        )
+        raise ValidationError("completed implementation has unverified requirements")
     return value
 
 
@@ -508,7 +516,9 @@ def _run_implementation(
                 "request": request,
                 "editable_paths": list(task.config.editable_paths),
                 "denied_paths": list(task.config.denied_paths),
-                "public_checks": [list(command) for command in task.config.public_checks],
+                "public_checks": [
+                    list(command) for command in task.config.public_checks
+                ],
                 "public_probe": list(task.config.public_probe),
                 "candidate_review_contract": (
                     task.config.candidate_review.contract
@@ -549,15 +559,15 @@ def _run_implementation(
                 output_name="implementation.public.json",
                 writable_worktree=True,
                 read_paths=tuple(
-                dict.fromkeys(
-                    path
-                    for public_command in (
-                        *task.config.public_checks,
-                        task.config.public_probe,
+                    dict.fromkeys(
+                        path
+                        for public_command in (
+                            *task.config.public_checks,
+                            task.config.public_probe,
+                        )
+                        for path in command_runtime_read_paths(public_command)
+                        if not path.is_relative_to(worktree)
                     )
-                    for path in command_runtime_read_paths(public_command)
-                    if not path.is_relative_to(worktree)
-                )
                 ),
             ),
         )
@@ -611,7 +621,9 @@ def _run_implementation(
         JsonSchemaError,
         ValidationError,
     ) as error:
-        raise ResearchMiss("invalid_implementation", "invalid implementation report") from error
+        raise ResearchMiss(
+            "invalid_implementation", "invalid implementation report"
+        ) from error
     if value["status"] == "infeasible":
         raise ResearchMiss("implementation_infeasible", value["summary"])
     if value["deviations"]:
@@ -673,8 +685,7 @@ def _run_compute_probe(
             or value["risk"]
             not in {"within_advisory_budget", "likely_over_budget", "unavailable"}
             or value["official_trials"] != trial_count
-            or value["trial_equivalents"]
-            != task.config.public_probe_trial_equivalents
+            or value["trial_equivalents"] != task.config.public_probe_trial_equivalents
             or value["timeout_seconds"] != manifest.limits.timeout_seconds
             or value["headroom_fraction"] != COMPUTE_PROBE_HEADROOM
             or value["advisory_only"] is not True
@@ -726,9 +737,7 @@ def _run_compute_probe(
         "likely_over_budget"
         if projected is not None
         and projected > manifest.limits.timeout_seconds * COMPUTE_PROBE_HEADROOM
-        else "within_advisory_budget"
-        if projected is not None
-        else "unavailable"
+        else "within_advisory_budget" if projected is not None else "unavailable"
     )
     value = {
         "schema_version": 1,
@@ -774,17 +783,13 @@ def _run_research(
             prompt=prompt,
             read_paths=tuple(
                 dict.fromkeys(
-                    path
-                    for path in runtime_paths
-                    if not path.is_relative_to(worktree)
+                    path for path in runtime_paths if not path.is_relative_to(worktree)
                 )
             ),
             model=task.config.execution_model,
             reasoning_effort=task.config.execution_reasoning_effort,
         )
-        codex_home = Path(
-            os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
-        )
+        codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
         environment = sanitized_environment(
             codex_home=codex_home,
             writable_home=scratch,
@@ -837,7 +842,7 @@ def _run_research(
         except (OSError, json.JSONDecodeError) as error:
             raise ResearchMiss(
                 "invalid_request",
-                "fresh research session did not write valid request JSON"
+                "fresh research session did not write valid request JSON",
             ) from error
         if not isinstance(request, dict):
             raise ResearchMiss(
@@ -909,7 +914,9 @@ def _candidate_search(
         return recovered
     search_id = next_search_id(task.directory)
     search = task.directory / "searches" / f"{search_id:06d}"
-    strategy_worktree = task.directory / "worktrees" / f"search-{search_id:06d}-strategy"
+    strategy_worktree = (
+        task.directory / "worktrees" / f"search-{search_id:06d}-strategy"
+    )
     _checkout(task.config.repo, strategy_worktree, champion)
     try:
         revision, strategy_value = invoke_component(
@@ -949,7 +956,11 @@ def _candidate_search(
                 remove_worktree(task.config.repo, strategy_worktree)
             _notify(progress, "strategy", revision=revision, refresh=True)
         attempt_directory = search / "attempts" / f"{attempt:02d}"
-        worktree = task.directory / "worktrees" / f"search-{search_id:06d}-attempt-{attempt:02d}"
+        worktree = (
+            task.directory
+            / "worktrees"
+            / f"search-{search_id:06d}-attempt-{attempt:02d}"
+        )
         _notify(
             progress,
             "search_attempt",
@@ -1079,7 +1090,9 @@ def _candidate_search(
                 audit_path=attempt_directory / "runtime-artifacts.public.json",
             )
             if not isinstance(request, dict):
-                raise ResearchMiss("invalid_request", "research request is not an object")
+                raise ResearchMiss(
+                    "invalid_request", "research request is not an object"
+                )
             try:
                 ResearchRequest.from_mapping(
                     request,
@@ -1146,7 +1159,11 @@ def _candidate_search(
             raise
         except ResearchMiss as miss:
             try:
-                raw = json.loads((attempt_directory / "request.public.json").read_text(encoding="utf-8"))
+                raw = json.loads(
+                    (attempt_directory / "request.public.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
                 saved_request = raw if isinstance(raw, dict) else None
             except (OSError, json.JSONDecodeError):
                 saved_request = None
@@ -1158,7 +1175,13 @@ def _candidate_search(
                 request=saved_request,
                 miss=miss,
             )
-            _notify(progress, "search_miss", attempt=attempt, code=miss.code, message=str(miss))
+            _notify(
+                progress,
+                "search_miss",
+                attempt=attempt,
+                code=miss.code,
+                message=str(miss),
+            )
             remove_worktree(task.config.repo, worktree)
             continue
         write_json_once(
@@ -1219,9 +1242,10 @@ def _recover_candidate_stage(
                 remove_worktree(task.config.repo, worktree)
             _checkout(task.config.repo, worktree, champion)
             try:
-                if planning_failed and not (
-                    attempt_directory / "request.public.json"
-                ).is_file():
+                if (
+                    planning_failed
+                    and not (attempt_directory / "request.public.json").is_file()
+                ):
                     request = invoke_component(
                         "plan",
                         task.config.method.components["plan"].identifier,
@@ -1389,16 +1413,16 @@ def _recover_candidate_review(
                     )
                 )
             except (OSError, json.JSONDecodeError) as error:
-                raise StateError("recoverable candidate review has invalid request") from error
+                raise StateError(
+                    "recoverable candidate review has invalid request"
+                ) from error
             if not isinstance(request, dict):
                 raise StateError("recoverable candidate review has invalid request")
             ResearchRequest.from_mapping(
                 request,
                 allowed_telemetry=manifest.public_telemetry,
             )
-            strategy_files = sorted(
-                (task.directory / "strategy").glob("*.public.json")
-            )
+            strategy_files = sorted((task.directory / "strategy").glob("*.public.json"))
             if not strategy_files:
                 raise StateError("recoverable candidate review has no strategy")
             strategy = json.loads(strategy_files[-1].read_text(encoding="utf-8"))
@@ -1442,9 +1466,7 @@ def _recover_candidate_review(
                 champion=champion,
                 request=request,
                 stop_path=stop_path,
-                implementation_report=(
-                    _load_implementation_report(attempt_directory)
-                ),
+                implementation_report=(_load_implementation_report(attempt_directory)),
                 compute_report=compute_report,
                 review_command_builder=review_command_builder,
                 repair_command_builder=repair_command_builder,
@@ -1499,36 +1521,38 @@ def _record_official_result(
     try:
         request = json.loads(request_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise StateError(f"published research request is invalid: {request_path}") from error
+        raise StateError(
+            f"published research request is invalid: {request_path}"
+        ) from error
     if not isinstance(request, dict):
         raise StateError(f"published research request is invalid: {request_path}")
     entry = {
-            "schema_version": 1,
-            "source": f"experiment:{int(result['experiment_id']):06d}",
-            "kind": "experiment",
-            "champion": result["champion_before"],
-            "candidate": result["candidate"],
-            "claim": result["hypothesis"],
-            "strategy_behavior_id": request.get("strategy_behavior_id"),
-            "mechanism": request.get("mechanism"),
-            "viability": request.get("viability"),
-            "evidence_review": request.get("evidence_review"),
-            "lineage": request.get("lineage"),
-            "decision": result["decision"],
-            "operational_status": result["operational_status"],
-            "scientific_status": result["scientific_status"],
-            "reason_code": result["reason_code"],
-            **(
-                {"operational_assessment": result["operational_assessment"]}
-                if result.get("operational_assessment")
-                else {}
-            ),
-            "changed_paths": list(
-                candidate_changed_paths(
-                    task.config.repo, result["champion_before"], result["candidate"]
-                )
-            ),
-        }
+        "schema_version": 1,
+        "source": f"experiment:{int(result['experiment_id']):06d}",
+        "kind": "experiment",
+        "champion": result["champion_before"],
+        "candidate": result["candidate"],
+        "claim": result["hypothesis"],
+        "strategy_behavior_id": request.get("strategy_behavior_id"),
+        "mechanism": request.get("mechanism"),
+        "viability": request.get("viability"),
+        "evidence_review": request.get("evidence_review"),
+        "lineage": request.get("lineage"),
+        "decision": result["decision"],
+        "operational_status": result["operational_status"],
+        "scientific_status": result["scientific_status"],
+        "reason_code": result["reason_code"],
+        **(
+            {"operational_assessment": result["operational_assessment"]}
+            if result.get("operational_assessment")
+            else {}
+        ),
+        "changed_paths": list(
+            candidate_changed_paths(
+                task.config.repo, result["champion_before"], result["candidate"]
+            )
+        ),
+    }
     reflection_path = request_path.parent / "reflection.public.json"
     if reflection_path.is_file():
         try:
@@ -1618,6 +1642,7 @@ def _run_reserved_comparison(
     command_builder: CommandBuilder | None,
     stop_path: Path,
     progress: ProgressCallback | None,
+    subject_workers: int = SUBJECT_WORKERS,
 ):
     record_path = experiment / "comparisons" / kind / "reservation.private.json"
     record = load_experiment(experiment)
@@ -1654,6 +1679,7 @@ def _run_reserved_comparison(
         candidate_directory=candidate_worktree,
         stop_path=stop_path,
         progress=progress,
+        subject_workers=subject_workers,
         **arguments,
     )
 
@@ -1704,8 +1730,7 @@ def _completed_experiment_count(task_directory: Path) -> int:
     return sum(
         1
         for path in experiments.glob("[0-9]" * 6)
-        if load_experiment(path).state == "COMPLETE"
-        and (path / "published").is_file()
+        if load_experiment(path).state == "COMPLETE" and (path / "published").is_file()
     )
 
 
@@ -1835,6 +1860,7 @@ def run_task(
     calibration_command_builder: CalibrationCommandBuilder | None = None,
     reflection_command_builder: ReflectionCommandBuilder | None = None,
     progress: ProgressCallback | None = None,
+    subject_workers: int = SUBJECT_WORKERS,
 ) -> RunOutcome:
     """Run a bounded sequence of fixed-trial experiments for one approved task."""
     if strategy_command_builder is _DEFAULT_STRATEGY:
@@ -1843,13 +1869,17 @@ def run_task(
             if research_command_builder is _default_research_command
             else _compatibility_strategy_command
         )
+    if (
+        isinstance(subject_workers, bool)
+        or not isinstance(subject_workers, int)
+        or not 1 <= subject_workers <= SUBJECT_WORKERS
+    ):
+        raise StateError(f"workers must be between 1 and {SUBJECT_WORKERS}")
     approval = verify_approval(task.directory, task.config)
     assert task.config.method is not None
     task.config.method.require_component("search", "search.serial-champion-v1")
     task.config.method.require_component("evaluate", "evaluate.paired-suspect-v1")
-    manifest, manifest_hash = load_manifest(
-        task.directory / "evaluator.manifest.json"
-    )
+    manifest, manifest_hash = load_manifest(task.directory / "evaluator.manifest.json")
     for published in _public_history(task, manifest):
         _record_official_result(task, published, manifest)
     rebuild_catalog(task.directory)
@@ -1878,18 +1908,15 @@ def run_task(
     if task.config.trials == "auto":
         _notify(progress, "calibration")
         calibration_arguments: dict[str, Any] = {}
+        calibration_arguments["subject_workers"] = subject_workers
         if calibration_command_builder is not None:
             calibration_arguments["command_builder"] = calibration_command_builder
-        calibration_champion = (
-            task.directory / "worktrees" / "calibration-champion"
-        )
+        calibration_champion = task.directory / "worktrees" / "calibration-champion"
         if manifest.calibration.controller_pilot:
             champion = approval["approved_champion"]
-            if (
-                calibration_champion.exists()
-                and resolve_commit(calibration_champion, "HEAD")
-                != resolve_commit(task.config.repo, champion)
-            ):
+            if calibration_champion.exists() and resolve_commit(
+                calibration_champion, "HEAD"
+            ) != resolve_commit(task.config.repo, champion):
                 ensure_clean_worktree(calibration_champion)
                 remove_worktree(task.config.repo, calibration_champion)
             _checkout(task.config.repo, calibration_champion, champion)
@@ -1922,17 +1949,14 @@ def run_task(
     stalled = False
     reflection_failed = False
     reflection_error = None
-    for _ in (range(limit) if limit is not None else count()):
+    for _ in range(limit) if limit is not None else count():
         stop = task.directory / "stop.requested"
         active = _active_experiment(task.directory)
         if stop.exists():
             if active is not None:
                 record = load_experiment(active)
                 primary_reservation = (
-                    active
-                    / "comparisons"
-                    / "primary"
-                    / "reservation.private.json"
+                    active / "comparisons" / "primary" / "reservation.private.json"
                 )
                 if not primary_reservation.is_file():
                     _discard_unreserved_experiment(task, active)
@@ -2027,10 +2051,7 @@ def run_task(
                 task, load_experiment(experiment).experiment_id
             )
             continue
-        if (
-            experiment is not None
-            and (experiment / "research.failure.json").is_file()
-        ):
+        if experiment is not None and (experiment / "research.failure.json").is_file():
             _discard_unreserved_experiment(task, experiment)
             experiment = None
         presearched = False
@@ -2152,7 +2173,9 @@ def run_task(
                     )
                     check_arguments: dict[str, Any] = {}
                     if public_check_command_builder is not None:
-                        check_arguments["command_builder"] = public_check_command_builder
+                        check_arguments["command_builder"] = (
+                            public_check_command_builder
+                        )
                     check_arguments["stop_path"] = stop
                     run_public_checks(
                         task.directory,
@@ -2170,7 +2193,9 @@ def run_task(
                 if record.public_checks_passed is False:
                     from .experiment import publish_candidate_rejection
 
-                    result = publish_candidate_rejection(task.config, experiment, request)
+                    result = publish_candidate_rejection(
+                        task.config, experiment, request
+                    )
                     results.append(result)
                     _record_official_result(task, result, manifest)
                     _notify(progress, "result", result=result)
@@ -2182,13 +2207,14 @@ def run_task(
             stopped = True
             break
         except ArctlError:
-            if not (
-                experiment / "comparisons" / "primary" / "reservation.private.json"
-            ).exists() and not (experiment / "result.public.json").exists() and not (
-                experiment / "research.failure.json"
-            ).exists() and not (
-                experiment / "public-check.failure.json"
-            ).exists():
+            if (
+                not (
+                    experiment / "comparisons" / "primary" / "reservation.private.json"
+                ).exists()
+                and not (experiment / "result.public.json").exists()
+                and not (experiment / "research.failure.json").exists()
+                and not (experiment / "public-check.failure.json").exists()
+            ):
                 _discard_unreserved_experiment(task, experiment)
             raise
         if record.candidate is None:
@@ -2220,6 +2246,7 @@ def run_task(
                 command_builder=comparison_command_builder,
                 stop_path=stop,
                 progress=progress,
+                subject_workers=subject_workers,
             )
         except ComparisonFailure as error:
             current = load_experiment(experiment)
@@ -2268,6 +2295,7 @@ def run_task(
                         command_builder=comparison_command_builder,
                         stop_path=stop,
                         progress=progress,
+                        subject_workers=subject_workers,
                     )
                 except ComparisonFailure as error:
                     result = publish_comparison_failure(
@@ -2310,6 +2338,7 @@ def run_task(
                         command_builder=comparison_command_builder,
                         stop_path=stop,
                         progress=progress,
+                        subject_workers=subject_workers,
                     )
                     if suspect_path.is_file()
                     else None
