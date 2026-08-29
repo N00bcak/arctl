@@ -291,6 +291,32 @@ class SetupConversationTests(unittest.TestCase):
             )
         self.assertEqual(setup_path.read_bytes(), before)
 
+    def test_setup_reports_an_already_accepted_setup_as_ready_for_approval(self) -> None:
+        setup_path = self.directory / "setup.json"
+        accepted = json.loads(setup_path.read_text())
+        accepted["state"] = "READY_FOR_APPROVAL"
+        atomic_write_json(setup_path, accepted)
+        note = self.workspace / "ARCTL_SETUP.md"
+        note.write_text("# Accepted setup\n", encoding="utf-8")
+
+        payload = _setup(
+            data_root=self.data,
+            task_id="demo",
+            answers_path=None,
+            offline=True,
+            acceptance=None,
+            design_authorization=None,
+            interactive=False,
+            preflight=False,
+        )
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["state"], "READY_FOR_APPROVAL")
+        self.assertEqual(payload["allowed_actions"], ["approve"])
+        self.assertEqual(payload["next_command"], "arctl approve demo")
+        self.assertEqual(Path(payload["artifacts"][0]["path"]), note.resolve())
+        self.assertEqual(load_setup(self.data, "demo")[1]["state"], "READY_FOR_APPROVAL")
+
     def test_answers_replace_each_decision_and_reject_stale_or_partial_batches(
         self,
     ) -> None:

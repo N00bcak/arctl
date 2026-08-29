@@ -1291,6 +1291,24 @@ def _setup(
     readiness: dict[str, Any] | None = None
     while True:
         state = record["state"]
+        if state == "READY_FOR_APPROVAL":
+            note_path = Path(record["workspace"]) / "ARCTL_SETUP.md"
+            artifacts = (
+                ({"kind": "setup_summary", "path": str(note_path)},)
+                if note_path.is_file()
+                else ()
+            )
+            return _payload(
+                success=True,
+                state=state,
+                task_id=identifier,
+                action_required=True,
+                allowed_actions=("approve",),
+                next_command=f"arctl approve {identifier}",
+                message="Setup accepted; the scientific contract is ready for approval.",
+                artifacts=artifacts,
+                log_path=str(directory),
+            )
         if state == "DISCOVERY_REQUIRED":
             batch = discover_setup_batch(
                 directory,
