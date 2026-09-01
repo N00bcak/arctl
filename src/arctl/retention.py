@@ -870,6 +870,22 @@ def _abandoned_worktree_actions(
         for line in listed.stdout.splitlines()
         if line.startswith("worktree ")
     }
+    common_output = subprocess.run(
+        ["git", "-C", str(config.repo), "rev-parse", "--git-common-dir"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if common_output.returncode or not common_output.stdout.strip():
+        return actions, [
+            {"scope": "worktrees", "reason": "Git common directory unavailable", "count": 1}
+        ]
+    raw_common = Path(common_output.stdout.strip())
+    common = (
+        raw_common.resolve()
+        if raw_common.is_absolute()
+        else (config.repo / raw_common).resolve()
+    )
     for candidate in sorted(worktrees.glob("[0-9][0-9][0-9][0-9][0-9][0-9]-candidate")):
         if candidate.resolve() in registered:
             continue
@@ -916,6 +932,87 @@ def _abandoned_worktree_actions(
                 quarantine,
                 _action(
                     rule="abandoned-durable-candidate-worktree",
+                    kind="remove_quarantined_root",
+                    inputs=(f"@quarantine/{quarantine['action_id']}",),
+                    depends_on=(quarantine["action_id"],),
+                    preconditions={"source_action": quarantine["action_id"]},
+                    status="conditional",
+                ),
+            )
+        )
+    entries = task / "exploration" / "entries"
+    for candidate in sorted(
+        worktrees.glob("search-[0-9][0-9][0-9][0-9][0-9][0-9]-attempt-[0-9][0-9]")
+    ):
+        if candidate.resolve() in registered or candidate.is_symlink():
+            continue
+        match = re.fullmatch(r"search-([0-9]{6})-attempt-([0-9]{2})", candidate.name)
+        assert match is not None
+        search_id, attempt_id = match.groups()
+        attempt = task / "searches" / search_id / "attempts" / attempt_id
+        if not attempt.is_dir() or attempt.is_symlink():
+            continue
+        source = f"search:{search_id}:attempt:{attempt_id}"
+        durable_entries: list[tuple[Path, Mapping[str, Any]]] = []
+        for path in sorted(entries.glob("*.public.json")) if entries.is_dir() else ():
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if (
+                isinstance(value, Mapping)
+                and value.get("source") == source
+                and value.get("kind") == "research_miss"
+                and isinstance(value.get("champion"), str)
+            ):
+                durable_entries.append((path, value))
+        if len(durable_entries) != 1:
+            continue
+        entry_path, entry = durable_entries[0]
+        champion = entry["champion"]
+        durable = subprocess.run(
+            ["git", "-C", str(config.repo), "cat-file", "-e", f"{champion}^{{commit}}"],
+            check=False,
+            capture_output=True,
+        )
+        git_file = candidate / ".git"
+        try:
+            line = git_file.read_text(encoding="utf-8").strip()
+            if durable.returncode or git_file.is_symlink() or not line.startswith("gitdir: "):
+                continue
+            metadata = Path(line.removeprefix("gitdir: ")).resolve()
+            if metadata.parent != common / "worktrees" or metadata.name != candidate.name:
+                continue
+            total, count, tree_hash = _tree_inventory(candidate)
+        except (OSError, StateError):
+            continue
+        relative = _relative(task, candidate)
+        if relative in canonical:
+            continue
+        quarantine = _action(
+            rule="abandoned-durable-research-miss-worktree",
+            kind="quarantine_disposable_root",
+            inputs=(relative,),
+            expected_bytes=total,
+            preconditions={
+                "identity": _lstat_identity(candidate),
+                "tree_hash": tree_hash,
+                "path_count": count,
+                "search": search_id,
+                "attempt": attempt_id,
+                "champion_commit": champion,
+                "miss_entry_sha256": _sha256(entry_path.read_bytes()),
+                "git_file_sha256": _sha256(git_file.read_bytes()),
+                "git_common_identity": _stable_identity(common),
+                "task_identity": _stable_identity(task),
+                "parent_identity": _stable_identity(candidate.parent),
+            },
+        )
+        actions.extend(
+            (
+                quarantine,
+                _action(
+                    rule="abandoned-durable-research-miss-worktree",
                     kind="remove_quarantined_root",
                     inputs=(f"@quarantine/{quarantine['action_id']}",),
                     depends_on=(quarantine["action_id"],),

@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 import sys
+import yaml
 from unittest import mock
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from arctl.retention import (
     run_gc,
 )
 from arctl.setup import _tree_hash
+from .helpers import valid_task
 
 
 def write_json(path: Path, value: object) -> None:
@@ -215,6 +217,51 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual(cache_actions[0]["initial_status"], "blocked")
             run_gc(task, dry_run=False)
             self.assertTrue(cache.exists())
+
+    def test_durable_research_miss_allows_abandoned_worktree_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repo = root / "repo"
+            champion = self.init_repo(repo)
+            task = root / "data" / "tasks" / "demo"
+            task.mkdir(parents=True)
+            raw_task = valid_task()
+            raw_task["repo"] = str(repo)
+            raw_task["evaluator"] = {"repo": str(repo), "commit": champion}
+            (task / "task.yaml").write_text(yaml.safe_dump(raw_task))
+            write_json(
+                task / "exploration" / "entries" / "entry-000001.public.json",
+                {
+                    "schema_version": 1,
+                    "entry_id": "entry-000001",
+                    "source": "search:000001:attempt:01",
+                    "kind": "research_miss",
+                    "champion": champion,
+                    "rejection_code": "unchanged",
+                    "message": "candidate tree is unchanged",
+                },
+            )
+            attempt = task / "searches" / "000001" / "attempts" / "01"
+            attempt.mkdir(parents=True)
+            worktree = task / "worktrees" / "search-000001-attempt-01"
+            worktree.mkdir(parents=True)
+            (worktree / "owned.txt").write_text("owned\n")
+            metadata = repo / ".git" / "worktrees" / worktree.name
+            (worktree / ".git").write_text(f"gitdir: {metadata}\n")
+
+            plan = build_gc_plan(task)
+
+            self.assertTrue(
+                any(
+                    action["rule_id"] == "abandoned-durable-research-miss-worktree"
+                    and action["inputs"] == ["worktrees/search-000001-attempt-01"]
+                    for action in plan["actions"]
+                ),
+                plan["actions"],
+            )
+            applied = run_gc(task, dry_run=False)
+            self.assertFalse(applied["failed"], applied)
+            self.assertFalse(worktree.exists())
 
     def test_symlinked_cache_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
