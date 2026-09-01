@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .dossier import ensure_experiment_dossier
+from .dossier import ensure_experiment_dossier, rebuild_task_index
 from .errors import ArctlError, StateError
 from .experiment import ExperimentRecord, load_experiment
 from .registry import LocatedTask
@@ -215,6 +216,19 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
         from .git import resolve_commit
 
         champion = resolve_commit(task.config.repo, champion_ref)
+    gc_journal = task.directory / ".gc" / "transaction.json"
+    gc_pending = gc_journal.is_file()
+    gc_errors: list[str] = []
+    if gc_pending:
+        try:
+            gc_record = json.loads(gc_journal.read_text(encoding="utf-8"))
+            errors = gc_record.get("errors")
+            if isinstance(errors, Mapping):
+                gc_errors = sorted(
+                    {value for value in errors.values() if isinstance(value, str)}
+                )
+        except (OSError, json.JSONDecodeError):
+            gc_errors = ["cleanup journal is unreadable"]
     return {
         "state": state,
         "approved": approved,
@@ -232,6 +246,8 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
         ),
         "last_result": last_result,
         "stop_requested": (task.directory / "stop.requested").exists(),
+        "gc_pending": gc_pending,
+        "gc_errors": gc_errors,
         "strategy_revision": len(strategies),
         "search_id": int(latest_search.name) if latest_search is not None else None,
         "search_attempt": len(attempts) if attempts else None,
@@ -314,11 +330,13 @@ def task_report(task: LocatedTask) -> dict[str, Any]:
         calibration_summary = load_trial_count_record(
             task.directory, task.config
         ).get("calibration")
+    index = rebuild_task_index(task.directory, results)
     return {
         "task_id": task.config.task_id,
         "completed_experiments": len(results),
         "results": results,
         "dossier_root": str(task.directory / "reports" / "experiments"),
+        "index_path": str(index),
         "calibration_summary": calibration_summary,
         "limitations": (
             "Uncertainty is calculated by the approved evaluator for each candidate "

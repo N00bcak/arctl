@@ -257,6 +257,12 @@ def _status_table(payload: dict[str, Any]) -> str:
         rows.append(("Suspect test", "Pending for the provisional candidate"))
     if status.get("stop_requested"):
         rows.append(("Stop", "Safe stop requested"))
+    if status.get("gc_pending"):
+        detail = "; ".join(status.get("gc_errors") or ())
+        message = "Manual recovery required: run arctl gc"
+        if detail:
+            message += "\n" + safe_terminal_text(detail, limit=180)
+        rows.append(("Cleanup", message))
     log_path = status.get("log_path") or payload.get("log_path") or "—"
     rows.append(("Logs", safe_terminal_text(log_path)))
     return tabulate(
@@ -841,6 +847,15 @@ class _ProgressView:
                 self._line("  ✓ FINALIZING")
                 self._line("  ✓ COMPLETE")
                 self._line("    " + _result_line(event["result"]).lstrip())
+            elif kind == "mini_gc_complete":
+                self._line(
+                    f"  ✓ experiment cleanup · {event['reclaimed_bytes']} bytes reclaimed"
+                )
+            elif kind == "mini_gc_failed":
+                self._line(
+                    "  ! experiment cleanup deferred · "
+                    + safe_terminal_text(event["message"], limit=180)
+                )
             elif kind == "complete":
                 self._finish()
 
@@ -2131,6 +2146,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  arctl status [TASK] [--json]\n"
             "  arctl stop [TASK] [--json]\n"
             "  arctl report [TASK] [--json]\n"
+            "  arctl gc [TASK] [--dry-run] [--json]\n"
             "  arctl history [TASK] [--query TEXT] [--path GLOB]\n"
             "                        [--decision VALUE] [--json]\n"
             "  arctl inspect [TASK] [EXPERIMENT] [--artifacts] [--json]\n"
@@ -2345,6 +2361,21 @@ def build_parser() -> argparse.ArgumentParser:
     json_option(report)
     task_argument(report)
 
+    gc = command(
+        "gc",
+        "inventory or remove lifecycle-validated disposable task artifacts",
+        "Build one deterministic task-locked cleanup plan. Use --dry-run to inspect "
+        "the exact action graph without mutation.",
+        "Example:\n  arctl gc TASK --dry-run --json",
+    )
+    json_option(gc)
+    task_argument(gc)
+    gc.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="construct and report the cleanup plan without changing task artifacts",
+    )
+
     history = command(
         "history",
         "search the public strategy and experiment exploration ledger",
@@ -2472,6 +2503,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = _status(_data_root(arguments.data), arguments.task_id)
         elif arguments.command == "report":
             payload = _report(_data_root(arguments.data), arguments.task_id)
+        elif arguments.command == "gc":
+            task = _located(_data_root(arguments.data), arguments.task_id)
+            from .retention import run_gc
+
+            with TaskLock(task.directory / "lock"):
+                result = run_gc(task.directory, dry_run=arguments.dry_run)
+            failed = bool(result["failed"])
+            payload = {
+                **_payload(
+                    success=not failed,
+                    state="GC_FAILED" if failed else ("GC_DRY_RUN" if arguments.dry_run else "GC_COMPLETE"),
+                    task_id=task.config.task_id,
+                    action_required=failed,
+                    allowed_actions=("gc", "status"),
+                    next_command=f"arctl gc {task.config.task_id} --dry-run",
+                    message=(
+                        f"GC plan {result['plan_hash'][:12]}: "
+                        f"{result['eligible_path_count']} eligible paths, "
+                        f"{result['reclaimed_bytes']} bytes reclaimed."
+                    ),
+                    log_path=str(task.directory / ".gc"),
+                ),
+                "gc": result,
+            }
         elif arguments.command == "history":
             payload = _history(
                 _data_root(arguments.data),

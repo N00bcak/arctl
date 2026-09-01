@@ -117,6 +117,7 @@ def _run_process(
     writable_home: Path,
     stop_path: Path | None,
     execution_marker: Path,
+    python_cache: Path | None,
 ) -> None:
     try:
         result = run_or_load_once(
@@ -128,6 +129,7 @@ def _run_process(
             env=sanitized_environment(
                 codex_home=codex_home,
                 writable_home=writable_home,
+                python_cache=python_cache,
             ),
             stop_path=stop_path,
         )
@@ -254,6 +256,7 @@ def _run_subject_arm(
     codex_home: Path,
     stop_path: Path | None,
     subject_workers: int = SUBJECT_WORKERS,
+    python_cache: Path | None = None,
 ) -> tuple[Path, bool]:
     """Run one arm in isolated case shards and assemble its canonical ordered output."""
     output_directory = outputs / subject
@@ -304,7 +307,7 @@ def _run_subject_arm(
                     worker_batch,
                     *command_runtime_read_paths(command),
                 ),
-                (worker_output,),
+                (worker_output, *((python_cache,) if python_cache else ())),
                 "arctl-subject",
             ),
             cwd=subject_directory,
@@ -314,6 +317,7 @@ def _run_subject_arm(
             writable_home=worker_output,
             stop_path=stop_path,
             execution_marker=worker_output / "execution.started",
+            python_cache=python_cache,
         )
         _validate_subject_output(
             worker_result,
@@ -375,6 +379,7 @@ def run_comparison(
     stop_path: Path | None = None,
     progress: ProgressCallback | None = None,
     subject_workers: int = SUBJECT_WORKERS,
+    python_cache: Path | None = None,
 ) -> Evidence:
     """Run or recover one immutable comparison without redrawing any process."""
     expected_commands = {
@@ -480,7 +485,7 @@ def run_comparison(
                 prepare_request,
                 *command_runtime_read_paths(prepare_command),
             ),
-            (prepare_output,),
+            (prepare_output, *((python_cache,) if python_cache else ())),
             "arctl-evaluator",
         ),
         cwd=evaluator_directory,
@@ -490,6 +495,7 @@ def run_comparison(
         writable_home=prepare_output,
         stop_path=stop_path,
         execution_marker=prepare_output / "execution.started",
+        python_cache=python_cache,
     )
     _notify(
         progress,
@@ -541,6 +547,7 @@ def run_comparison(
             codex_home=codex_home,
             stop_path=stop_path,
             subject_workers=subject_workers,
+            python_cache=python_cache,
         )
         _notify(
             progress,
@@ -598,7 +605,7 @@ def run_comparison(
                 subject_outputs["candidate"],
                 *command_runtime_read_paths(score_command),
             ),
-            (score_output,),
+            (score_output, *((python_cache,) if python_cache else ())),
             "arctl-evaluator",
         ),
         cwd=evaluator_directory,
@@ -608,6 +615,7 @@ def run_comparison(
         writable_home=score_output,
         stop_path=stop_path,
         execution_marker=score_output / "execution.started",
+        python_cache=python_cache,
     )
     _notify(
         progress,

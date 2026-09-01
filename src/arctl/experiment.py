@@ -8,6 +8,7 @@ from pathlib import Path
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, Mapping
 
+from .bytecode import invalidate_worktree_bytecode
 from .decisions import Decision, failure_decision
 from .dossier import ensure_experiment_dossier
 from .downstream import transient_process_error
@@ -254,6 +255,7 @@ def run_public_checks(
     *,
     command_builder: Callable[[Sequence[str], Path, Path], Sequence[str]] | None = None,
     stop_path: Path | None = None,
+    python_cache: Path | None = None,
 ) -> bool:
     record = load_experiment(experiment_directory)
     if record.state != "CANDIDATE_FROZEN" or record.candidate is None:
@@ -264,6 +266,8 @@ def run_public_checks(
     elif resolve_commit(worktree, "HEAD") != record.candidate:
         raise StateError("candidate check worktree points at the wrong commit")
     ensure_clean_worktree(worktree)
+    if python_cache is not None:
+        invalidate_worktree_bytecode(python_cache, worktree)
 
     failure = experiment_directory / "public-check.failure.json"
     failed_check = None
@@ -304,12 +308,13 @@ def run_public_checks(
                 marked_command(command, execution_marker),
                 cwd=worktree,
                 read_paths=(worktree, *command_runtime_read_paths(command)),
-                write_paths=(output,),
+                write_paths=(output, *((python_cache,) if python_cache else ())),
                 profile="arctl-subject",
             )
             environment = sanitized_environment(
                 codex_home=codex_home,
                 writable_home=writable_home,
+                python_cache=python_cache,
             )
         else:
             execution_marker = None
@@ -331,6 +336,14 @@ def run_public_checks(
                 stop_path=stop_path,
             )
         except StoppedError:
+            write_json_once(
+                failure,
+                {
+                    "schema_version": 1,
+                    "check": index,
+                    "message": "public check was stopped before completion",
+                },
+            )
             raise
         except (ProcessError, StateError) as error:
             if execution_marker is not None and not execution_marker.is_file():

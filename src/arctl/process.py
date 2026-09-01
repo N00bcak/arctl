@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
 import os
 import platform
@@ -13,12 +14,13 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Sequence
 
 from .errors import ProcessError, StateError, StoppedError
-from .platform_process import inspect_process
+from .platform_process import boot_identity, inspect_process
 from .storage import atomic_write_json
 
 _GATED_EXEC = """\
@@ -26,33 +28,40 @@ import os
 import sys
 
 descriptor = int(sys.argv[1])
+token_descriptor = int(sys.argv[2])
 with os.fdopen(descriptor, "rb", closefd=True) as gate:
     released = gate.read(1)
 if released != b"1":
     raise SystemExit(125)
-os.execvp(sys.argv[2], sys.argv[2:])
+os.set_inheritable(token_descriptor, True)
+os.execvp(sys.argv[3], sys.argv[3:])
 """
 
 
-def _kill_recorded_process(directory: Path) -> None:
+def _load_process_record(directory: Path) -> dict[str, Any] | None:
     path = directory / "process.json"
     if not path.exists():
-        return
+        return None
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise StateError("managed process identity is invalid") from error
-    legacy_fields = {"schema_version", "pid", "start_time"}
-    current_fields = legacy_fields | {"platform", "pgid"}
-    if not isinstance(value, dict) or value.get("schema_version") not in {1, 2}:
+    fields = {
+        1: {"schema_version", "pid", "start_time"},
+        2: {"schema_version", "pid", "pgid", "platform", "start_time"},
+        3: {
+            "schema_version", "pid", "pgid", "platform", "start_time",
+            "boot_identity", "launch_token", "launch_token_file",
+            "launch_token_identity",
+        },
+    }
+    if not isinstance(value, dict) or value.get("schema_version") not in fields:
         raise StateError("managed process identity is invalid")
     version = value["schema_version"]
-    if set(value) != (legacy_fields if version == 1 else current_fields):
+    if set(value) != fields[version]:
         raise StateError("managed process identity is invalid")
     integer_fields = ("pid", "start_time") if version == 1 else (
-        "pid",
-        "pgid",
-        "start_time",
+        "pid", "pgid", "start_time"
     )
     if any(
         isinstance(value[field], bool)
@@ -61,10 +70,76 @@ def _kill_recorded_process(directory: Path) -> None:
         for field in integer_fields
     ):
         raise StateError("managed process identity is invalid")
-    if version == 2 and value["platform"] not in {"Linux", "Darwin"}:
+    if version >= 2 and value["platform"] not in {"Linux", "Darwin"}:
         raise StateError("managed process identity is invalid")
     if version == 1 and platform.system() != "Linux":
         raise StateError("managed process identity schema 1 is supported only on Linux")
+    if version == 3:
+        if any(
+            not isinstance(value[field], str) or not value[field]
+            for field in ("boot_identity", "launch_token", "launch_token_file")
+        ):
+            raise StateError("managed process identity is invalid")
+        token_path = Path(value["launch_token_file"])
+        if token_path.is_absolute() or token_path.parts != ("launch.token",):
+            raise StateError("managed process identity is invalid")
+        token_identity = value["launch_token_identity"]
+        if (
+            not isinstance(token_identity, dict)
+            or set(token_identity) != {"device", "inode"}
+            or any(
+                isinstance(item, bool) or not isinstance(item, int) or item <= 0
+                for item in token_identity.values()
+            )
+        ):
+            raise StateError("managed process identity is invalid")
+    return value
+
+
+def recorded_process_is_live(directory: Path) -> bool:
+    """Return liveness using process identity and the inherited launch-token lock."""
+    value = _load_process_record(directory)
+    if value is None:
+        return False
+    version = value["schema_version"]
+    if version == 3:
+        token = directory / value["launch_token_file"]
+        if token.is_symlink() or not token.is_file():
+            raise StateError("managed process launch token is invalid")
+        token_stat = token.stat(follow_symlinks=False)
+        if {
+            "device": token_stat.st_dev,
+            "inode": token_stat.st_ino,
+        } != value["launch_token_identity"]:
+            raise StateError("managed process launch token identity changed")
+        if token.read_text(encoding="utf-8") != value["launch_token"]:
+            raise StateError("managed process launch token is invalid")
+        with token.open("r+") as stream:
+            try:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            finally:
+                try:
+                    fcntl.flock(stream, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+        if value["boot_identity"] != boot_identity():
+            return False
+    current = inspect_process(value["pid"])
+    if current is None or not current.alive:
+        return False
+    recorded_pgid = value["pid"] if version == 1 else value["pgid"]
+    if version >= 2 and current.platform != value["platform"]:
+        return False
+    return current.start_time == value["start_time"] and current.pgid == recorded_pgid
+
+
+def _kill_recorded_process(directory: Path) -> None:
+    value = _load_process_record(directory)
+    if value is None:
+        return
+    version = value["schema_version"]
     pid = value["pid"]
     current = inspect_process(pid)
     if current is None or not current.alive:
@@ -146,6 +221,7 @@ def run_once(
     monotonic_started = time.monotonic()
     gate_read: int | None = None
     gate_write: int | None = None
+    token_stream: Any = None
     try:
         with (
             stdout_path.open("wb") as stdout,
@@ -157,12 +233,26 @@ def run_once(
             ) as stdin,
         ):
             gate_read, gate_write = os.pipe()
+            token_path = directory / "launch.token"
+            launch_token = uuid.uuid4().hex
+            descriptor = os.open(
+                token_path,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            token_stream = os.fdopen(descriptor, "r+")
+            token_stream.write(launch_token)
+            token_stream.flush()
+            os.fsync(token_stream.fileno())
+            fcntl.flock(token_stream, fcntl.LOCK_EX)
+            token_stat = os.fstat(token_stream.fileno())
             process = subprocess.Popen(
                 [
                     sys.executable,
                     "-c",
                     _GATED_EXEC,
                     str(gate_read),
+                    str(token_stream.fileno()),
                     *command,
                 ],
                 cwd=process_directory,
@@ -171,7 +261,7 @@ def run_once(
                 stderr=subprocess.PIPE,
                 start_new_session=True,
                 env=env,
-                pass_fds=(gate_read,),
+                pass_fds=(gate_read, token_stream.fileno()),
             )
             os.close(gate_read)
             gate_read = None
@@ -181,13 +271,22 @@ def run_once(
             atomic_write_json(
                 directory / "process.json",
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "platform": identity.platform,
                     "pid": identity.pid,
                     "pgid": identity.pgid,
                     "start_time": identity.start_time,
+                    "boot_identity": boot_identity(),
+                    "launch_token": launch_token,
+                    "launch_token_file": "launch.token",
+                    "launch_token_identity": {
+                        "device": token_stat.st_dev,
+                        "inode": token_stat.st_ino,
+                    },
                 },
             )
+            token_stream.close()
+            token_stream = None
             os.write(gate_write, b"1")
             os.close(gate_write)
             gate_write = None
@@ -269,6 +368,8 @@ def run_once(
             os.close(gate_read)
         if gate_write is not None:
             os.close(gate_write)
+        if token_stream is not None:
+            token_stream.close()
         if process is not None and process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()

@@ -237,6 +237,7 @@ def research_command(
     output_schema: Path,
     prompt: str,
     read_paths: Sequence[Path] = (),
+    write_paths: Sequence[Path] = (),
     codex: str = "codex",
     output_name: str = "request.public.json",
     model: str | None = None,
@@ -297,7 +298,11 @@ def research_command(
                 if writable_worktree
                 else ((worktree, *read_paths) if read_worktree else tuple(read_paths))
             ),
-            write_paths=((worktree, scratch) if writable_worktree else (scratch,)),
+            write_paths=(
+                (worktree, scratch, *write_paths)
+                if writable_worktree
+                else (scratch, *write_paths)
+            ),
             codex=codex,
         ),
         "--config",
@@ -326,15 +331,24 @@ def sanitized_environment(
     *,
     codex_home: Path,
     writable_home: Path,
+    python_cache: Path | None = None,
 ) -> dict[str, str]:
     resolved_home = writable_home.resolve()
-    environment = {
+    resolved_codex_home = codex_home.resolve()
+    resolved_home.mkdir(parents=True, exist_ok=True)
+    resolved_codex_home.mkdir(parents=True, exist_ok=True)
+    environment: dict[str, str] = {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         "HOME": str(resolved_home),
-        "CODEX_HOME": str(codex_home.resolve()),
+        "CODEX_HOME": str(resolved_codex_home),
         "TMPDIR": str(resolved_home),
-        "PYTHONPYCACHEPREFIX": str(resolved_home / "pycache"),
+        "PYTHONDONTWRITEBYTECODE": "1",
     }
+    if python_cache is not None:
+        resolved_cache = python_cache.resolve()
+        resolved_cache.mkdir(parents=True, exist_ok=True)
+        environment.pop("PYTHONDONTWRITEBYTECODE")
+        environment["PYTHONPYCACHEPREFIX"] = str(resolved_cache)
     for name in ("LANG", "LC_ALL", "TZ"):
         if value := os.environ.get(name):
             environment[name] = value

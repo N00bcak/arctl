@@ -99,12 +99,20 @@ Inspection, building, and setup review are offline; `--offline` additionally
 requires cached dependencies. Manual task authoring remains available through
 `arctl task create SOURCE`.
 
-Normal operation uses `run`, `status`, `stop`, `report`, and `inspect`.
+Normal operation uses `run`, `status`, `stop`, `report`, `inspect`, and `gc`.
 Interactive `run` shows the experiment FSM, comparison substages, and live
 stage timing. `status` names the experiment that promoted the current champion;
 `report` presents compact evidence and dossier IDs under one printed dossier
 root. Every published experiment receives a public-only Markdown dossier under
-the task’s `reports/experiments/` directory. Use `--json` for AI orchestration.
+the task’s `reports/experiments/` directory, with a rebuildable task index at
+`reports/README.md`. `arctl gc TASK --dry-run` shows the exact deterministic
+retention plan before transactional cleanup. During an experiment, all of its
+checks, evaluator stages, subject workers, arms, and reflection share one
+version-scoped Python bytecode cache. Once the result and ledger entry are
+durable and its worktrees are gone, arctl transactionally removes that cache
+and recognized scratch debris. A failed cleanup is nonfatal, appears in
+`status`, and remains recoverable with `arctl gc`. Use `--json` for AI
+orchestration.
 
 Task-v5 approvals lock the public environment code, interface, documentation,
 policy-free probes, and research method. A strategy session reads only the

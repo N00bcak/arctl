@@ -5,7 +5,10 @@ from __future__ import annotations
 import ctypes
 import errno
 import functools
+import hashlib
+import os
 import platform
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +29,33 @@ class ProcessIdentity:
     @property
     def alive(self) -> bool:
         return self.state != "zombie"
+
+
+@functools.lru_cache(maxsize=1)
+def boot_identity() -> str:
+    """Return a stable identity for the current host boot."""
+    system = platform.system()
+    if system == "Linux":
+        try:
+            value = Path("/proc/sys/kernel/random/boot_id").read_text(
+                encoding="utf-8"
+            ).strip()
+        except OSError as error:
+            raise ProcessError("could not identify host boot") from error
+    elif system == "Darwin":
+        # macOS sandboxes may deny kern.boottime and inspection of launchd.
+        # Wall-clock minus the monotonic clock yields the boot epoch; minute
+        # normalization removes sampling jitter while still changing on reboot.
+        value = str(int((time.time() - time.monotonic()) // 60))
+    else:
+        raise StateError(
+            f"unsupported operating system {system or 'unknown'}; "
+            "arctl supports Linux and macOS"
+        )
+    if not value:
+        raise ProcessError("could not identify host boot")
+    material = f"{system}\0{os.uname().nodename}\0{value}".encode()
+    return hashlib.sha256(material).hexdigest()
 
 
 class _ProcBSDInfo(ctypes.Structure):

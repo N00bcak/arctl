@@ -22,6 +22,7 @@ from .agent_backend import (
 )
 from .agent_selection import select_agent
 from .approval import verify_approval
+from .bytecode import ensure_experiment_bytecode_cache
 from .calibration import CalibrationCommandBuilder, calibrate_trial_count
 from .candidate_review import AgentCommandBuilder as ReviewCommandBuilder
 from .candidate_review import requirement_audit_schema, review_candidate
@@ -1643,6 +1644,7 @@ def _run_reserved_comparison(
     stop_path: Path,
     progress: ProgressCallback | None,
     subject_workers: int = SUBJECT_WORKERS,
+    python_cache: Path | None = None,
 ):
     record_path = experiment / "comparisons" / kind / "reservation.private.json"
     record = load_experiment(experiment)
@@ -1680,6 +1682,7 @@ def _run_reserved_comparison(
         stop_path=stop_path,
         progress=progress,
         subject_workers=subject_workers,
+        python_cache=python_cache,
         **arguments,
     )
 
@@ -1745,6 +1748,53 @@ def _remove_experiment_worktrees(
         )
 
 
+def _experiment_bytecode_cache(
+    task: LocatedTask, experiment: Path, manifest: EvaluatorManifest
+) -> Path:
+    return ensure_experiment_bytecode_cache(
+        task.directory,
+        experiment,
+        python_executable=manifest.subject_command[0],
+    )
+
+
+def _mini_gc_published_experiment(
+    task: LocatedTask,
+    experiment: Path,
+    *,
+    progress: ProgressCallback | None,
+) -> bool:
+    from .retention import run_experiment_gc
+
+    try:
+        result = run_experiment_gc(task.directory, experiment)
+    except (OSError, StateError) as error:
+        _notify(
+            progress,
+            "mini_gc_failed",
+            experiment_id=int(experiment.name),
+            message=str(error),
+        )
+        return False
+    if result["failed"]:
+        _notify(
+            progress,
+            "mini_gc_failed",
+            experiment_id=int(experiment.name),
+            plan_hash=result["plan_hash"],
+            message="experiment cleanup requires manual recovery",
+        )
+        return False
+    _notify(
+        progress,
+        "mini_gc_complete",
+        experiment_id=int(experiment.name),
+        plan_hash=result["plan_hash"],
+        reclaimed_bytes=result["reclaimed_bytes"],
+    )
+    return True
+
+
 def _reflect_final_result(
     task: LocatedTask,
     experiment: Path,
@@ -1754,6 +1804,7 @@ def _reflect_final_result(
     command_builder: ReflectionCommandBuilder | None,
     stop_path: Path,
     progress: ProgressCallback | None,
+    python_cache: Path,
 ) -> None:
     record = load_experiment(experiment)
     if record.state != "REFLECTING" or record.candidate is None:
@@ -1788,6 +1839,7 @@ def _reflect_final_result(
         champion_worktree=champion_worktree,
         stop_path=stop_path,
         command_builder=command_builder,
+        python_cache=python_cache,
     )
     complete_reflection(task.config, experiment, result)
     _notify(progress, "reflection_complete", experiment_id=record.experiment_id)
@@ -1883,6 +1935,43 @@ def run_task(
     for published in _public_history(task, manifest):
         _record_official_result(task, published, manifest)
     rebuild_catalog(task.directory)
+    mini_gc_enabled = True
+    from .retention import recover_gc_transaction
+
+    try:
+        recovered_gc = recover_gc_transaction(task.directory)
+    except (OSError, StateError) as error:
+        recovered_gc = None
+        mini_gc_enabled = False
+        _notify(progress, "mini_gc_failed", message=str(error))
+    if recovered_gc is not None and recovered_gc["failed"]:
+        mini_gc_enabled = False
+        _notify(
+            progress,
+            "mini_gc_failed",
+            plan_hash=recovered_gc["plan_hash"],
+            message="incomplete cleanup requires manual recovery",
+        )
+    if mini_gc_enabled:
+        experiments_root = task.directory / "experiments"
+        for completed in (
+            sorted(experiments_root.glob("[0-9]" * 6))
+            if experiments_root.is_dir()
+            else ()
+        ):
+            cache_record = completed / "runtime" / "bytecode-cache.private.json"
+            cache_roots = completed / "runtime" / "python-bytecode"
+            if (
+                load_experiment(completed).state == "COMPLETE"
+                and (completed / "published").is_file()
+                and cache_record.is_file()
+                and cache_roots.exists()
+            ):
+                mini_gc_enabled = _mini_gc_published_experiment(
+                    task, completed, progress=progress
+                )
+                if not mini_gc_enabled:
+                    break
     limit = task.config.max_experiments if max_experiments is None else max_experiments
     if limit is not None and (
         isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
@@ -1959,7 +2048,8 @@ def run_task(
                     active / "comparisons" / "primary" / "reservation.private.json"
                 )
                 if not primary_reservation.is_file():
-                    _discard_unreserved_experiment(task, active)
+                    if record.state == "RESEARCHING":
+                        _discard_unreserved_experiment(task, active)
                 elif record.state in (
                     "PRIMARY_RESERVED",
                     "PROVISIONAL",
@@ -1982,17 +2072,22 @@ def run_task(
                         if saved_primary.is_file()
                         else None
                     )
-                    results.append(
-                        publish_comparison_failure(
-                            task.config,
-                            active,
-                            request,
-                            manifest,
-                            source="stop",
-                            primary=primary,
-                        )
+                    stopped_result = publish_comparison_failure(
+                        task.config,
+                        active,
+                        request,
+                        manifest,
+                        source="stop",
+                        primary=primary,
                     )
+                    results.append(stopped_result)
+                    _record_official_result(task, stopped_result, manifest)
+                    _notify(progress, "result", result=stopped_result)
                     _remove_experiment_worktrees(task, record.experiment_id)
+                    if mini_gc_enabled:
+                        mini_gc_enabled = _mini_gc_published_experiment(
+                            task, active, progress=progress
+                        )
                 else:
                     # Valid final evidence is safer to publish than to replace.
                     stop.unlink()
@@ -2028,6 +2123,9 @@ def run_task(
                     command_builder=reflection_command_builder,
                     stop_path=stop,
                     progress=progress,
+                    python_cache=_experiment_bytecode_cache(
+                        task, experiment, manifest
+                    ),
                 )
             except StoppedError:
                 stop.unlink(missing_ok=True)
@@ -2050,6 +2148,10 @@ def run_task(
             _remove_experiment_worktrees(
                 task, load_experiment(experiment).experiment_id
             )
+            if mini_gc_enabled:
+                mini_gc_enabled = _mini_gc_published_experiment(
+                    task, experiment, progress=progress
+                )
             continue
         if experiment is not None and (experiment / "research.failure.json").is_file():
             _discard_unreserved_experiment(task, experiment)
@@ -2164,6 +2266,8 @@ def run_task(
                     manifest=manifest,
                 )
 
+            python_cache = _experiment_bytecode_cache(task, experiment, manifest)
+
             if record.state == "CANDIDATE_FROZEN":
                 if record.public_checks_passed is None:
                     _notify(
@@ -2177,6 +2281,7 @@ def run_task(
                             public_check_command_builder
                         )
                     check_arguments["stop_path"] = stop
+                    check_arguments["python_cache"] = python_cache
                     run_public_checks(
                         task.directory,
                         experiment,
@@ -2200,9 +2305,14 @@ def run_task(
                     _record_official_result(task, result, manifest)
                     _notify(progress, "result", result=result)
                     _remove_experiment_worktrees(task, record.experiment_id)
+                    if mini_gc_enabled:
+                        mini_gc_enabled = _mini_gc_published_experiment(
+                            task, experiment, progress=progress
+                        )
                     continue
         except StoppedError:
-            _discard_unreserved_experiment(task, experiment)
+            if load_experiment(experiment).state == "RESEARCHING":
+                _discard_unreserved_experiment(task, experiment)
             stop.unlink(missing_ok=True)
             stopped = True
             break
@@ -2247,6 +2357,7 @@ def run_task(
                 stop_path=stop,
                 progress=progress,
                 subject_workers=subject_workers,
+                python_cache=python_cache,
             )
         except ComparisonFailure as error:
             current = load_experiment(experiment)
@@ -2296,6 +2407,7 @@ def run_task(
                         stop_path=stop,
                         progress=progress,
                         subject_workers=subject_workers,
+                        python_cache=python_cache,
                     )
                 except ComparisonFailure as error:
                     result = publish_comparison_failure(
@@ -2339,6 +2451,7 @@ def run_task(
                         stop_path=stop,
                         progress=progress,
                         subject_workers=subject_workers,
+                        python_cache=python_cache,
                     )
                     if suspect_path.is_file()
                     else None
@@ -2370,6 +2483,7 @@ def run_task(
                     command_builder=reflection_command_builder,
                     stop_path=stop,
                     progress=progress,
+                    python_cache=python_cache,
                 )
             except StoppedError:
                 stop.unlink(missing_ok=True)
@@ -2389,6 +2503,10 @@ def run_task(
         _record_official_result(task, result, manifest)
         _notify(progress, "result", result=result)
         _remove_experiment_worktrees(task, record.experiment_id)
+        if mini_gc_enabled:
+            mini_gc_enabled = _mini_gc_published_experiment(
+                task, experiment, progress=progress
+            )
         if stop.exists():
             stop.unlink()
             stopped = True

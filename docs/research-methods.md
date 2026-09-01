@@ -69,12 +69,17 @@ Before review, arctl times that approved probe and projects official runtime.
 Likely overruns are visible to the implementer, reviewer, and operator but do
 not reject the candidate or alter approved trials.
 
-Python caches are redirected to attempt scratch space when the interpreter
-allows it. Canonical untracked `__pycache__/*.pyc` files that bypass that
-redirect, including under isolated Python, are discarded at writable lifecycle
-boundaries and recorded by stage in `runtime-artifacts.public.json`. Tracked,
-symlinked, orphaned, or noncanonical bytecode remains subject to the normal
-editable-path checks.
+Outside a frozen experiment, managed Python processes disable bytecode writes.
+After an experiment request is frozen, its checks, evaluator stages, subject
+workers, arms, and reflection share one cache under
+`experiments/<ID>/runtime/python-bytecode/<cache-tag>`. Separate experiments
+never share a namespace. Before candidate validation, arctl invalidates only
+the mutable worktree's mirrored cache subtree. After durable publication, a
+scoped transactional cleanup removes the experiment cache and recognized
+scratch debris. Canonical untracked `__pycache__/*.pyc` files that bypass these
+controls are discarded at writable lifecycle boundaries and recorded by stage
+in `runtime-artifacts.public.json`; manual `arctl gc` retains support for legacy
+per-process caches.
 
 Public results retain the promotion `decision` and add independent status axes.
 `operational_status` records whether execution completed; `scientific_status`

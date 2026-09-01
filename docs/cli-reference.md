@@ -27,6 +27,7 @@ commands:
     status    show the task's current controller state and resumability
     stop      request a safe idempotent stop
     report    list completed experiments and public dossier paths
+    gc        inventory or remove lifecycle-validated disposable task artifacts
     history   search the public strategy and experiment exploration ledger
     inspect   inspect one experiment and its safe artifacts
 
@@ -52,6 +53,7 @@ Complete command forms:
   arctl status [TASK] [--json]
   arctl stop [TASK] [--json]
   arctl report [TASK] [--json]
+  arctl gc [TASK] [--dry-run] [--json]
   arctl history [TASK] [--query TEXT] [--path GLOB]
                         [--decision VALUE] [--json]
   arctl inspect [TASK] [EXPERIMENT] [--artifacts] [--json]
@@ -232,6 +234,25 @@ positional arguments:
 options:
   -h, --help  show this help message and exit
   --json      emit one stable machine-readable JSON object
+```
+
+## `arctl gc -h`
+
+```text
+usage: arctl gc [-h] [--json] [--dry-run] [TASK]
+
+Build one deterministic task-locked cleanup plan. Use --dry-run to inspect the exact action graph without mutation.
+
+positional arguments:
+  TASK        task ID; omit when the current repository identifies exactly one task
+
+options:
+  -h, --help  show this help message and exit
+  --json      emit one stable machine-readable JSON object
+  --dry-run   construct and report the cleanup plan without changing task artifacts
+
+Example:
+  arctl gc TASK --dry-run --json
 ```
 
 ## `arctl history -h`

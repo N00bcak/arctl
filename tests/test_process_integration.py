@@ -18,6 +18,7 @@ from arctl.platform_process import ProcessIdentity, inspect_process
 from arctl.process import (
     _kill_recorded_process,
     read_valid_result,
+    recorded_process_is_live,
     run_once,
     run_or_load_once,
 )
@@ -96,10 +97,23 @@ class ProcessIntegrationTests(unittest.TestCase):
             self.assertEqual(read_valid_result(directory), result)
             self.assertEqual((directory / "stdout.bin").read_text(), "ok\n")
             identity = json.loads((directory / "process.json").read_text())
-            self.assertEqual(identity["schema_version"], 2)
+            self.assertEqual(identity["schema_version"], 3)
             self.assertEqual(
                 set(identity),
-                {"schema_version", "platform", "pid", "pgid", "start_time"},
+                {
+                    "schema_version", "platform", "pid", "pgid", "start_time",
+                    "boot_identity", "launch_token", "launch_token_file",
+                    "launch_token_identity",
+                },
+            )
+            self.assertEqual(identity["launch_token_file"], "launch.token")
+            self.assertEqual(
+                (directory / "launch.token").read_text(), identity["launch_token"]
+            )
+            token_stat = (directory / "launch.token").stat()
+            self.assertEqual(
+                identity["launch_token_identity"],
+                {"device": token_stat.st_dev, "inode": token_stat.st_ino},
             )
             with self.assertRaisesRegex(StateError, "cannot be rerun"):
                 run_once(
@@ -107,6 +121,18 @@ class ProcessIntegrationTests(unittest.TestCase):
                     ["python3", "-c", "print('second')"],
                     timeout_seconds=2,
                 )
+
+    def test_launch_token_inode_substitution_is_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary, "process")
+            run_once(directory, ["true"], timeout_seconds=2)
+            token = directory / "launch.token"
+            content = token.read_text()
+            token.unlink()
+            token.write_text(content)
+
+            with self.assertRaisesRegex(StateError, "identity changed"):
+                recorded_process_is_live(directory)
 
     def test_discards_process_working_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

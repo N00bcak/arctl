@@ -544,9 +544,14 @@ scratch = Path(sys.argv[1])
                 "reflection",
                 "reflection_complete",
                 "result",
+                "mini_gc_complete",
                 "complete",
             ],
         )
+        cache_manifest = json.loads(
+            (experiment / "runtime" / "bytecode-cache.private.json").read_text()
+        )
+        self.assertFalse((self.task_directory / cache_manifest["cache_path"]).exists())
 
         self.assertEqual(
             [
@@ -595,6 +600,35 @@ scratch = Path(sys.argv[1])
             comparison_command_builder=self.unconfined_comparison,
         )
         self.assertEqual(exhausted.results, ())
+
+    def test_mini_gc_failure_is_nonfatal_and_visible_in_status(self) -> None:
+        journal = self.task_directory / ".gc" / "transaction.json"
+
+        def fail_cleanup(_task, _experiment):
+            journal.parent.mkdir(parents=True)
+            journal.write_text(
+                json.dumps({"errors": {"cache": "permission denied"}}) + "\n"
+            )
+            return {
+                "failed": True,
+                "plan_hash": "failed-plan",
+                "reclaimed_bytes": 0,
+            }
+
+        with mock.patch("arctl.retention.run_experiment_gc", side_effect=fail_cleanup):
+            outcome = run_task(
+                self.task,
+                max_experiments=1,
+                research_command_builder=self.research_command,
+                public_check_command_builder=self.unconfined_public,
+                comparison_command_builder=self.unconfined_comparison,
+            )
+
+        self.assertEqual(len(outcome.results), 1)
+        self.assertTrue((self.task_directory / "experiments" / "000001" / "published").is_file())
+        status = task_status(self.task)
+        self.assertTrue(status["gc_pending"])
+        self.assertEqual(status["gc_errors"], ["permission denied"])
 
     def test_reviewed_candidate_passes_before_experiment_and_is_reported(self) -> None:
         config = replace(
@@ -762,6 +796,10 @@ scratch = Path(sys.argv[1])
         self.assertEqual(task_status(self.task)["state"], "REFLECTION_FAILED")
         experiment = self.task_directory / "experiments" / "000001"
         self.assertFalse((experiment / "published").exists())
+        cache_manifest = json.loads(
+            (experiment / "runtime" / "bytecode-cache.private.json").read_text()
+        )
+        self.assertTrue((self.task_directory / cache_manifest["cache_path"]).is_dir())
 
         recovered = run_task(
             self.task,
@@ -774,6 +812,7 @@ scratch = Path(sys.argv[1])
         )
         self.assertFalse(recovered.reflection_failed)
         self.assertTrue((experiment / "published").is_file())
+        self.assertFalse((self.task_directory / cache_manifest["cache_path"]).exists())
         self.assertEqual(task_status(self.task)["state"], "LIMIT_REACHED")
 
     def test_exact_duplicates_refresh_strategy_then_stall_without_an_experiment(self) -> None:
@@ -1316,6 +1355,48 @@ scratch = Path(sys.argv[1])
         self.assertEqual(outcome.results[0]["experiment_id"], 1)
         self.assertFalse((experiment / "public-check.failure.json").exists())
 
+    def test_stopped_public_check_retains_cache_and_resumes(self) -> None:
+        stop = self.task_directory / "stop.requested"
+
+        def stop_public(command, _cwd, output):
+            if "experiments" not in output.parts:
+                return command
+            script = (
+                "import pathlib,sys,time;"
+                "pathlib.Path(sys.argv[1]).write_text('{}');"
+                "time.sleep(30)"
+            )
+            return ("python3", "-c", script, str(stop))
+
+        stopped = run_task(
+            self.task,
+            max_experiments=1,
+            research_command_builder=self.research_command,
+            public_check_command_builder=stop_public,
+            comparison_command_builder=self.unconfined_comparison,
+        )
+
+        self.assertTrue(stopped.stopped)
+        experiment = self.task_directory / "experiments" / "000001"
+        self.assertFalse((experiment / "published").exists())
+        cache_manifest = json.loads(
+            (experiment / "runtime" / "bytecode-cache.private.json").read_text()
+        )
+        cache = self.task_directory / cache_manifest["cache_path"]
+        self.assertTrue(cache.is_dir())
+
+        recovered = run_task(
+            self.task,
+            max_experiments=1,
+            research_command_builder=lambda *_: self.fail("research was repeated"),
+            public_check_command_builder=self.unconfined_public,
+            comparison_command_builder=self.unconfined_comparison,
+        )
+
+        self.assertEqual(len(recovered.results), 1)
+        self.assertTrue((experiment / "published").is_file())
+        self.assertFalse(cache.exists())
+
     def test_stop_after_reservation_publishes_invalid(self) -> None:
         stop = self.task_directory / "stop.requested"
         first = True
@@ -1349,6 +1430,21 @@ scratch = Path(sys.argv[1])
         )
         experiment = self.task_directory / "experiments" / "000001"
         self.assertTrue((experiment / "published").is_file())
+        cache_manifest = json.loads(
+            (experiment / "runtime" / "bytecode-cache.private.json").read_text()
+        )
+        self.assertFalse((self.task_directory / cache_manifest["cache_path"]).exists())
+        self.assertEqual(
+            len(
+                search_ledger(
+                    self.task_directory,
+                    query=None,
+                    path=None,
+                    decision="INVALID",
+                )
+            ),
+            1,
+        )
 
     def test_stop_recovers_crashed_reserved_comparison_as_invalid(self) -> None:
         with mock.patch(

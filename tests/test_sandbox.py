@@ -330,14 +330,14 @@ class SandboxCommandTests(unittest.TestCase):
             )
             self.assertEqual(
                 set(environment),
-                {"PATH", "HOME", "CODEX_HOME", "TMPDIR", "PYTHONPYCACHEPREFIX"}
+                {"PATH", "HOME", "CODEX_HOME", "TMPDIR", "PYTHONDONTWRITEBYTECODE"}
                 | ({"LANG"} if "LANG" in environment else set())
                 | ({"LC_ALL"} if "LC_ALL" in environment else set())
                 | ({"TZ"} if "TZ" in environment else set()),
             )
             self.assertNotIn("OPENAI_API_KEY", environment)
 
-    def test_environment_routes_compiled_python_outside_the_worktree(self) -> None:
+    def test_environment_suppresses_import_bytecode(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             worktree = root / "worktree"
@@ -348,7 +348,7 @@ class SandboxCommandTests(unittest.TestCase):
             source.write_text("VALUE = 1\n", encoding="utf-8")
 
             completed = subprocess.run(
-                (sys.executable, "-m", "py_compile", source.name),
+                (sys.executable, "-c", "import policy"),
                 cwd=worktree,
                 env=sanitized_environment(
                     codex_home=root / "codex-home",
@@ -361,4 +361,18 @@ class SandboxCommandTests(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(list(worktree.rglob("*.pyc")), [])
-            self.assertNotEqual(list((writable_home / "pycache").rglob("*.pyc")), [])
+            self.assertEqual(list(writable_home.rglob("*.pyc")), [])
+
+    def test_environment_routes_bytecode_to_experiment_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "experiment-cache"
+            environment = sanitized_environment(
+                codex_home=root / "codex-home",
+                writable_home=root / "output",
+                python_cache=cache,
+            )
+
+            self.assertNotIn("PYTHONDONTWRITEBYTECODE", environment)
+            self.assertEqual(environment["PYTHONPYCACHEPREFIX"], str(cache.resolve()))
+            self.assertTrue(cache.is_dir())
