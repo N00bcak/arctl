@@ -152,9 +152,8 @@ def reflection_schema(
                         ],
                     },
                     "rationale": text,
-                    "test": text,
-                },
-                required=("kind", "rationale"),
+                    "test": {"type": ["string", "null"], "minLength": 1},
+                }
             ),
         }
         schema = strict(properties)

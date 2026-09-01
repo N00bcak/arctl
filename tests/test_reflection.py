@@ -87,6 +87,7 @@ def assessment_v4(metrics: list[str]) -> dict:
         "next_action": {
             "kind": "revisit_after_better_evidence",
             "rationale": "Activation was not measured.",
+            "test": None,
         },
     }
 

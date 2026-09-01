@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from arctl.candidate_review import repair_schema, review_schema as candidate_review_schema
 from arctl.codex_schema import validate_codex_output_schema
@@ -8,6 +11,7 @@ from arctl.errors import StateError
 from arctl.manifest import EvaluatorManifest
 from arctl.reflection import reflection_schema
 from arctl.runner import _implementation_schema, _research_schema
+from arctl.sandbox import research_command
 from arctl.search import planning_schema, research_schema, strategy_schema
 from arctl.setup import (
     _direct_build_schema,
@@ -108,6 +112,33 @@ class CodexSchemaTests(unittest.TestCase):
     def test_reflection_v3_requires_bounded_metric_names(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires metric_names"):
             reflection_schema(version=3)
+
+    def test_production_reflection_v4_schema_reaches_codex_submission(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            schema_path = root / "scratch" / "reflection.schema.json"
+            schema_path.parent.mkdir()
+            schema = reflection_schema(
+                version=4,
+                metric_names=("errors",),
+                strategy_behavior_id="avoid-errors",
+                history_entry_ids=("entry-a",),
+            )
+            schema_path.write_text(json.dumps(schema), encoding="utf-8")
+
+            command = research_command(
+                worktree=root / "candidate",
+                scratch=schema_path.parent,
+                output_schema=schema_path,
+                prompt="reflect",
+                writable_worktree=False,
+            )
+
+            self.assertIn("--output-schema", command)
+            self.assertEqual(
+                command[command.index("--output-schema") + 1],
+                str(schema_path.resolve()),
+            )
 
     def test_unsupported_composition_is_rejected_with_its_path(self) -> None:
         schema = {
