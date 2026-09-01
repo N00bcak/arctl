@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import selectors
@@ -404,6 +405,57 @@ def read_valid_result(directory: Path) -> dict[str, Any]:
     return value
 
 
+def read_valid_started(directory: Path) -> dict[str, Any]:
+    path = directory / "started.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise StateError("process has no valid started record") from error
+    base = {"schema_version", "command", "cwd", "environment", "stop_path"}
+    fields = {1: base, 2: base | {"stdin"}}
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") not in fields
+        or set(value) != fields[value["schema_version"]]
+        or not isinstance(value["command"], list)
+        or not value["command"]
+        or not all(isinstance(argument, str) for argument in value["command"])
+    ):
+        raise StateError("process has no valid started record")
+    for field in ("cwd", "stop_path"):
+        raw = value[field]
+        if raw is not None and (
+            not isinstance(raw, str) or not raw or not Path(raw).is_absolute()
+        ):
+            raise StateError("process has no valid started record")
+    environment = value["environment"]
+    if environment is not None and (
+        not isinstance(environment, dict)
+        or not all(
+            isinstance(name, str)
+            and name
+            and isinstance(raw, str)
+            for name, raw in environment.items()
+        )
+    ):
+        raise StateError("process has no valid started record")
+    if value["schema_version"] == 2:
+        stdin = value["stdin"]
+        if (
+            not isinstance(stdin, dict)
+            or set(stdin) != {"path", "bytes", "sha256"}
+            or not isinstance(stdin["path"], str)
+            or not Path(stdin["path"]).is_absolute()
+            or isinstance(stdin["bytes"], bool)
+            or not isinstance(stdin["bytes"], int)
+            or stdin["bytes"] < 0
+            or not isinstance(stdin["sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", stdin["sha256"])
+        ):
+            raise StateError("process has no valid started record")
+    return value
+
+
 def run_or_load_once(
     directory: Path,
     command: Sequence[str],
@@ -426,10 +478,7 @@ def run_or_load_once(
     }
     started_path = directory / "started.json"
     if (directory / "result.json").exists():
-        try:
-            started = json.loads(started_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise StateError("process result has no valid started record") from error
+        started = read_valid_started(directory)
         if started != expected_started:
             raise StateError("saved process does not match the reserved command")
         return read_valid_result(directory)

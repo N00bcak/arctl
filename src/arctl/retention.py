@@ -18,7 +18,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from .errors import StateError
-from .process import read_valid_result, recorded_process_is_live
+from .process import read_valid_result, read_valid_started, recorded_process_is_live
 from .storage import atomic_write_bytes, atomic_write_json
 from .taskio import load_task
 
@@ -242,22 +242,55 @@ def experiment_canonical_snapshot(task: Path, experiment: Path) -> dict[str, Any
     }
 
 
-def _process_terminal(process_directory: Path, task: Path) -> bool:
+def _process_ownership_evidence(
+    process_directory: Path, task: Path
+) -> dict[str, Any]:
+    read_valid_started(process_directory)
+    evidence: dict[str, Any] = {
+        "started_sha256": _sha256((process_directory / "started.json").read_bytes())
+    }
     try:
         read_valid_result(process_directory)
-        return True
     except StateError:
-        pass
-    parts = process_directory.relative_to(task).parts
-    if "experiments" in parts:
-        index = parts.index("experiments")
-        if len(parts) > index + 1:
-            experiment = task.joinpath(*parts[: index + 2])
-            return (
-                (experiment / "published").is_file()
-                and (experiment / "result.public.json").is_file()
+        parts = process_directory.relative_to(task).parts
+        experiment: Path | None = None
+        if "experiments" in parts:
+            index = parts.index("experiments")
+            if len(parts) > index + 1:
+                experiment = task.joinpath(*parts[: index + 2])
+        if (
+            experiment is not None
+            and (experiment / "published").is_file()
+            and (experiment / "result.public.json").is_file()
+        ):
+            evidence.update(
+                {
+                    "terminal": True,
+                    "published_identity": _lstat_identity(experiment / "published"),
+                    "result_sha256": _sha256(
+                        (experiment / "result.public.json").read_bytes()
+                    ),
+                }
             )
-    return False
+            return evidence
+        process_record = process_directory / "process.json"
+        if not process_record.is_file() or process_record.is_symlink():
+            raise StateError("managed process ownership record is incomplete")
+        recorded_process_is_live(process_directory)
+        evidence.update(
+            {
+                "terminal": False,
+                "process_sha256": _sha256(process_record.read_bytes()),
+            }
+        )
+        return evidence
+    evidence.update(
+        {
+            "terminal": True,
+            "result_sha256": _sha256((process_directory / "result.json").read_bytes()),
+        }
+    )
+    return evidence
 
 
 def _ensure_no_live_process(
@@ -291,16 +324,18 @@ def _managed_homes(
     for started in search_root.rglob("started.json"):
         if started.parent.name == ".gc" or started.is_symlink():
             continue
+        process_directory = started.parent
         try:
-            value = json.loads(started.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            value = read_valid_started(process_directory)
+            lifecycle_root = _process_lifecycle_root(task, process_directory)
+            evidence = _process_ownership_evidence(process_directory, task)
+        except StateError:
             continue
         environment = value.get("environment") if isinstance(value, Mapping) else None
         if not isinstance(environment, Mapping):
             continue
-        process_directory = started.parent
-        terminal = _process_terminal(process_directory, task)
-        for name in ("HOME", "TMPDIR", "CODEX_HOME", "PYTHONPYCACHEPREFIX"):
+        terminal = bool(evidence["terminal"])
+        for name in ("HOME", "TMPDIR", "CODEX_HOME"):
             raw = environment.get(name)
             if not isinstance(raw, str) or not raw:
                 continue
@@ -308,9 +343,48 @@ def _managed_homes(
             if not path.is_absolute():
                 continue
             resolved = path.resolve(strict=False)
-            if _inside(task, resolved):
+            if _owned_runtime_root(lifecycle_root, process_directory, resolved):
                 homes.append((resolved, process_directory, terminal))
     return tuple(dict.fromkeys(homes))
+
+
+def _process_lifecycle_root(task: Path, process_directory: Path) -> Path:
+    try:
+        parts = process_directory.relative_to(task).parts
+    except ValueError as error:
+        raise StateError("managed process lifecycle is invalid") from error
+    if "process" not in parts:
+        raise StateError("managed process lifecycle is invalid")
+    if parts[0] == "setup":
+        root = task / "setup"
+    elif parts[0] in {"searches", "strategy"} and len(parts) >= 5:
+        if not parts[1].isdigit() or parts[2] != "attempts" or not parts[3].isdigit():
+            raise StateError("managed process lifecycle is invalid")
+        root = task.joinpath(*parts[:4])
+    elif parts[0] == "experiments" and len(parts) >= 3 and parts[1].isdigit():
+        root = task.joinpath(*parts[:2])
+    elif parts[0] == "calibration":
+        root = task / "calibration"
+    else:
+        raise StateError("managed process lifecycle is invalid")
+    if not _inside(root, process_directory):
+        raise StateError("managed process lifecycle is invalid")
+    return root
+
+
+def _owned_runtime_root(
+    lifecycle_root: Path, process_directory: Path, candidate: Path
+) -> bool:
+    if not _inside(lifecycle_root, candidate):
+        return False
+    relative = candidate.relative_to(lifecycle_root)
+    if any(part in {"process", "attempts"} for part in relative.parts):
+        return False
+    if candidate in process_directory.parents and candidate != lifecycle_root:
+        return True
+    if candidate.name in {"home", "output", "sandbox-home", "codex-home"}:
+        return True
+    return "outputs" in relative.parts
 
 
 def _action(

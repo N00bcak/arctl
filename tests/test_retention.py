@@ -33,11 +33,11 @@ def write_json(path: Path, value: object) -> None:
 class RetentionTests(unittest.TestCase):
     def make_completed_cache(self, task: Path) -> Path:
         (task / "task.yaml").write_text("task_id: demo\n")
-        home = task / "stage" / "output"
+        home = task / "setup" / "fixture" / "output"
         cache = home / "pycache"
         cache.mkdir(parents=True)
         (cache / "module.pyc").write_bytes(b"compiled")
-        process = task / "stage" / "process"
+        process = task / "setup" / "fixture" / "process"
         write_json(
             process / "started.json",
             {"schema_version": 1, "command": ["true"], "cwd": str(task),
@@ -47,6 +47,11 @@ class RetentionTests(unittest.TestCase):
             process / "result.json",
             {"schema_version": 2, "return_code": 0, "stdout_bytes": 0,
              "stderr_bytes": 0, "elapsed_seconds": 0.1},
+        )
+        write_json(
+            process / "process.json",
+            {"schema_version": 2, "pid": 999999, "pgid": 999999,
+             "platform": "Darwin", "start_time": 1},
         )
         return cache
 
@@ -68,6 +73,36 @@ class RetentionTests(unittest.TestCase):
             second = run_gc(task, dry_run=False)
             self.assertEqual(second["eligible_bytes"], 0)
             self.assertFalse(second["mutation_occurred"])
+
+    def test_malformed_started_record_cannot_claim_an_arbitrary_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            task = Path(temporary, "demo")
+            task.mkdir()
+            (task / "task.yaml").write_text("task_id: demo\n")
+            valuable = task / "valuable"
+            cache = valuable / "__pycache__"
+            cache.mkdir(parents=True)
+            (cache / "preserve.pyc").write_bytes(b"valuable")
+            forged = task / "forged" / "process"
+            write_json(forged / "started.json", {"environment": {"HOME": str(valuable)}})
+            write_json(
+                forged / "result.json",
+                {"schema_version": 2, "return_code": 0, "stdout_bytes": 0,
+                 "stderr_bytes": 0, "elapsed_seconds": 0.1},
+            )
+
+            plan = build_gc_plan(task)
+
+            claimed = cache.relative_to(task).as_posix()
+            self.assertNotIn(
+                claimed,
+                {
+                    item
+                    for action in plan["actions"]
+                    for item in action["inputs"]
+                },
+            )
+            self.assertTrue(cache.exists())
 
     def test_scoped_gc_removes_only_a_published_experiment_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
