@@ -96,11 +96,9 @@ def _load_process_record(directory: Path) -> dict[str, Any] | None:
     return value
 
 
-def recorded_process_is_live(directory: Path) -> bool:
-    """Return liveness using process identity and the inherited launch-token lock."""
-    value = _load_process_record(directory)
-    if value is None:
-        return False
+def _matching_managed_process(
+    directory: Path, value: Mapping[str, Any]
+) -> Any | None:
     version = value["schema_version"]
     if version == 3:
         token = directory / value["launch_token_file"]
@@ -114,25 +112,35 @@ def recorded_process_is_live(directory: Path) -> bool:
             raise StateError("managed process launch token identity changed")
         if token.read_text(encoding="utf-8") != value["launch_token"]:
             raise StateError("managed process launch token is invalid")
+        if value["boot_identity"] != boot_identity():
+            return None
         with token.open("r+") as stream:
             try:
                 fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                return True
+                pass
+            else:
+                return None
             finally:
                 try:
                     fcntl.flock(stream, fcntl.LOCK_UN)
                 except OSError:
                     pass
-        if value["boot_identity"] != boot_identity():
-            return False
     current = inspect_process(value["pid"])
     if current is None or not current.alive:
-        return False
+        return None
     recorded_pgid = value["pid"] if version == 1 else value["pgid"]
     if version >= 2 and current.platform != value["platform"]:
-        return False
-    return current.start_time == value["start_time"] and current.pgid == recorded_pgid
+        return None
+    if current.start_time != value["start_time"] or current.pgid != recorded_pgid:
+        return None
+    return current
+
+
+def recorded_process_is_live(directory: Path) -> bool:
+    """Return liveness using the complete managed-process identity predicate."""
+    value = _load_process_record(directory)
+    return value is not None and _matching_managed_process(directory, value) is not None
 
 
 def _kill_recorded_process(directory: Path) -> None:
@@ -140,21 +148,11 @@ def _kill_recorded_process(directory: Path) -> None:
     if value is None:
         return
     version = value["schema_version"]
+    current = _matching_managed_process(directory, value)
+    if current is None:
+        return
     pid = value["pid"]
-    current = inspect_process(pid)
-    if current is None or not current.alive:
-        return
-    if version == 1:
-        recorded_pgid = pid
-    else:
-        if current.platform != value["platform"]:
-            return
-        recorded_pgid = value["pgid"]
-    if (
-        current.start_time != value["start_time"]
-        or current.pgid != recorded_pgid
-    ):
-        return
+    recorded_pgid = pid if version == 1 else value["pgid"]
     try:
         os.killpg(recorded_pgid, signal.SIGKILL)
     except ProcessLookupError:

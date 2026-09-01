@@ -410,6 +410,40 @@ run_once(
                 _kill_recorded_process(directory)
             inspect.assert_not_called()
 
+    def test_recovery_never_signals_a_matching_pid_from_another_boot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            token = directory / "launch.token"
+            token.write_text("recorded-token")
+            token_stat = token.stat()
+            identity = ProcessIdentity("Darwin", 12, 12, 34, "running")
+            (directory / "process.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 3,
+                        "platform": "Darwin",
+                        "pid": 12,
+                        "pgid": 12,
+                        "start_time": 34,
+                        "boot_identity": "prior-boot",
+                        "launch_token": "recorded-token",
+                        "launch_token_file": "launch.token",
+                        "launch_token_identity": {
+                            "device": token_stat.st_dev,
+                            "inode": token_stat.st_ino,
+                        },
+                    }
+                )
+            )
+            with (
+                mock.patch("arctl.process.boot_identity", return_value="current-boot"),
+                mock.patch("arctl.process.inspect_process", return_value=identity),
+                mock.patch("arctl.process.os.killpg") as kill,
+            ):
+                _kill_recorded_process(directory)
+
+            kill.assert_not_called()
+
     def test_rejects_corrupt_result(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
