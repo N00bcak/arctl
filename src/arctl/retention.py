@@ -22,6 +22,7 @@ from .storage import atomic_write_bytes, atomic_write_json
 from .taskio import load_task
 
 _GC_SCHEMA_VERSION = 1
+_MINI_GC_FAILURE = Path(".gc/mini-gc-failure.json")
 _ROOT_CANONICAL = frozenset(
     {
         "approval.json", "backend-approval.json", "evaluator.commit",
@@ -37,6 +38,41 @@ def _json_bytes(value: Any) -> bytes:
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _record_mini_gc_failure(
+    task: Path,
+    *,
+    experiment_id: int,
+    phase: str,
+    reason: str,
+    plan_hash: str | None = None,
+) -> None:
+    atomic_write_json(
+        task / _MINI_GC_FAILURE,
+        {
+            "schema_version": 1,
+            "experiment_id": experiment_id,
+            "phase": phase,
+            "reason": reason,
+            "plan_hash": plan_hash,
+        },
+    )
+
+
+def _clear_mini_gc_failure(task: Path) -> None:
+    path = task / _MINI_GC_FAILURE
+    if path.is_file() and not path.is_symlink():
+        path.unlink()
+
+
+def _gc_failure_reason(summary: Mapping[str, Any]) -> str:
+    errors = summary.get("errors")
+    if isinstance(errors, Mapping):
+        reasons = sorted({value for value in errors.values() if isinstance(value, str)})
+        if reasons:
+            return "; ".join(reasons)
+    return "experiment cleanup requires manual recovery"
 
 
 def _inside(root: Path, path: Path) -> bool:
@@ -1480,6 +1516,7 @@ def _execute_plan(task: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "removed_path_count": len(removed_ids),
         "execution": execution,
+        "errors": dict(journal.get("errors", {})),
         "failed": failed,
     }
     atomic_write_json(task / "gc.private.json", summary)
@@ -1528,25 +1565,75 @@ def run_experiment_gc(
 ) -> dict[str, Any]:
     """Recover prior cleanup, then clean one durably completed experiment."""
     task = task_directory.resolve()
+    experiment = experiment_directory.resolve()
+    try:
+        experiment_id = int(experiment.name)
+    except ValueError as error:
+        raise StateError("experiment cleanup scope is invalid") from error
     journal_path = task / ".gc" / "transaction.json"
     if journal_path.is_file():
         try:
-            journal = json.loads(journal_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise StateError("garbage-collection journal is invalid") from error
-        prior = journal.get("plan")
-        if not isinstance(prior, Mapping):
-            raise StateError("garbage-collection journal is invalid")
-        recovery = _execute_plan(task, prior)
+            try:
+                journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise StateError("garbage-collection journal is invalid") from error
+            prior = journal.get("plan")
+            if not isinstance(prior, Mapping):
+                raise StateError("garbage-collection journal is invalid")
+            recovery = _execute_plan(task, prior)
+        except (OSError, StateError) as error:
+            _record_mini_gc_failure(
+                task,
+                experiment_id=experiment_id,
+                phase="recovery",
+                reason=str(error),
+            )
+            raise
         if recovery["failed"]:
+            _record_mini_gc_failure(
+                task,
+                experiment_id=experiment_id,
+                phase="recovery",
+                reason=_gc_failure_reason(recovery),
+                plan_hash=recovery["plan_hash"],
+            )
             return _present(
                 prior,
                 dry_run=False,
                 execution=recovery["execution"],
                 summary=recovery,
             )
-    plan = build_experiment_gc_plan(task, experiment_directory)
-    summary = _execute_plan(task, plan)
+    try:
+        plan = build_experiment_gc_plan(task, experiment)
+    except (OSError, StateError) as error:
+        _record_mini_gc_failure(
+            task,
+            experiment_id=experiment_id,
+            phase="planning",
+            reason=str(error),
+        )
+        raise
+    try:
+        summary = _execute_plan(task, plan)
+    except (OSError, StateError) as error:
+        _record_mini_gc_failure(
+            task,
+            experiment_id=experiment_id,
+            phase="execution",
+            reason=str(error),
+            plan_hash=plan["plan_hash"],
+        )
+        raise
+    if summary["failed"]:
+        _record_mini_gc_failure(
+            task,
+            experiment_id=experiment_id,
+            phase="execution",
+            reason=_gc_failure_reason(summary),
+            plan_hash=plan["plan_hash"],
+        )
+    else:
+        _clear_mini_gc_failure(task)
     return _present(
         plan,
         dry_run=False,
@@ -1567,7 +1654,38 @@ def recover_gc_transaction(task_directory: Path) -> dict[str, Any] | None:
     plan = journal.get("plan")
     if not isinstance(plan, Mapping):
         raise StateError("garbage-collection journal is invalid")
-    summary = _execute_plan(task, plan)
+    scope = plan.get("scope")
+    experiment_id = (
+        int(scope["id"])
+        if isinstance(scope, Mapping)
+        and scope.get("kind") == "experiment"
+        and isinstance(scope.get("id"), str)
+        and scope["id"].isdigit()
+        else 0
+    )
+    try:
+        summary = _execute_plan(task, plan)
+    except (OSError, StateError) as error:
+        if experiment_id:
+            _record_mini_gc_failure(
+                task,
+                experiment_id=experiment_id,
+                phase="recovery",
+                reason=str(error),
+                plan_hash=plan.get("plan_hash"),
+            )
+        raise
+    if experiment_id:
+        if summary["failed"]:
+            _record_mini_gc_failure(
+                task,
+                experiment_id=experiment_id,
+                phase="recovery",
+                reason=_gc_failure_reason(summary),
+                plan_hash=summary["plan_hash"],
+            )
+        else:
+            _clear_mini_gc_failure(task)
     return _present(
         plan,
         dry_run=False,

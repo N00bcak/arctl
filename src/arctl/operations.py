@@ -217,9 +217,40 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
 
         champion = resolve_commit(task.config.repo, champion_ref)
     gc_journal = task.directory / ".gc" / "transaction.json"
-    gc_pending = gc_journal.is_file()
+    mini_gc_path = task.directory / ".gc" / "mini-gc-failure.json"
+    mini_gc_failure: dict[str, Any] | None = None
+    if mini_gc_path.is_file():
+        try:
+            value = json.loads(mini_gc_path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(value, dict)
+                or set(value)
+                != {"schema_version", "experiment_id", "phase", "reason", "plan_hash"}
+                or value.get("schema_version") != 1
+                or isinstance(value.get("experiment_id"), bool)
+                or not isinstance(value.get("experiment_id"), int)
+                or value["experiment_id"] <= 0
+                or value.get("phase") not in {"planning", "execution", "recovery"}
+                or not isinstance(value.get("reason"), str)
+                or not value["reason"]
+                or (
+                    value.get("plan_hash") is not None
+                    and not isinstance(value["plan_hash"], str)
+                )
+            ):
+                raise ValueError("invalid mini-GC failure record")
+            mini_gc_failure = value
+        except (OSError, json.JSONDecodeError, ValueError):
+            mini_gc_failure = {
+                "schema_version": 1,
+                "experiment_id": None,
+                "phase": "unknown",
+                "reason": "experiment cleanup failure record is unreadable",
+                "plan_hash": None,
+            }
+    gc_pending = gc_journal.is_file() or mini_gc_failure is not None
     gc_errors: list[str] = []
-    if gc_pending:
+    if gc_journal.is_file():
         try:
             gc_record = json.loads(gc_journal.read_text(encoding="utf-8"))
             errors = gc_record.get("errors")
@@ -229,6 +260,8 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
                 )
         except (OSError, json.JSONDecodeError):
             gc_errors = ["cleanup journal is unreadable"]
+    if mini_gc_failure is not None:
+        gc_errors = sorted({*gc_errors, mini_gc_failure["reason"]})
     return {
         "state": state,
         "approved": approved,
@@ -248,6 +281,7 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
         "stop_requested": (task.directory / "stop.requested").exists(),
         "gc_pending": gc_pending,
         "gc_errors": gc_errors,
+        "mini_gc_failure": mini_gc_failure,
         "strategy_revision": len(strategies),
         "search_id": int(latest_search.name) if latest_search is not None else None,
         "search_attempt": len(attempts) if attempts else None,

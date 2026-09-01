@@ -260,6 +260,12 @@ def _status_table(payload: dict[str, Any]) -> str:
     if status.get("gc_pending"):
         detail = "; ".join(status.get("gc_errors") or ())
         message = "Manual recovery required: run arctl gc"
+        mini_gc = status.get("mini_gc_failure")
+        if isinstance(mini_gc, dict):
+            experiment = mini_gc.get("experiment_id")
+            phase = mini_gc.get("phase")
+            if experiment is not None:
+                message += f"\nExperiment {experiment} · {phase}"
         if detail:
             message += "\n" + safe_terminal_text(detail, limit=180)
         rows.append(("Cleanup", message))

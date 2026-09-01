@@ -139,6 +139,48 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual((unrelated / "data").read_text(), "keep")
             self.assertEqual(experiment_canonical_snapshot(task, experiment), before)
 
+    def test_experiment_gc_persists_failures_that_happen_during_planning(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            task = Path(temporary, "demo")
+            experiment = task / "experiments" / "000001"
+            (experiment / "runtime").mkdir(parents=True)
+            (task / "task.yaml").write_text("task_id: demo\n")
+            write_json(task / "approval.json", {"schema_version": 1})
+            write_json(task / "evaluator.manifest.json", {"schema_version": 1})
+            write_json(experiment / "experiment.json", {"state": "COMPLETE"})
+            write_json(experiment / "request.public.json", {"claim": "one"})
+            write_json(experiment / "result.public.json", {"decision": "REJECT"})
+            (experiment / "published").touch()
+            write_json(
+                task / "exploration" / "entries" / "000001.public.json",
+                {"source": "experiment:000001"},
+            )
+            write_json(
+                experiment / "runtime" / "bytecode-cache.private.json",
+                {"schema_version": 1, "invalid": True},
+            )
+
+            with self.assertRaisesRegex(StateError, "manifest is invalid"):
+                run_experiment_gc(task, experiment)
+
+            failure = json.loads(
+                (task / ".gc" / "mini-gc-failure.json").read_text()
+            )
+            self.assertEqual(failure["experiment_id"], 1)
+            self.assertEqual(failure["phase"], "planning")
+            self.assertIn("manifest is invalid", failure["reason"])
+            self.assertFalse((task / ".gc" / "transaction.json").exists())
+
+            (experiment / "runtime" / "bytecode-cache.private.json").unlink()
+            cache = ensure_experiment_bytecode_cache(
+                task, experiment, python_executable=sys.executable
+            )
+            (cache / "module.pyc").write_bytes(b"compiled")
+            recovered = run_experiment_gc(task, experiment)
+
+            self.assertFalse(recovered["failed"], recovered)
+            self.assertFalse((task / ".gc" / "mini-gc-failure.json").exists())
+
     def test_scoped_gc_recovers_deletion_before_journal_update(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             task = Path(temporary, "demo")

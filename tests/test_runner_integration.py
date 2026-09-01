@@ -630,6 +630,40 @@ scratch = Path(sys.argv[1])
         self.assertTrue(status["gc_pending"])
         self.assertEqual(status["gc_errors"], ["permission denied"])
 
+    def test_status_exposes_prejournal_mini_gc_failure_details(self) -> None:
+        failure = self.task_directory / ".gc" / "mini-gc-failure.json"
+        failure.parent.mkdir(parents=True)
+        failure.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "experiment_id": 7,
+                    "phase": "planning",
+                    "reason": "experiment bytecode cache manifest is invalid",
+                    "plan_hash": None,
+                }
+            )
+            + "\n"
+        )
+
+        status = task_status(self.task)
+
+        self.assertTrue(status["gc_pending"])
+        self.assertEqual(
+            status["mini_gc_failure"],
+            {
+                "schema_version": 1,
+                "experiment_id": 7,
+                "phase": "planning",
+                "reason": "experiment bytecode cache manifest is invalid",
+                "plan_hash": None,
+            },
+        )
+        self.assertEqual(
+            status["gc_errors"],
+            ["experiment bytecode cache manifest is invalid"],
+        )
+
     def test_reviewed_candidate_passes_before_experiment_and_is_reported(self) -> None:
         config = replace(
             self.config,
