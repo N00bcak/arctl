@@ -62,7 +62,8 @@ class RetentionTests(unittest.TestCase):
             task = Path(temporary, "demo")
             task.mkdir()
             cache = self.make_completed_cache(task)
-            before = canonical_snapshot(task)
+            plan = build_gc_plan(task)
+            before = plan["canonical_snapshot"]
 
             dry = run_gc(task, dry_run=True)
             applied = run_gc(task, dry_run=False)
@@ -71,10 +72,37 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual(dry["actions"], applied["actions"])
             self.assertFalse(cache.exists())
             self.assertGreater(applied["reclaimed_bytes"], 0)
-            self.assertEqual(canonical_snapshot(task), before)
+            from arctl import retention
+            self.assertEqual(retention._plan_snapshot(task, plan), before)
             second = run_gc(task, dry_run=False)
             self.assertEqual(second["eligible_bytes"], 0)
             self.assertFalse(second["mutation_occurred"])
+
+    def test_canonical_snapshot_covers_unclassified_intentional_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            task = Path(temporary, "demo")
+            task.mkdir()
+            (task / "task.yaml").write_text("task_id: demo\n")
+            artifact = task / "notes" / "important.txt"
+            artifact.parent.mkdir()
+            artifact.write_text("preserve this evidence\n")
+
+            snapshot = canonical_snapshot(task)
+            entry = next(
+                (
+                    item for item in snapshot["entries"]
+                    if item["path"] == "notes/important.txt"
+                ),
+                None,
+            )
+
+            self.assertIsNotNone(entry, snapshot)
+            assert entry is not None
+            self.assertEqual(entry["type"], "file")
+            self.assertEqual(entry["size"], artifact.stat().st_size)
+            self.assertEqual(
+                entry["sha256"], hashlib.sha256(artifact.read_bytes()).hexdigest()
+            )
 
     def test_malformed_started_record_cannot_claim_an_arbitrary_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -129,7 +157,8 @@ class RetentionTests(unittest.TestCase):
             unrelated = task / "experiments" / "000002" / "runtime" / "keep"
             unrelated.mkdir(parents=True)
             (unrelated / "data").write_text("keep")
-            before = experiment_canonical_snapshot(task, experiment)
+            plan = build_experiment_gc_plan(task, experiment)
+            before = plan["canonical_snapshot"]
 
             result = run_experiment_gc(task, experiment)
 
@@ -290,7 +319,7 @@ class RetentionTests(unittest.TestCase):
             task = Path(temporary, "demo")
             task.mkdir()
             cache = self.make_completed_cache(task)
-            (task / "stage" / "process" / "result.json").unlink()
+            (task / "setup" / "fixture" / "process" / "result.json").unlink()
 
             plan = build_gc_plan(task)
 
@@ -428,7 +457,7 @@ class RetentionTests(unittest.TestCase):
             task = Path(temporary, "demo")
             task.mkdir()
             self.make_completed_cache(task)
-            home = task / "stage" / "output"
+            home = task / "setup" / "fixture" / "output"
             synthetic = home / "tmp" / "arg0" / "codex-arg0AbC123"
             synthetic.mkdir(parents=True)
             (synthetic / ".lock").touch()

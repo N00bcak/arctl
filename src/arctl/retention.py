@@ -156,7 +156,8 @@ def _synthetic_scratch_root(path: Path) -> bool:
         return False
 
 
-def _canonical_paths(task: Path) -> tuple[Path, ...]:
+def _protected_artifact_paths(task: Path) -> tuple[Path, ...]:
+    """Return schema-declared artifacts that no cleanup classifier may claim."""
     paths: set[Path] = set()
     for name in _ROOT_CANONICAL:
         path = task / name
@@ -214,13 +215,46 @@ def _canonical_paths(task: Path) -> tuple[Path, ...]:
     return tuple(sorted(paths))
 
 
-def canonical_snapshot(task: Path, *, exclude: Iterable[str] = ()) -> dict[str, Any]:
+def _add_container_hashes(entries: list[dict[str, Any]]) -> None:
+    for entry in entries:
+        if "sha256" in entry:
+            continue
+        if entry["type"] == "directory":
+            parent = Path(entry["path"])
+            children = [
+                {"name": Path(item["path"]).name, "type": item["type"]}
+                for item in entries
+                if Path(item["path"]).parent == parent
+            ]
+            entry["sha256"] = _sha256(_json_bytes(children))
+        else:
+            entry["sha256"] = _sha256(b"")
+
+
+def canonical_snapshot(
+    task: Path,
+    *,
+    exclude: Iterable[str] = (),
+    exclude_exact: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Snapshot every retained object; only explicit GC/report artifacts are omitted."""
     root = task.resolve()
     excluded = frozenset(exclude)
+    excluded_exact = frozenset(exclude_exact)
     entries: list[dict[str, Any]] = []
-    for path in _canonical_paths(root):
+    for path in sorted(root.rglob("*")):
         relative = _relative(root, path)
-        if any(relative == item or relative.startswith(item + "/") for item in excluded):
+        if (
+            relative == ".gc"
+            or relative.startswith(".gc/")
+            or relative == "gc.private.json"
+            or path.name == ".DS_Store"
+            or relative in excluded_exact
+            or any(
+                relative == item or relative.startswith(item + "/")
+                for item in excluded
+            )
+        ):
             continue
         identity = _lstat_identity(path)
         entry = {
@@ -231,35 +265,38 @@ def canonical_snapshot(task: Path, *, exclude: Iterable[str] = ()) -> dict[str, 
         }
         if identity["type"] == "file":
             entry["sha256"] = _sha256(path.read_bytes())
+        elif identity["type"] == "symlink":
+            entry["sha256"] = _sha256(os.readlink(path).encode())
         entries.append(entry)
+    _add_container_hashes(entries)
     return {"schema_version": 1, "entries": entries, "sha256": _sha256(_json_bytes(entries))}
 
 
-def experiment_canonical_snapshot(task: Path, experiment: Path) -> dict[str, Any]:
+def experiment_canonical_snapshot(
+    task: Path,
+    experiment: Path,
+    *,
+    exclude: Iterable[str] = (),
+    exclude_exact: Iterable[str] = (),
+) -> dict[str, Any]:
     root = task.resolve()
     experiment = experiment.resolve()
     if experiment.parent != root / "experiments" or not experiment.name.isdigit():
         raise StateError("experiment cleanup scope is invalid")
-    paths: set[Path] = {
-        path
-        for path in experiment.iterdir()
-        if path.is_file() and path.name != ".DS_Store" and not path.is_symlink()
-    }
-    for relative in (
-        "comparisons/primary/evidence.private.json",
-        "comparisons/primary/reservation.private.json",
-        "comparisons/primary/outputs/candidate/result.json",
-        "comparisons/primary/outputs/champion/result.json",
-        "comparisons/primary/outputs/prepare/batch.public.json",
-        "comparisons/primary/outputs/prepare/response.json",
-        "comparisons/primary/outputs/prepare/scoring.private.json",
-        "comparisons/primary/outputs/score/evidence.json",
-    ):
-        path = experiment / relative
-        if path.exists() and not path.is_symlink():
-            paths.add(path)
+    excluded = frozenset(exclude)
+    excluded_exact = frozenset(exclude_exact)
     entries: list[dict[str, Any]] = []
-    for path in sorted(paths):
+    for path in sorted(experiment.rglob("*")):
+        relative = _relative(root, path)
+        if (
+            path.name == ".DS_Store"
+            or relative in excluded_exact
+            or any(
+                relative == item or relative.startswith(item + "/")
+                for item in excluded
+            )
+        ):
+            continue
         identity = _lstat_identity(path)
         entry = {
             "path": _relative(root, path),
@@ -269,7 +306,10 @@ def experiment_canonical_snapshot(task: Path, experiment: Path) -> dict[str, Any
         }
         if identity["type"] == "file":
             entry["sha256"] = _sha256(path.read_bytes())
+        elif identity["type"] == "symlink":
+            entry["sha256"] = _sha256(os.readlink(path).encode())
         entries.append(entry)
+    _add_container_hashes(entries)
     return {
         "schema_version": 1,
         "entries": entries,
@@ -727,6 +767,9 @@ def _cache_actions(
                 inputs=(relative,), expected_bytes=total,
                 preconditions={"identity": identity, "tree_hash": tree_hash, "path_count": count,
                                "process": _relative(task, process_directory),
+                               "process_evidence": _process_ownership_evidence(
+                                   process_directory, task
+                               ),
                                "task_identity": _stable_identity(task),
                                "parent_identity": _stable_identity(candidate.parent)},
                 status=status, reason=reason,
@@ -789,6 +832,9 @@ def _scratch_actions(
                     "tree_hash": tree_hash,
                     "path_count": count,
                     "process": _relative(task, process_directory),
+                    "process_evidence": _process_ownership_evidence(
+                        process_directory, task
+                    ),
                     "allow_symlinks": allow_symlinks,
                     "task_identity": _stable_identity(task),
                     "parent_identity": _stable_identity(candidate.parent),
@@ -1176,13 +1222,26 @@ def _experiment_cache_actions(
     return [quarantine, remove], []
 
 
+def _mutable_ancestor_directories(
+    task: Path, deletion_roots: Iterable[str]
+) -> list[str]:
+    directories: set[str] = set()
+    for relative in deletion_roots:
+        parent = (task / relative).parent
+        while parent != task:
+            directories.add(_relative(task, parent))
+            parent = parent.parent
+    return sorted(directories)
+
+
 def build_gc_plan(task_directory: Path) -> dict[str, Any]:
     task = task_directory.resolve()
     if not task.is_dir() or task.is_symlink():
         raise StateError("task directory is invalid")
     process_records = _ensure_no_live_process(task)
-    initial_snapshot = canonical_snapshot(task)
-    canonical = {entry["path"] for entry in initial_snapshot["entries"]}
+    canonical = {
+        _relative(task, path) for path in _protected_artifact_paths(task)
+    }
     setup_actions, setup_skipped = _setup_actions(task, canonical)
     cache_actions, skipped = _cache_actions(task, canonical)
     scratch_actions, scratch_skipped = _scratch_actions(task, canonical)
@@ -1245,13 +1304,25 @@ def build_gc_plan(task_directory: Path) -> dict[str, Any]:
         for output in action["outputs"]
     }
     future_roots = sorted({str(Path(output).parent) for output in future_outputs})
-    snapshot = canonical_snapshot(task, exclude=future_roots)
+    deletion_roots = sorted(
+        action["inputs"][0]
+        for action in actions
+        if action["type"] == "quarantine_disposable_root"
+        and action["initial_status"] != "blocked"
+    )
+    mutable_directories = _mutable_ancestor_directories(task, deletion_roots)
+    snapshot = canonical_snapshot(
+        task,
+        exclude=(*future_roots, *deletion_roots),
+        exclude_exact=mutable_directories,
+    )
     core = {
         "schema_version": _GC_SCHEMA_VERSION,
         "task_id": task.name,
         "canonical_snapshot": snapshot,
         "future_canonical_outputs": sorted(future_outputs),
         "future_canonical_roots": future_roots,
+        "canonical_excluded_paths": mutable_directories,
         "process_records": process_records,
         "actions": actions,
         "skipped": sorted(
@@ -1283,8 +1354,11 @@ def build_experiment_gc_plan(
             if ".gc" not in path.parts
         ),
     )
-    snapshot = experiment_canonical_snapshot(task, experiment)
-    canonical = {entry["path"] for entry in snapshot["entries"]}
+    canonical = {
+        _relative(task, path)
+        for path in _protected_artifact_paths(task)
+        if path == experiment or _inside(experiment, path)
+    }
     version_actions, version_skipped = _experiment_cache_actions(
         task, experiment, canonical
     )
@@ -1299,6 +1373,19 @@ def build_experiment_gc_plan(
         (*version_actions, *cache_actions, *scratch_actions),
         key=lambda item: (rank[item["type"]], item["action_id"]),
     )
+    deletion_roots = sorted(
+        action["inputs"][0]
+        for action in actions
+        if action["type"] == "quarantine_disposable_root"
+        and action["initial_status"] != "blocked"
+    )
+    mutable_directories = _mutable_ancestor_directories(task, deletion_roots)
+    snapshot = experiment_canonical_snapshot(
+        task,
+        experiment,
+        exclude=deletion_roots,
+        exclude_exact=mutable_directories,
+    )
     core = {
         "schema_version": _GC_SCHEMA_VERSION,
         "task_id": task.name,
@@ -1306,6 +1393,7 @@ def build_experiment_gc_plan(
         "canonical_snapshot": snapshot,
         "future_canonical_outputs": [],
         "future_canonical_roots": [],
+        "canonical_excluded_paths": mutable_directories,
         "process_records": process_records,
         "actions": actions,
         "skipped": sorted(
@@ -1456,9 +1544,29 @@ def _plan_snapshot(task: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(identifier, str) or not identifier.isdigit():
             raise StateError("garbage-collection scope is invalid")
         return experiment_canonical_snapshot(
-            task, task / "experiments" / identifier
+            task,
+            task / "experiments" / identifier,
+            exclude=(
+                action["inputs"][0]
+                for action in plan["actions"]
+                if action["type"] == "quarantine_disposable_root"
+                and action["initial_status"] != "blocked"
+            ),
+            exclude_exact=plan.get("canonical_excluded_paths", ()),
         )
-    return canonical_snapshot(task, exclude=plan.get("future_canonical_roots", ()))
+    return canonical_snapshot(
+        task,
+        exclude=(
+            *plan.get("future_canonical_roots", ()),
+            *(
+                action["inputs"][0]
+                for action in plan["actions"]
+                if action["type"] == "quarantine_disposable_root"
+                and action["initial_status"] != "blocked"
+            ),
+        ),
+        exclude_exact=plan.get("canonical_excluded_paths", ()),
+    )
 
 
 def _execute_plan(task: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
