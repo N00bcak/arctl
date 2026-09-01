@@ -1317,6 +1317,12 @@ def build_experiment_gc_plan(
 
 
 def _revalidate_source(task: Path, action: Mapping[str, Any]) -> Path:
+    current = _recomputed_quarantine_action(task, action)
+    if (
+        current["preconditions"] != action["preconditions"]
+        or current["expected_bytes"] != action["expected_bytes"]
+    ):
+        raise StateError("disposable action preconditions changed")
     relative = action["inputs"][0]
     source = task / relative
     if source.is_symlink() or not source.exists():
@@ -1343,6 +1349,43 @@ def _revalidate_source(task: Path, action: Mapping[str, Any]) -> Path:
         if material is None or _sha256(_json_bytes(material[0])) != provenance_sha256:
             raise StateError("setup dependency provenance changed before deletion")
     return source
+
+
+def _recomputed_quarantine_action(
+    task: Path, action: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    rule = action.get("rule_id")
+    if rule == "managed-python-cache":
+        candidates, _ = _cache_actions(task, set())
+    elif rule in {"synthetic-scratch-target", "scratch-zero-lock"}:
+        candidates, _ = _scratch_actions(task, set())
+    elif rule == "completed-setup-staging":
+        candidates, _ = _setup_actions(task, set())
+    elif rule in {
+        "abandoned-durable-candidate-worktree",
+        "abandoned-durable-research-miss-worktree",
+    }:
+        candidates, _ = _abandoned_worktree_actions(task, set())
+    elif rule == "experiment-version-bytecode":
+        experiment = action.get("preconditions", {}).get("experiment")
+        if not isinstance(experiment, str) or not experiment.isdigit():
+            raise StateError("experiment cache preconditions are invalid")
+        candidates, _ = _experiment_cache_actions(
+            task, task / "experiments" / experiment, set()
+        )
+    else:
+        raise StateError("disposable action rule is invalid")
+    matches = [
+        candidate
+        for candidate in candidates
+        if candidate["type"] == "quarantine_disposable_root"
+        and candidate["rule_id"] == rule
+        and candidate["inputs"] == action["inputs"]
+        and candidate["initial_status"] != "blocked"
+    ]
+    if len(matches) != 1:
+        raise StateError("disposable action is no longer eligible")
+    return matches[0]
 
 
 def _promote(task: Path, action: Mapping[str, Any]) -> None:
@@ -1385,6 +1428,21 @@ def _rename_to_quarantine(task: Path, source: Path, destination: Path) -> None:
     finally:
         os.close(source_parent_fd)
         os.close(destination_parent_fd)
+
+
+def _revalidate_quarantined(target: Path, source_action: Mapping[str, Any]) -> None:
+    expected = source_action["preconditions"]
+    total, count, tree_hash = _tree_inventory(
+        target, allow_symlinks=bool(expected.get("allow_symlinks"))
+    )
+    if (
+        _lstat_identity(target) != expected["identity"]
+        or target.parent.lstat().st_dev != expected["identity"]["device"]
+        or total != source_action["expected_bytes"]
+        or count != expected["path_count"]
+        or tree_hash != expected["tree_hash"]
+    ):
+        raise StateError("quarantined disposable root identity changed")
 
 
 def _save_journal(path: Path, value: Mapping[str, Any]) -> None:
@@ -1446,6 +1504,8 @@ def _execute_plan(task: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
             _save_journal(journal_path, journal)
             continue
         try:
+            if _sha256(_json_bytes(action["preconditions"])) != action["precondition_hash"]:
+                raise StateError("garbage-collection action preconditions changed")
             _ensure_no_live_process(task, plan.get("process_records"))
             if _plan_snapshot(task, plan) != plan["canonical_snapshot"]:
                 raise StateError("canonical task state changed during garbage collection")
@@ -1456,19 +1516,7 @@ def _execute_plan(task: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
                 target = quarantine / identifier
                 source = task / action["inputs"][0]
                 if not source.exists() and target.exists() and not target.is_symlink():
-                    total, count, tree_hash = _tree_inventory(
-                        target,
-                        allow_symlinks=bool(
-                            action["preconditions"].get("allow_symlinks")
-                        ),
-                    )
-                    expected = action["preconditions"]
-                    if (
-                        total != action["expected_bytes"]
-                        or count != expected["path_count"]
-                        or tree_hash != expected["tree_hash"]
-                    ):
-                        raise StateError("quarantined disposable root identity changed")
+                    _revalidate_quarantined(target, action)
                 elif source.exists() and not target.exists():
                     source = _revalidate_source(task, action)
                     _rename_to_quarantine(task, source, target)
@@ -1486,9 +1534,11 @@ def _execute_plan(task: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
                     # its final journal update.
                     execution[identifier] = "removed"
                 elif target.is_dir():
+                    _revalidate_quarantined(target, source_action)
                     shutil.rmtree(target)
                     execution[identifier] = "removed"
                 else:
+                    _revalidate_quarantined(target, source_action)
                     target.unlink()
                     execution[identifier] = "removed"
             else:

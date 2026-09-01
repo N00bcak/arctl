@@ -137,7 +137,49 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual(result["scope"], {"kind": "experiment", "id": "000001"})
             self.assertFalse(cache.exists())
             self.assertEqual((unrelated / "data").read_text(), "keep")
-            self.assertEqual(experiment_canonical_snapshot(task, experiment), before)
+            from arctl import retention
+            self.assertEqual(retention._plan_snapshot(task, plan), before)
+
+    def test_experiment_cache_manifest_change_blocks_planned_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            task = Path(temporary, "demo")
+            experiment = task / "experiments" / "000001"
+            experiment.mkdir(parents=True)
+            (task / "task.yaml").write_text("task_id: demo\n")
+            write_json(task / "approval.json", {"schema_version": 1})
+            write_json(task / "evaluator.manifest.json", {"schema_version": 1})
+            write_json(experiment / "experiment.json", {"state": "COMPLETE"})
+            write_json(experiment / "request.public.json", {"claim": "one"})
+            write_json(experiment / "result.public.json", {"decision": "REJECT"})
+            (experiment / "published").touch()
+            write_json(
+                task / "exploration" / "entries" / "000001.public.json",
+                {"source": "experiment:000001"},
+            )
+            cache = ensure_experiment_bytecode_cache(
+                task, experiment, python_executable=sys.executable
+            )
+            (cache / "module.pyc").write_bytes(b"compiled")
+            manifest = experiment / "runtime" / "bytecode-cache.private.json"
+            from arctl import retention
+
+            original = retention._save_journal
+            calls = 0
+
+            def save_then_change(path, value):
+                nonlocal calls
+                original(path, value)
+                calls += 1
+                if calls == 1:
+                    record = json.loads(manifest.read_text())
+                    record["python"]["version"] = "changed-after-planning"
+                    write_json(manifest, record)
+
+            with mock.patch.object(retention, "_save_journal", save_then_change):
+                result = run_experiment_gc(task, experiment)
+
+            self.assertTrue(result["failed"], result)
+            self.assertTrue(cache.exists())
 
     def test_experiment_gc_persists_failures_that_happen_during_planning(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -259,6 +301,42 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual(cache_actions[0]["initial_status"], "blocked")
             run_gc(task, dry_run=False)
             self.assertTrue(cache.exists())
+
+    def test_recovery_rejects_replaced_quarantine_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            task = Path(temporary, "demo")
+            task.mkdir()
+            cache = self.make_completed_cache(task)
+            plan = build_gc_plan(task)
+            quarantine_action = next(
+                action for action in plan["actions"]
+                if action["type"] == "quarantine_disposable_root"
+            )
+            target = (
+                task / ".gc" / "quarantine" / plan["plan_hash"]
+                / quarantine_action["action_id"]
+            )
+            target.parent.mkdir(parents=True)
+            cache.rename(target)
+            replacement = target.parent / "replacement"
+            shutil.copytree(target, replacement)
+            shutil.rmtree(target)
+            replacement.rename(target)
+            execution = {
+                action["action_id"]: action["initial_status"]
+                for action in plan["actions"]
+            }
+            write_json(
+                task / ".gc" / "transaction.json",
+                {"schema_version": 1, "plan": plan, "execution": execution},
+            )
+
+            recovered = recover_gc_transaction(task)
+
+            self.assertIsNotNone(recovered)
+            assert recovered is not None
+            self.assertTrue(recovered["failed"], recovered)
+            self.assertTrue(target.exists())
 
     def test_durable_research_miss_allows_abandoned_worktree_cleanup(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
