@@ -427,6 +427,16 @@ def validate_reflection(
             ]
             if len(citation_ids) != len(set(citation_ids)):
                 raise StateError("reflection history citations must be unique")
+            raw_history_ids = value["basis"].get("history_entry_ids", [])
+            if (
+                not isinstance(raw_history_ids, list)
+                or not all(isinstance(identifier, str) for identifier in raw_history_ids)
+                or len(raw_history_ids) != len(set(raw_history_ids))
+            ):
+                raise StateError("saved reflection history basis is invalid")
+            known_history_ids = set(raw_history_ids)
+            if any(identifier not in known_history_ids for identifier in citation_ids):
+                raise StateError("reflection cites unknown history entries")
         elif assessment_version == 3:
             assessments = assessment["metric_assessments"]
             if set(assessments) != set(metric_names):
@@ -471,12 +481,18 @@ def run_reflection(
         "strategy": context["strategy_source"],
         "catalog_sha256": context["catalog_sha256"],
     }
+    history_ids = tuple(
+        entry["entry_id"] for entry in load_ledger(experiment.parent.parent)
+    )
     published = experiment / "reflection.public.json"
     if published.is_file():
         try:
             value = json.loads(published.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
             raise StateError("saved reflection is invalid") from error
+        saved_basis = value.get("basis") if isinstance(value, Mapping) else None
+        if isinstance(saved_basis, Mapping) and "history_entry_ids" in saved_basis:
+            basis["history_entry_ids"] = list(history_ids)
         validated = validate_reflection(
             value, metric_names=tuple(manifest.public_telemetry)
         )
@@ -502,7 +518,7 @@ def run_reflection(
         write_json_once(published, value)
         return value
 
-    history_ids = tuple(entry["entry_id"] for entry in load_ledger(experiment.parent.parent))
+    basis["history_entry_ids"] = list(history_ids)
     schema = reflection_schema(
         version=4,
         metric_names=tuple(manifest.public_telemetry),

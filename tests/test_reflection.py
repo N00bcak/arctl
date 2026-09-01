@@ -216,6 +216,29 @@ class ReflectionTests(unittest.TestCase):
         with self.assertRaisesRegex(StateError, "assessment is invalid"):
             validate_reflection(wrapper, metric_names=("errors",))
 
+    def test_saved_v4_rejects_unknown_history_citations_from_its_basis(self) -> None:
+        value = assessment_v4(["errors"])
+        value["history_citations"] = [
+            {
+                "entry_id": "unknown-entry",
+                "bearing": "supports",
+                "finding": "Dangling evidence.",
+            }
+        ]
+        wrapper = {
+            "schema_version": 4,
+            "status": "COMPLETE",
+            "warning": None,
+            "basis": {
+                "strategy_behavior_id": "avoid-errors",
+                "history_entry_ids": ["known-entry"],
+            },
+            "assessment": value,
+        }
+
+        with self.assertRaisesRegex(StateError, "unknown history"):
+            validate_reflection(wrapper, metric_names=("errors",))
+
     def test_generated_schema_fixes_metrics_behavior_and_empty_history(self) -> None:
         seen = {}
 
