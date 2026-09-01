@@ -316,7 +316,7 @@ class RetentionTests(unittest.TestCase):
             check=True, capture_output=True, text=True,
         ).stdout.strip()
 
-    def test_setup_staging_promotes_dependency_provenance_before_deletion(self) -> None:
+    def test_setup_staging_blocks_contradictory_runtime_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary)
             task = workspace / "data" / "tasks" / "demo"
@@ -340,6 +340,13 @@ class RetentionTests(unittest.TestCase):
                 "schema_version": 2,
                 "staging": {name: str(path) for name, path in roots.items()},
                 "dependency_lock_sha256": hashlib.sha256(lock).hexdigest(),
+                "dependency_resolution": {
+                    "schema_version": 1,
+                    "name": "uv",
+                    "version": "0.8.14",
+                    "index": "https://pypi.org/simple",
+                    "options": ["sync", "--no-config"],
+                },
                 "owned_files": owned,
                 "owned_files_sha256": hashlib.sha256(
                     json.dumps(owned, sort_keys=True, separators=(",", ":")).encode()
@@ -356,20 +363,83 @@ class RetentionTests(unittest.TestCase):
                  **{f"{name}_commit": commit for name, commit in commits.items()}},
             )
             venv = workspace / ".venv"
-            venv.mkdir()
+            (venv / "bin").mkdir(parents=True)
             (venv / "pyvenv.cfg").write_text(
                 "implementation = CPython\nversion_info = 3.13.7\nuv = 0.8.14\n"
             )
+            interpreter = venv / "bin" / "python"
+            interpreter.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' '{\"abi\":\"cpython-312-darwin\","
+                "\"cache_tag\":\"cpython-312\",\"executable\":\""
+                + str(interpreter)
+                + "\",\"implementation\":\"CPython\",\"platform\":\"darwin\","
+                "\"version\":\"3.13.7\"}'\n"
+            )
+            interpreter.chmod(0o755)
 
-            dry = run_gc(task, dry_run=True)
-            applied = run_gc(task, dry_run=False)
+            with mock.patch(
+                "arctl.retention._validate_approval_bundle", return_value={}
+            ):
+                plan = build_gc_plan(task)
 
-            self.assertEqual(dry["plan_hash"], applied["plan_hash"])
-            self.assertFalse((task / "setup" / "staging").exists(), applied)
+            setup_actions = [
+                action for action in plan["actions"]
+                if action["rule_id"] in {
+                    "runtime-dependency-provenance", "completed-setup-staging"
+                }
+            ]
+            self.assertNotIn(
+                "promote_dependency_provenance",
+                {action["type"] for action in setup_actions},
+            )
+            self.assertTrue(
+                any(
+                    action["initial_status"] == "blocked"
+                    and "runtime" in action["reason"]
+                    for action in setup_actions
+                ),
+                setup_actions,
+            )
+            self.assertTrue((task / "setup" / "staging").exists())
+
+            interpreter.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' '{\"abi\":\"cpython-313-darwin\","
+                "\"cache_tag\":\"cpython-313\",\"executable\":\""
+                + str(interpreter)
+                + "\",\"implementation\":\"CPython\",\"platform\":\"darwin\","
+                "\"version\":\"3.13.7\"}'\n"
+            )
+            with mock.patch(
+                "arctl.retention._validate_approval_bundle", return_value={}
+            ):
+                consistent = build_gc_plan(task)
+            setup_actions = [
+                action for action in consistent["actions"]
+                if action["rule_id"] in {
+                    "runtime-dependency-provenance", "completed-setup-staging"
+                }
+            ]
+            self.assertIn(
+                "promote_dependency_provenance",
+                {action["type"] for action in setup_actions},
+            )
+            self.assertFalse(
+                any(action["initial_status"] == "blocked" for action in setup_actions),
+                setup_actions,
+            )
+            with mock.patch(
+                "arctl.retention._validate_approval_bundle", return_value={}
+            ):
+                applied = run_gc(task, dry_run=False)
+            self.assertFalse(applied["failed"], applied)
+            self.assertFalse((task / "setup" / "staging").exists())
             provenance = task / "setup" / "dependency-provenance"
             self.assertEqual((provenance / "uv.lock").read_bytes(), lock)
             manifest = json.loads((provenance / "manifest.public.json").read_text())
-            self.assertEqual(manifest["reconstruction_strength"], "dependency-lock")
+            self.assertEqual(manifest["python"]["cache_tag"], "cpython-313")
+            self.assertEqual(manifest["schema_version"], 2)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from copy import deepcopy
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as JsonSchemaError
@@ -2577,6 +2578,31 @@ def _authorization_bundle_hash(directory: Path) -> str:
     return digest.hexdigest()
 
 
+def _public_dependency_index(value: str) -> str:
+    parsed = urlsplit(value)
+    if parsed.username is not None or parsed.password is not None:
+        raise StateError("configured package index contains credentials")
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def _uv_runtime_version(environment: Path) -> str:
+    configuration = environment / "pyvenv.cfg"
+    try:
+        lines = configuration.read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        raise StateError("workspace runtime does not record its uv version") from error
+    values = {
+        key.strip(): raw.strip()
+        for line in lines
+        if "=" in line
+        for key, raw in (line.split("=", 1),)
+    }
+    version = values.get("uv")
+    if not version:
+        raise StateError("workspace runtime does not record its uv version")
+    return version
+
+
 def _acceptance_payload(directory: Path, readiness: Mapping[str, Any]) -> dict[str, Any]:
     staging = readiness.get("staging")
     owned = readiness.get("owned_files")
@@ -2596,6 +2622,9 @@ def _acceptance_payload(directory: Path, readiness: Mapping[str, Any]) -> dict[s
     lock_path = Path(runtime) / "uv.lock"
     if not lock_path.is_file():
         raise StateError("setup dependency lock is missing; rebuild setup")
+    dependency_resolution = readiness.get("dependency_resolution")
+    if not isinstance(dependency_resolution, Mapping):
+        raise StateError("setup readiness lacks dependency resolver provenance; rebuild setup")
     return {
         "schema_version": 2,
         "subject_base": readiness.get("subject_base"),
@@ -2609,6 +2638,7 @@ def _acceptance_payload(directory: Path, readiness: Mapping[str, Any]) -> dict[s
         },
         "review_sha256": review_sha256,
         "dependency_lock_sha256": hashlib.sha256(lock_path.read_bytes()).hexdigest(),
+        "dependency_resolution": dict(dependency_resolution),
     }
 
 
@@ -5092,7 +5122,9 @@ def build_setup(
     uv = shutil.which("uv")
     if uv is None:
         raise StateError("uv is required for Python workspace setup")
-    configured_index = os.environ.get("ARCTL_PACKAGE_INDEX", "https://pypi.org/simple")
+    configured_index = _public_dependency_index(
+        os.environ.get("ARCTL_PACKAGE_INDEX", "https://pypi.org/simple")
+    )
     if hashlib.sha256(configured_index.encode()).hexdigest() != requirements[
         "dependency_source_policy"
     ]["fingerprint"]:
@@ -5170,6 +5202,22 @@ def build_setup(
     if not dependency_lock.is_file():
         raise StateError("uv provisioning did not produce a dependency lock")
     dependency_lock_sha256 = hashlib.sha256(dependency_lock.read_bytes()).hexdigest()
+    dependency_resolution = {
+        "schema_version": 1,
+        "name": "uv",
+        "version": _uv_runtime_version(workspace_environment),
+        "index": configured_index,
+        "options": [
+            "sync",
+            "--no-config",
+            "--project",
+            "pyproject.toml",
+            "--no-install-project",
+            "--default-index",
+            configured_index,
+            *(("--offline",) if offline else ()),
+        ],
+    }
     if progress is not None:
         progress({"stage": "dependencies", "status": "completed"})
         progress({"stage": "evaluator checks", "status": "started"})
@@ -5240,6 +5288,7 @@ def build_setup(
         "dependencies": value["dependencies"],
         "dependency_lock": str(dependency_lock),
         "dependency_lock_sha256": dependency_lock_sha256,
+        "dependency_resolution": dependency_resolution,
         "preflight": preflight,
         "review": "ready" if not review["findings"] else "blocked",
         "findings": review["findings"],

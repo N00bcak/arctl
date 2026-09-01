@@ -5,18 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import platform
 import re
 import shutil
 import stat
 import subprocess
-import sysconfig
 import tomllib
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from .approval import verify_approval
 from .errors import StateError
 from .process import read_valid_result, read_valid_started, recorded_process_is_live
 from .storage import atomic_write_bytes, atomic_write_json
@@ -413,24 +412,71 @@ def _action(
     return {"action_id": _sha256(_json_bytes(core))[:24], **core, "preconditions": dict(preconditions)}
 
 
-def _sanitize_url(value: str) -> str:
+def _sanitize_url(value: str, *, keep_revision: bool = False) -> str:
     parsed = urlsplit(value)
     if parsed.username is not None or parsed.password is not None:
         raise StateError("dependency source contains credentials")
+    if keep_revision:
+        if any(
+            marker in parsed.query.lower()
+            for marker in ("token=", "key=", "password=", "credential=")
+        ):
+            raise StateError("dependency source contains credentials")
+        return urlunsplit(parsed)
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
 
 
+def _git_output(repository: Path, *arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    value = completed.stdout.strip()
+    if completed.returncode or not value:
+        raise StateError("dependency source has no durable Git identity")
+    return value
+
+
+def _local_dependency_identity(candidate: Path, *, kind: str) -> dict[str, str]:
+    repository = Path(_git_output(candidate, "rev-parse", "--show-toplevel")).resolve()
+    commit = _git_output(repository, "rev-parse", "HEAD^{commit}")
+    relative = candidate.resolve().relative_to(repository).as_posix()
+    pathspec = "." if relative == "." else relative
+    status = subprocess.run(
+        ["git", "-C", str(repository), "status", "--porcelain", "--untracked-files=all", "--", pathspec],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if status.returncode or status.stdout:
+        raise StateError("local dependency source is not clean at its recorded revision")
+    treeish = f"{commit}^{{tree}}" if relative == "." else f"{commit}:{relative}"
+    tree = _git_output(repository, "rev-parse", treeish)
+    return {"kind": kind, "commit": commit, "path": relative, "tree": tree}
+
+
 def _dependency_sources(lock: Path, runtime: Path) -> list[dict[str, str]]:
-    value = tomllib.loads(lock.read_text(encoding="utf-8"))
-    sources: set[tuple[str, str]] = set()
+    try:
+        value = tomllib.loads(lock.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise StateError("setup dependency lock is invalid") from error
+    sources: list[dict[str, str]] = []
     for package in value.get("package", []):
         if not isinstance(package, Mapping) or not isinstance(package.get("source"), Mapping):
             continue
         source = package["source"]
-        for kind in ("registry", "git"):
-            raw = source.get(kind)
-            if isinstance(raw, str):
-                sources.add((kind, _sanitize_url(raw)))
+        registry = source.get("registry")
+        if isinstance(registry, str):
+            sources.append({"kind": "registry", "identity": _sanitize_url(registry)})
+        git = source.get("git")
+        if isinstance(git, str):
+            identity = _sanitize_url(git, keep_revision=True)
+            parsed = urlsplit(identity)
+            if not parsed.fragment:
+                raise StateError("Git dependency source has no locked revision")
+            sources.append({"kind": "git", "identity": identity})
         for kind in ("directory", "editable", "path"):
             raw = source.get(kind)
             if not isinstance(raw, str):
@@ -438,14 +484,96 @@ def _dependency_sources(lock: Path, runtime: Path) -> list[dict[str, str]]:
             candidate = (runtime / raw).resolve() if not Path(raw).is_absolute() else Path(raw).resolve()
             if not candidate.exists():
                 raise StateError("local dependency source cannot be validated")
-            completed = subprocess.run(
-                ["git", "-C", str(candidate), "rev-parse", "HEAD"],
-                check=False, capture_output=True, text=True,
-            )
-            if completed.returncode:
-                raise StateError("local dependency has no durable Git identity")
-            sources.add((kind, completed.stdout.strip()))
-    return [{"kind": kind, "identity": identity} for kind, identity in sorted(sources)]
+            try:
+                sources.append(_local_dependency_identity(candidate, kind=kind))
+            except (ValueError, OSError) as error:
+                raise StateError("local dependency source cannot be validated") from error
+    unique = {json.dumps(item, sort_keys=True): item for item in sources}
+    return [unique[key] for key in sorted(unique)]
+
+
+def _validate_approval_bundle(task: Path) -> dict[str, str]:
+    try:
+        config = load_task(task / "task.yaml")
+        verified = verify_approval(task, config)
+    except Exception as error:
+        if isinstance(error, StateError):
+            raise
+        raise StateError("approved setup provenance is invalid") from error
+    return {
+        "approval_sha256": _sha256((task / "approval.json").read_bytes()),
+        "task_sha256": verified["task_sha256"],
+        "manifest_sha256": verified["manifest_sha256"],
+        "evaluator_commit": verified["evaluator_commit"],
+    }
+
+
+def _runtime_identity(setup: Mapping[str, Any]) -> dict[str, str]:
+    workspace = setup.get("workspace")
+    if not isinstance(workspace, str) or not workspace:
+        raise StateError("setup runtime workspace is invalid")
+    interpreter = Path(workspace) / ".venv" / "bin" / "python"
+    if not interpreter.is_file():
+        raise StateError("setup runtime interpreter is missing")
+    script = (
+        "import json,platform,sys,sysconfig;"
+        "print(json.dumps({'implementation':platform.python_implementation(),"
+        "'version':platform.python_version(),'cache_tag':sys.implementation.cache_tag,"
+        "'abi':sysconfig.get_config_var('SOABI'),'platform':platform.platform(),"
+        "'executable':sys.executable},sort_keys=True))"
+    )
+    try:
+        completed = subprocess.run(
+            [str(interpreter), "-I", "-c", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        value = json.loads(completed.stdout)
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+        raise StateError("setup runtime interpreter identity is unavailable") from error
+    fields = {"implementation", "version", "cache_tag", "abi", "platform", "executable"}
+    if (
+        completed.returncode
+        or not isinstance(value, Mapping)
+        or set(value) != fields
+        or not all(isinstance(value[field], str) and value[field] for field in fields)
+    ):
+        raise StateError("setup runtime interpreter identity is invalid")
+    version = value["version"]
+    match = re.fullmatch(r"([0-9]+)\.([0-9]+)(?:\.[0-9]+.*)?", version)
+    cache_tag = value["cache_tag"]
+    if not match or not re.fullmatch(r"[A-Za-z0-9_.-]+", cache_tag):
+        raise StateError("setup runtime interpreter identity is invalid")
+    if value["implementation"] == "CPython":
+        expected = f"cpython-{match.group(1)}{match.group(2)}"
+        if cache_tag != expected or not value["abi"].startswith(expected):
+            raise StateError("setup runtime interpreter identity is contradictory")
+    if Path(value["executable"]).resolve() != interpreter.resolve():
+        raise StateError("setup runtime interpreter executable is contradictory")
+    return {field: value[field] for field in sorted(fields)}
+
+
+def _repository_revisions(setup: Mapping[str, Any]) -> list[dict[str, str]]:
+    revisions: list[dict[str, str]] = []
+    for role in ("subject", "environment", "evaluator"):
+        raw_repository = setup.get(role)
+        commit = setup.get(f"{role}_commit")
+        if not isinstance(raw_repository, str) or not isinstance(commit, str):
+            raise StateError("setup commit provenance is incomplete")
+        repository = Path(raw_repository)
+        resolved = _git_output(repository, "rev-parse", f"{commit}^{{commit}}")
+        if resolved != commit:
+            raise StateError("approved setup commit is contradictory")
+        revisions.append(
+            {
+                "role": role,
+                "commit": commit,
+                "tree": _git_output(repository, "rev-parse", f"{commit}^{{tree}}"),
+            }
+        )
+    return revisions
 
 
 def _provenance_material(
@@ -453,6 +581,7 @@ def _provenance_material(
 ) -> tuple[dict[str, Any], dict[str, bytes], Path, Path] | None:
     if not (task / "approval.json").is_file():
         return None
+    approval = _validate_approval_bundle(task)
     try:
         readiness = json.loads((task / "setup" / "readiness.public.json").read_text())
         setup = json.loads((task / "setup.json").read_text())
@@ -469,7 +598,14 @@ def _provenance_material(
         raise StateError("setup staging paths are not one owned root")
     lock = roots["runtime"] / "uv.lock"
     project = roots["runtime"] / "pyproject.toml"
-    if not lock.is_file() or not project.is_file():
+    if (
+        not lock.is_file()
+        or not project.is_file()
+        or lock.is_symlink()
+        or project.is_symlink()
+        or not _inside(roots["runtime"], lock.resolve())
+        or not _inside(roots["runtime"], project.resolve())
+    ):
         raise StateError("setup dependency inputs are missing")
     if _sha256(lock.read_bytes()) != readiness.get("dependency_lock_sha256"):
         raise StateError("setup dependency lock changed")
@@ -481,17 +617,7 @@ def _provenance_material(
         actual = _tree_hash(roots[name], exclude_private=name == "evaluator")
         if actual != readiness.get("tree_hashes", {}).get(name):
             raise StateError(f"setup {name} tree changed")
-    for field in ("subject_commit", "environment_commit", "evaluator_commit"):
-        commit = setup.get(field)
-        repo = setup.get(field.removesuffix("_commit"))
-        if not isinstance(commit, str) or not isinstance(repo, str):
-            raise StateError("setup commit provenance is incomplete")
-        completed = subprocess.run(
-            ["git", "-C", repo, "cat-file", "-e", f"{commit}^{{commit}}"],
-            check=False, capture_output=True,
-        )
-        if completed.returncode:
-            raise StateError("approved setup commit is missing")
+    revisions = _repository_revisions(setup)
     pyvenv = Path(setup.get("workspace", "")) / ".venv" / "pyvenv.cfg"
     runtime_details: dict[str, str] = {}
     if pyvenv.is_file():
@@ -500,9 +626,24 @@ def _provenance_material(
                 key, raw = line.split("=", 1)
                 if key.strip() in {"implementation", "version_info", "uv"}:
                     runtime_details[key.strip()] = raw.strip()
+    resolver = readiness.get("dependency_resolution")
+    if (
+        not isinstance(resolver, Mapping)
+        or set(resolver) != {"schema_version", "name", "version", "index", "options"}
+        or resolver.get("schema_version") != 1
+        or resolver.get("name") != "uv"
+        or not isinstance(resolver.get("version"), str)
+        or not resolver["version"]
+        or resolver["version"] != runtime_details.get("uv")
+        or not isinstance(resolver.get("index"), str)
+        or _sanitize_url(resolver["index"]) != resolver["index"]
+        or not isinstance(resolver.get("options"), list)
+        or not all(isinstance(option, str) and option for option in resolver["options"])
+    ):
+        raise StateError("setup dependency resolver provenance is missing or contradictory")
     files = {"pyproject.toml": project.read_bytes(), "uv.lock": lock.read_bytes()}
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "reconstruction_strength": "dependency-lock",
         "claim": (
             "Retained inputs support dependency-resolution reconstruction and provenance "
@@ -512,13 +653,10 @@ def _provenance_material(
             {"path": name, "bytes": len(content), "sha256": _sha256(content)}
             for name, content in sorted(files.items())
         ],
-        "python": {
-            "implementation": runtime_details.get("implementation", platform.python_implementation()),
-            "version": runtime_details.get("version_info", platform.python_version()),
-            "abi": sysconfig.get_config_var("SOABI"),
-            "platform": platform.platform(),
-        },
-        "resolver": {"name": "uv", "version": runtime_details.get("uv"), "options": []},
+        "approval": approval,
+        "python": _runtime_identity(setup),
+        "resolver": dict(resolver),
+        "repositories": revisions,
         "sources": _dependency_sources(lock, roots["runtime"]),
     }
     return manifest, files, task / "setup" / "staging", roots["runtime"]
@@ -697,6 +835,7 @@ def _setup_actions(task: Path, canonical: set[str]) -> tuple[list[dict[str, Any]
             "path_count": count,
             "task_identity": _stable_identity(task),
             "parent_identity": _stable_identity(staging.parent),
+            "provenance_manifest_sha256": _sha256(_json_bytes(manifest)),
         },
         status="conditional" if promotion_id else "planned",
     )
@@ -1065,10 +1204,18 @@ def _revalidate_source(task: Path, action: Mapping[str, Any]) -> Path:
         or total != action["expected_bytes"]
     ):
         raise StateError("disposable source preconditions changed")
+    provenance_sha256 = expected.get("provenance_manifest_sha256")
+    if provenance_sha256 is not None:
+        material = _provenance_material(task)
+        if material is None or _sha256(_json_bytes(material[0])) != provenance_sha256:
+            raise StateError("setup dependency provenance changed before deletion")
     return source
 
 
 def _promote(task: Path, action: Mapping[str, Any]) -> None:
+    material = _provenance_material(task)
+    if material is None or material[0] != action["preconditions"]["manifest"]:
+        raise StateError("dependency provenance inputs changed")
     output_root = task / "setup" / "dependency-provenance"
     if output_root.is_symlink():
         raise StateError("dependency provenance target is a symlink")
