@@ -3680,8 +3680,18 @@ def _apply_authorized_build_fields(
     retained_source_ids = {
         source["id"] for source in normalized_task["environment"]["codebases"]
     }
+    probes = normalized_task["environment"].get("probes")
+    if probes is None:
+        raise ValidationError(
+            "direct setup build task.environment.probes is required; use [] when "
+            "there are no fixed-environment probes"
+        )
+    if not isinstance(probes, list):
+        raise ValidationError(
+            "direct setup build task.environment.probes must be an array"
+        )
     normalized_probes = []
-    for probe in normalized_task["environment"]["probes"]:
+    for probe in probes:
         probe["backed_by"] = [
             source_id
             for source_id in probe.get("backed_by", [])

@@ -1367,6 +1367,21 @@ class GuidedSetupTests(unittest.TestCase):
             ],
         )
 
+    def test_authorized_fields_reject_omitted_environment_probes_explicitly(self) -> None:
+        value = self.build_value()
+        requirements = json.loads(
+            (self.directory / "setup" / "authorized-design.public.json").read_text()
+        )
+        del value["task"]["environment"]["probes"]
+
+        with self.assertRaisesRegex(
+            ValidationError,
+            r"task\.environment\.probes is required",
+        ):
+            _apply_authorized_build_fields(
+                value["task"], value["evaluator"], requirements
+            )
+
     def test_protocol_preflight_failure_forces_fresh_generation(self) -> None:
         discover_setup(
             self.directory,

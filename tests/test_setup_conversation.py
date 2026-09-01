@@ -881,7 +881,8 @@ class SetupConversationTests(unittest.TestCase):
                                 "owner": "environment",
                                 "include": [],
                             },
-                        ]
+                        ],
+                        "probes": [],
                     },
                 },
                 "evaluator": {
