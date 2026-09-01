@@ -6,7 +6,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from arctl.dossier import ensure_experiment_dossier
+from arctl.dossier import (
+    _v4_reflection_document,
+    ensure_experiment_dossier,
+    rebuild_task_index,
+)
 from arctl.models import TaskConfig
 
 from .helpers import valid_task
@@ -23,6 +27,61 @@ def git(repo: Path, *arguments: str) -> str:
 
 
 class DossierTests(unittest.TestCase):
+    def test_v4_reflection_omits_empty_nonmaterial_sections(self) -> None:
+        rendered = _v4_reflection_document(
+            1,
+            {
+                "schema_version": 4,
+                "summary": "No material causal signal emerged.",
+                "strategy_behavior": {
+                    "id": "safe-action",
+                    "realization": "unclear",
+                    "evidence": [],
+                },
+                "material_signals": [],
+                "mechanism": {
+                    "status": "not_demonstrated",
+                    "evidence": [],
+                    "missing_evidence": [],
+                },
+                "implementation": {
+                    "status": "no_specific_concern",
+                    "concerns": [],
+                },
+                "policy_observations": [],
+                "next_action": {"kind": "retain", "rationale": "No change."},
+            },
+            "Derived view.",
+        )
+
+        self.assertIn("## Summary", rendered)
+        self.assertNotIn("## Material signals", rendered)
+        self.assertNotIn("## Mechanism", rendered)
+        self.assertNotIn("## Implementation", rendered)
+        self.assertNotIn("Specific test:", rendered)
+
+    def test_task_index_rebuilds_deterministically(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            task = Path(temporary)
+            result = {
+                "experiment_id": 1,
+                "decision": "ACCEPT",
+                "champion_before": "a" * 40,
+                "champion_after": "b" * 40,
+                "evaluation": {
+                    "comparisons": [
+                        {"effect_estimate": 1.0, "one_sided_lower_bound": 0.2}
+                    ]
+                },
+            }
+            index = rebuild_task_index(task, [result])
+            first = index.read_bytes()
+            rebuild_task_index(task, [result])
+
+            self.assertEqual(index.read_bytes(), first)
+            self.assertIn("Current champion", index.read_text())
+            self.assertIn("experiments/000001/README.md", index.read_text())
+
     def test_creates_immutable_public_only_human_record(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

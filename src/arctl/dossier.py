@@ -94,6 +94,105 @@ def _telemetry_lines(telemetry: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _v4_reflection_document(
+    identifier: int, assessment: Mapping[str, Any], dossier_note: str
+) -> str:
+    lines = [
+        f"# Post-trial reflection — Experiment {identifier}",
+        "",
+        dossier_note,
+        "",
+        "## Summary",
+        "",
+        safe_text(assessment.get("summary", "")),
+        "",
+    ]
+    behavior = assessment.get("strategy_behavior", {})
+    if isinstance(behavior, Mapping):
+        lines.extend(
+            [
+                "## Strategic behavior",
+                "",
+                f"`{safe_text(behavior.get('id', ''))}` — "
+                f"**{safe_text(behavior.get('realization', 'unknown'))}**",
+                "",
+                *[f"- {safe_text(item)}" for item in behavior.get("evidence", [])],
+                "",
+            ]
+        )
+    signals = assessment.get("material_signals", [])
+    if signals:
+        lines.extend(["## Material signals", ""])
+        lines.extend(
+            f"- **{safe_text(item.get('metric', ''))} — "
+            f"{safe_text(item.get('finding', ''))}:** "
+            f"{safe_text(item.get('interpretation', ''))}"
+            for item in signals
+        )
+        lines.append("")
+    mechanism = assessment.get("mechanism", {})
+    if isinstance(mechanism, Mapping) and (
+        mechanism.get("evidence")
+        or mechanism.get("missing_evidence")
+        or mechanism.get("status") != "not_demonstrated"
+    ):
+        lines.extend(
+            [
+                "## Mechanism",
+                "",
+                f"**{safe_text(mechanism.get('status', 'unknown'))}**",
+                "",
+                *[f"- {safe_text(item)}" for item in mechanism.get("evidence", [])],
+                *[
+                    f"- Missing: {safe_text(item)}"
+                    for item in mechanism.get("missing_evidence", [])
+                ],
+                "",
+            ]
+        )
+    implementation = assessment.get("implementation", {})
+    if isinstance(implementation, Mapping) and (
+        implementation.get("concerns")
+        or implementation.get("status") != "no_specific_concern"
+    ):
+        lines.extend(
+            [
+                "## Implementation",
+                "",
+                f"**{safe_text(implementation.get('status', 'unknown'))}**",
+                "",
+                *[
+                    f"- Concern: {safe_text(item)}"
+                    for item in implementation.get("concerns", [])
+                ],
+                "",
+            ]
+        )
+    observations = assessment.get("policy_observations", [])
+    if observations:
+        lines.extend(["## Policy observations", ""])
+        lines.extend(
+            f"- **{safe_text(item.get('finding', ''))}:** "
+            f"{safe_text(item.get('evidence', ''))} "
+            f"Implication: {safe_text(item.get('implication', ''))}"
+            for item in observations
+        )
+        lines.append("")
+    action = assessment.get("next_action", {})
+    lines.extend(
+        [
+            "## Advisory next action",
+            "",
+            f"**{safe_text(action.get('kind', 'unknown'))}:** "
+            f"{safe_text(action.get('rationale', ''))}",
+        ]
+    )
+    if action.get("test"):
+        lines.extend(["", f"Specific test: {safe_text(action['test'])}"])
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _public_check_lines(
     task: TaskConfig,
     experiment: Path,
@@ -315,83 +414,88 @@ def _documents(
         )
     else:
         assessment = reflection.get("assessment", {})
-        metric_assessments = assessment.get("metric_assessments", [])
-        if isinstance(metric_assessments, Mapping):
-            metric_items = (
-                {"metric": name, **item}
-                for name, item in metric_assessments.items()
-                if isinstance(item, Mapping)
+        if assessment.get("schema_version") == 4:
+            reflection_document = _v4_reflection_document(
+                identifier, assessment, dossier_note
             )
         else:
-            metric_items = metric_assessments
-        metric_lines = [
-            f"- **{safe_text(item.get('metric', ''))} — "
-            f"{safe_text(item.get('finding', ''))}:** "
-            f"{safe_text(item.get('rationale', ''))}"
-            for item in metric_items
-        ]
-        mechanism = assessment.get("mechanism", {})
-        implementation = assessment.get("implementation", {})
-        behavior = assessment.get("strategy_behavior", {})
-        policy_observations = assessment.get("policy_observations", [])
-        action = assessment.get("next_action", {})
-        reflection_document = "\n".join(
-            (
-                f"# Post-trial reflection — Experiment {identifier}",
-                "",
-                dossier_note,
-                "",
-                f"## Summary\n\n{safe_text(assessment.get('summary', ''))}",
-                "",
-                "## Strategic behavior",
-                "",
-                f"`{safe_text(behavior.get('id', ''))}` — "
-                f"**{safe_text(behavior.get('realization', 'unknown'))}**",
-                "",
-                *[f"- {safe_text(item)}" for item in behavior.get("evidence", [])],
-                "",
-                "## Telemetry assessment",
-                "",
-                *(metric_lines or ["- No metrics assessed."]),
-                "",
-                "## Mechanism",
-                "",
-                f"**{safe_text(mechanism.get('status', 'unknown'))}**",
-                "",
-                *[f"- {safe_text(item)}" for item in mechanism.get("evidence", [])],
-                *[
-                    f"- Missing: {safe_text(item)}"
-                    for item in mechanism.get("missing_evidence", [])
-                ],
-                "",
-                "## Implementation",
-                "",
-                f"**{safe_text(implementation.get('status', 'unknown'))}**",
-                "",
-                *[f"- {safe_text(item)}" for item in implementation.get("evidence", [])],
-                *[f"- Concern: {safe_text(item)}" for item in implementation.get("concerns", [])],
-                "",
-                "## Policy observations",
-                "",
-                *(
-                    [
-                        f"- **{safe_text(item.get('finding', ''))}:** "
-                        f"{safe_text(item.get('evidence', ''))} "
-                        f"Implication: {safe_text(item.get('implication', ''))}"
-                        for item in policy_observations
-                    ]
-                    or ["- None recorded."]
-                ),
-                "",
-                "## Advisory next action",
-                "",
-                f"**{safe_text(action.get('kind', 'unknown'))}:** "
-                f"{safe_text(action.get('rationale', ''))}",
-                "",
-                f"Suggested test: {safe_text(action.get('test', ''))}",
-                "",
+            metric_assessments = assessment.get("metric_assessments", [])
+            if isinstance(metric_assessments, Mapping):
+                metric_items = (
+                    {"metric": name, **item}
+                    for name, item in metric_assessments.items()
+                    if isinstance(item, Mapping)
+                )
+            else:
+                metric_items = metric_assessments
+            metric_lines = [
+                f"- **{safe_text(item.get('metric', ''))} — "
+                f"{safe_text(item.get('finding', ''))}:** "
+                f"{safe_text(item.get('rationale', ''))}"
+                for item in metric_items
+            ]
+            mechanism = assessment.get("mechanism", {})
+            implementation = assessment.get("implementation", {})
+            behavior = assessment.get("strategy_behavior", {})
+            policy_observations = assessment.get("policy_observations", [])
+            action = assessment.get("next_action", {})
+            reflection_document = "\n".join(
+                (
+                    f"# Post-trial reflection — Experiment {identifier}",
+                    "",
+                    dossier_note,
+                    "",
+                    f"## Summary\n\n{safe_text(assessment.get('summary', ''))}",
+                    "",
+                    "## Strategic behavior",
+                    "",
+                    f"`{safe_text(behavior.get('id', ''))}` — "
+                    f"**{safe_text(behavior.get('realization', 'unknown'))}**",
+                    "",
+                    *[f"- {safe_text(item)}" for item in behavior.get("evidence", [])],
+                    "",
+                    "## Telemetry assessment",
+                    "",
+                    *(metric_lines or ["- No metrics assessed."]),
+                    "",
+                    "## Mechanism",
+                    "",
+                    f"**{safe_text(mechanism.get('status', 'unknown'))}**",
+                    "",
+                    *[f"- {safe_text(item)}" for item in mechanism.get("evidence", [])],
+                    *[
+                        f"- Missing: {safe_text(item)}"
+                        for item in mechanism.get("missing_evidence", [])
+                    ],
+                    "",
+                    "## Implementation",
+                    "",
+                    f"**{safe_text(implementation.get('status', 'unknown'))}**",
+                    "",
+                    *[f"- {safe_text(item)}" for item in implementation.get("evidence", [])],
+                    *[f"- Concern: {safe_text(item)}" for item in implementation.get("concerns", [])],
+                    "",
+                    "## Policy observations",
+                    "",
+                    *(
+                        [
+                            f"- **{safe_text(item.get('finding', ''))}:** "
+                            f"{safe_text(item.get('evidence', ''))} "
+                            f"Implication: {safe_text(item.get('implication', ''))}"
+                            for item in policy_observations
+                        ]
+                        or ["- None recorded."]
+                    ),
+                    "",
+                    "## Advisory next action",
+                    "",
+                    f"**{safe_text(action.get('kind', 'unknown'))}:** "
+                    f"{safe_text(action.get('rationale', ''))}",
+                    "",
+                    f"Suggested test: {safe_text(action.get('test', ''))}",
+                    "",
+                )
             )
-        )
     documents = {
         "README.md": readme,
         "change.diff": candidate_diff(task.repo, champion, candidate) + "\n",
@@ -462,3 +566,55 @@ def ensure_experiment_dossier(
     finally:
         if temporary.exists():
             shutil.rmtree(temporary)
+
+
+def rebuild_task_index(task_directory: Path, results: list[dict[str, Any]]) -> Path:
+    """Rebuild the deterministic, derived navigation index."""
+    ordered = sorted(results, key=lambda item: int(item["experiment_id"]))
+    current = ordered[-1].get("champion_after") if ordered else None
+    lines = ["# Research report index", ""]
+    if current is None:
+        lines.extend(["Current champion: not established.", ""])
+    else:
+        lines.extend([f"Current champion: {_code(str(current)[:12])}", ""])
+    lines.extend(
+        [
+            "## Experiment outcomes",
+            "",
+            "| Experiment | Decision | Operational | Scientific | Effect | Lower bound | Dossier |",
+            "| ---: | --- | --- | --- | ---: | ---: | --- |",
+        ]
+    )
+    progression: list[str] = []
+    for result in ordered:
+        identifier = int(result["experiment_id"])
+        comparisons = result.get("evaluation", {}).get("comparisons", [])
+        final = comparisons[-1] if comparisons else {}
+        lines.append(
+            "| "
+            + " | ".join(
+                (
+                    f"{identifier:06d}",
+                    safe_text(result.get("decision", "unknown")),
+                    safe_text(result.get("operational_status", "—")),
+                    safe_text(result.get("scientific_status", "—")),
+                    str(final.get("effect_estimate", "—")),
+                    str(final.get("one_sided_lower_bound", "—")),
+                    f"[details](experiments/{identifier:06d}/README.md)",
+                )
+            )
+            + " |"
+        )
+        before = result.get("champion_before")
+        after = result.get("champion_after")
+        if before is not None and after is not None and before != after:
+            progression.append(
+                f"- Experiment {identifier:06d}: {_code(str(before)[:12])} → "
+                f"{_code(str(after)[:12])}"
+            )
+    lines.extend(["", "## Champion progression", ""])
+    lines.extend(progression or ["- No champion changes recorded."])
+    lines.append("")
+    target = task_directory / "reports" / "README.md"
+    atomic_write_text(target, "\n".join(lines))
+    return target

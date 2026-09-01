@@ -18,6 +18,7 @@ class AgentSessionRequest:
     prompt: str
     output_name: str
     read_paths: tuple[Path, ...] = ()
+    write_paths: tuple[Path, ...] = ()
     writable_worktree: bool = False
     read_worktree: bool = True
     network_enabled: bool = False
@@ -43,6 +44,7 @@ def _codex_command(
         output_schema=request.output_schema,
         prompt=request.prompt,
         read_paths=request.read_paths,
+        write_paths=request.write_paths,
         output_name=request.output_name,
         model=agent.model,
         reasoning_effort=agent.reasoning_effort,

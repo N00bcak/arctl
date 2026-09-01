@@ -58,6 +58,38 @@ def assessment(metrics: list[str]) -> dict:
     }
 
 
+def assessment_v4(metrics: list[str]) -> dict:
+    return {
+        "schema_version": 4,
+        "summary": "The mechanism remains unproven.",
+        "strategy_behavior": {
+            "id": "avoid-errors",
+            "realization": "unclear",
+            "evidence": [],
+        },
+        "mechanism": {
+            "status": "not_demonstrated",
+            "evidence": [],
+            "missing_evidence": ["Direct activation telemetry is absent."],
+        },
+        "implementation": {"status": "no_specific_concern", "concerns": []},
+        "material_signals": [
+            {
+                "metric": name,
+                "finding": "inconclusive",
+                "interpretation": "The metric does not isolate the mechanism.",
+            }
+            for name in metrics
+        ],
+        "history_citations": [],
+        "policy_observations": [],
+        "next_action": {
+            "kind": "revisit_after_better_evidence",
+            "rationale": "Activation was not measured.",
+        },
+    }
+
+
 class ReflectionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -140,7 +172,7 @@ class ReflectionTests(unittest.TestCase):
         )
 
     def test_saves_grounded_assessment_and_uncertainty_margin(self) -> None:
-        value = self.reflect(command_builder=self.builder(assessment(["errors"])))
+        value = self.reflect(command_builder=self.builder(assessment_v4([])))
 
         self.assertEqual(value["status"], "COMPLETE")
         self.assertAlmostEqual(value["basis"]["uncertainty_margin"], 0.7)
@@ -161,32 +193,47 @@ class ReflectionTests(unittest.TestCase):
         with self.assertRaisesRegex(StateError, "saved complete reflection is invalid"):
             validate_reflection(value, metric_names=("errors",))
 
+    def test_v4_rejects_duplicate_or_unknown_material_signals(self) -> None:
+        value = assessment_v4(["errors", "errors"])
+        wrapper = {
+            "schema_version": 4,
+            "status": "COMPLETE",
+            "warning": None,
+            "basis": {"strategy_behavior_id": "avoid-errors"},
+            "assessment": value,
+        }
+        with self.assertRaisesRegex(StateError, "unique declared metrics"):
+            validate_reflection(wrapper, metric_names=("errors",))
+
+        value["material_signals"] = [
+            {
+                "metric": "unknown",
+                "finding": "anomalous",
+                "interpretation": "Unexpected.",
+            }
+        ]
+        with self.assertRaisesRegex(StateError, "assessment is invalid"):
+            validate_reflection(wrapper, metric_names=("errors",))
+
     def test_generated_schema_fixes_metrics_behavior_and_empty_history(self) -> None:
         seen = {}
 
         def builder(_worktree, scratch, schema, _prompt):
             seen.update(json.loads(schema.read_text()))
-            value = assessment([])
-            value["schema_version"] = 3
-            value["metric_assessments"] = {
-                "errors": {
-                    "finding": "inconclusive",
-                    "rationale": "The aggregate does not isolate the mechanism.",
-                }
-            }
-            value["history_citations"] = []
+            value = assessment_v4(["errors"])
             return self.builder(value)(_worktree, scratch, schema, _prompt)
 
         reflected = self.reflect(command_builder=builder)
 
-        self.assertEqual(reflected["schema_version"], 3)
+        self.assertEqual(reflected["schema_version"], 4)
         properties = seen["properties"]
         self.assertEqual(
             properties["strategy_behavior"]["properties"]["id"]["const"],
             "avoid-errors",
         )
         self.assertEqual(
-            set(properties["metric_assessments"]["properties"]), {"errors"}
+            properties["material_signals"]["items"]["properties"]["metric"]["enum"],
+            ["errors"],
         )
         self.assertEqual(properties["history_citations"]["maxItems"], 0)
         self.assertEqual(self.reflect(), reflected)
@@ -216,8 +263,14 @@ class ReflectionTests(unittest.TestCase):
             },
         ]
 
-        reflected = self.reflect(command_builder=self.builder(value))
-
+        reflected = {
+            "schema_version": 2,
+            "status": "COMPLETE",
+            "warning": None,
+            "basis": {"strategy_behavior_id": "avoid-errors"},
+            "assessment": value,
+        }
+        validate_reflection(reflected, metric_names=("errors",))
         self.assertEqual(
             [
                 citation["entry_id"]
@@ -242,7 +295,7 @@ class ReflectionTests(unittest.TestCase):
         def builder(worktree, scratch, schema, prompt):
             nonlocal seen_prompt
             seen_prompt = prompt
-            return self.builder(assessment(["errors"]))(worktree, scratch, schema, prompt)
+            return self.builder(assessment_v4([]))(worktree, scratch, schema, prompt)
 
         self.reflect(command_builder=builder)
 
@@ -251,7 +304,7 @@ class ReflectionTests(unittest.TestCase):
 
     def test_failure_is_preserved_and_a_later_attempt_can_recover(self) -> None:
         with self.assertRaisesRegex(StateError, "post-trial reflection failed"):
-            self.reflect(command_builder=self.builder(assessment([])))
+            self.reflect(command_builder=self.builder(assessment_v4(["errors"] * 6)))
         self.assertTrue(
             (
                 self.experiment
@@ -263,7 +316,7 @@ class ReflectionTests(unittest.TestCase):
         )
 
         recovered = self.reflect(
-            command_builder=self.builder(assessment(["errors"]))
+            command_builder=self.builder(assessment_v4([]))
         )
         self.assertEqual(recovered["status"], "COMPLETE")
         self.assertTrue(
@@ -271,7 +324,7 @@ class ReflectionTests(unittest.TestCase):
         )
 
     def test_reflection_must_assess_the_selected_strategy_behavior(self) -> None:
-        value = assessment(["errors"])
+        value = assessment_v4([])
         value["strategy_behavior"]["id"] = "different-behavior"
         with self.assertRaisesRegex(StateError, "post-trial reflection failed"):
             self.reflect(command_builder=self.builder(value))

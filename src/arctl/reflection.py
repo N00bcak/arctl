@@ -34,17 +34,133 @@ def reflection_schema(
     strategy_behavior_id: str | None = None,
     history_entry_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    if version == 3 and metric_names is None:
-        raise ValueError("reflection schema version 3 requires metric_names")
+    if version in {3, 4} and metric_names is None:
+        raise ValueError(f"reflection schema version {version} requires metric_names")
     text = {"type": "string", "minLength": 1}
 
-    def strict(properties: Mapping[str, Any]) -> dict[str, Any]:
+    def strict(
+        properties: Mapping[str, Any], *, required: Sequence[str] | None = None
+    ) -> dict[str, Any]:
         return {
             "type": "object",
             "additionalProperties": False,
-            "required": list(properties),
+            "required": list(properties) if required is None else list(required),
             "properties": dict(properties),
         }
+
+    if version == 4:
+        history_id_schema: dict[str, Any]
+        if history_entry_ids:
+            history_id_schema = {"type": "string", "enum": list(history_entry_ids)}
+        else:
+            history_id_schema = text
+        properties = {
+            "schema_version": {"type": "integer", "const": 4},
+            "summary": text,
+            "strategy_behavior": strict(
+                {
+                    "id": (
+                        {"type": "string", "const": strategy_behavior_id}
+                        if strategy_behavior_id is not None
+                        else text
+                    ),
+                    "realization": {
+                        "type": "string",
+                        "enum": ["expressed", "not_expressed", "unclear"],
+                    },
+                    "evidence": {"type": "array", "items": text, "maxItems": 2},
+                }
+            ),
+            "mechanism": strict(
+                {
+                    "status": {
+                        "type": "string",
+                        "enum": ["supported", "contradicted", "not_demonstrated"],
+                    },
+                    "evidence": {"type": "array", "items": text, "maxItems": 2},
+                    "missing_evidence": {
+                        "type": "array",
+                        "items": text,
+                        "maxItems": 2,
+                    },
+                }
+            ),
+            "implementation": strict(
+                {
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "no_specific_concern",
+                            "activation_unclear",
+                            "test_gap",
+                            "implementation_concern",
+                        ],
+                    },
+                    "concerns": {"type": "array", "items": text, "maxItems": 2},
+                }
+            ),
+            "material_signals": {
+                "type": "array",
+                "maxItems": 5,
+                "items": strict(
+                    {
+                        "metric": {"type": "string", "enum": list(metric_names)},
+                        "finding": {
+                            "type": "string",
+                            "enum": [
+                                "supports",
+                                "contradicts",
+                                "inconclusive",
+                                "anomalous",
+                            ],
+                        },
+                        "interpretation": text,
+                    }
+                ),
+            },
+            "history_citations": {
+                "type": "array",
+                "maxItems": 3,
+                "items": strict(
+                    {
+                        "entry_id": history_id_schema,
+                        "bearing": {
+                            "type": "string",
+                            "enum": ["supports", "contradicts", "unresolved"],
+                        },
+                        "finding": text,
+                    }
+                ),
+            },
+            "policy_observations": {
+                "type": "array",
+                "maxItems": 3,
+                "items": strict(
+                    {"finding": text, "evidence": text, "implication": text}
+                ),
+            },
+            "next_action": strict(
+                {
+                    "kind": {
+                        "type": "string",
+                        "enum": [
+                            "retain",
+                            "refine",
+                            "revisit_after_better_evidence",
+                            "audit_implementation",
+                            "abandon_direction",
+                        ],
+                    },
+                    "rationale": text,
+                    "test": text,
+                },
+                required=("kind", "rationale"),
+            ),
+        }
+        schema = strict(properties)
+        if history_entry_ids is not None and not history_entry_ids:
+            schema["properties"]["history_citations"]["maxItems"] = 0
+        return schema
 
     properties = {
             "schema_version": {"type": "integer", "const": version},
@@ -264,7 +380,7 @@ def validate_reflection(
         "assessment",
     }:
         raise StateError("saved reflection fields are invalid")
-    if value["schema_version"] not in {1, 2, 3} or not isinstance(
+    if value["schema_version"] not in {1, 2, 3, 4} or not isinstance(
         value["basis"], Mapping
     ):
         raise StateError("saved reflection values are invalid")
@@ -281,28 +397,44 @@ def validate_reflection(
             raise StateError("saved complete reflection is invalid")
         try:
             assessment_version = assessment.get("schema_version")
-            if assessment_version not in {1, 2, 3}:
+            if assessment_version not in {1, 2, 3, 4}:
                 raise StateError("saved reflection assessment version is invalid")
             Draft202012Validator(
                 reflection_schema(
                     version=assessment_version,
-                    metric_names=metric_names if assessment_version == 3 else None,
+                    metric_names=(
+                        metric_names if assessment_version in {3, 4} else None
+                    ),
                     strategy_behavior_id=(
                         value["basis"].get("strategy_behavior_id")
-                        if assessment_version == 3
+                        if assessment_version in {3, 4}
                         else None
                     ),
                 )
             ).validate(assessment)
         except JsonSchemaError as error:
             raise StateError("saved reflection assessment is invalid") from error
-        assessments = assessment["metric_assessments"]
-        if assessment_version == 3:
+        if assessment_version == 4:
+            names = [item["metric"] for item in assessment["material_signals"]]
+            if len(names) != len(set(names)) or any(
+                name not in metric_names for name in names
+            ):
+                raise StateError(
+                    "reflection material signals must be unique declared metrics"
+                )
+            citation_ids = [
+                item["entry_id"] for item in assessment["history_citations"]
+            ]
+            if len(citation_ids) != len(set(citation_ids)):
+                raise StateError("reflection history citations must be unique")
+        elif assessment_version == 3:
+            assessments = assessment["metric_assessments"]
             if set(assessments) != set(metric_names):
                 raise StateError(
                     "reflection must assess every telemetry metric exactly once"
                 )
         else:
+            assessments = assessment["metric_assessments"]
             names = [item["metric"] for item in assessments]
             if len(names) != len(set(names)) or set(names) != set(metric_names):
                 raise StateError(
@@ -329,6 +461,7 @@ def run_reflection(
     champion_worktree: Path,
     stop_path: Path,
     command_builder: ReflectionCommandBuilder | None = None,
+    python_cache: Path | None = None,
 ) -> dict[str, Any]:
     assert task.method is not None
     task.method.require_component("reflect", "reflect.evidence-v1")
@@ -371,7 +504,7 @@ def run_reflection(
 
     history_ids = tuple(entry["entry_id"] for entry in load_ledger(experiment.parent.parent))
     schema = reflection_schema(
-        version=3,
+        version=4,
         metric_names=tuple(manifest.public_telemetry),
         strategy_behavior_id=request["strategy_behavior_id"],
         history_entry_ids=history_ids,
@@ -380,20 +513,18 @@ def run_reflection(
     write_json_once(schema_path, schema)
     prompt = (
         "Reflect on this completed experiment without changing its statistical verdict. "
-        "Inspect the candidate and champion implementation when useful. Separate direct "
-        "observations from inference, do not invent causes that the aggregate evidence "
-        "cannot identify, and treat implementation incompetence as a hypothesis requiring "
-        "specific evidence. Separately assess whether the candidate actually expressed "
-        "the selected behavior, whether its mechanism activated, whether implementation "
-        "fidelity was compromised, and whether the mechanism is supported, contradicted, "
-        "or inconclusive. Use strategy_behavior for realization, mechanism evidence and "
-        "missing_evidence for activation, and implementation for fidelity. "
-        "Record policy-specific observations about the proposed mechanism or "
-        "implementation for later planners. Search the compact public "
-        "catalog, open only relevant canonical entries, and cite every history entry "
-        "relied upon. Recommend only a disposition; "
-        "do not invent the next candidate. Assess every declared telemetry "
-        "metric exactly once. Return "
+        "Be concise and do not restate claims, verdicts, numerical results, unchanged "
+        "telemetry, implementation summaries, or history already present in the basis. "
+        "Inspect the candidate and champion only when useful. Separate observation from "
+        "inference and do not infer causes that aggregate evidence cannot identify. "
+        "Assess behavior realization, mechanism activation, and implementation fidelity. "
+        "Include telemetry only when its interpretation changes the conclusion or exposes "
+        "an anomaly; material_signals may be empty. Record implementation evidence only "
+        "for a concrete concern or a non-obvious fidelity conclusion. State shared "
+        "limitations such as unmeasured activation once. Record only novel, reusable "
+        "policy observations. Search the compact public catalog, open only relevant "
+        "canonical entries, and cite only history actually relied upon. Recommend a "
+        "disposition and optional specific test, not a new candidate design. Return "
         "only the required reflection JSON. The candidate is the current working "
         f"directory; the champion is readable at {champion_worktree}.\n\n"
         + json.dumps(
@@ -425,6 +556,7 @@ def run_reflection(
                 output_schema=schema_path,
                 prompt=prompt,
                 read_paths=read_paths,
+                write_paths=((python_cache,) if python_cache is not None else ()),
                 output_name="assessment.public.json",
                 writable_worktree=False,
             ),
@@ -436,6 +568,9 @@ def run_reflection(
             ),
             writable_home=scratch,
         )
+        if python_cache is not None:
+            environment.pop("PYTHONDONTWRITEBYTECODE", None)
+            environment["PYTHONPYCACHEPREFIX"] = str(python_cache.resolve())
         write_json_once(
             attempt / "agent.public.json",
             agent_provenance(agent, lifecycle=f"reflection:{experiment.name}"),
@@ -469,24 +604,22 @@ def run_reflection(
             (scratch / "assessment.public.json").read_text(encoding="utf-8")
         )
         assessment_version = assessment.get("schema_version")
-        if assessment_version not in {1, 2, 3}:
-            raise StateError("reflection schema version is unsupported")
-        Draft202012Validator(
-            schema if assessment_version == 3 else reflection_schema(version=assessment_version)
-        ).validate(assessment)
-        if assessment_version != 3:
-            names = [item["metric"] for item in assessment["metric_assessments"]]
-            if len(names) != len(set(names)) or set(names) != set(manifest.public_telemetry):
-                raise StateError("reflection must assess every telemetry metric exactly once")
+        if assessment_version != 4:
+            raise StateError("new reflections must use schema version 4")
+        Draft202012Validator(schema).validate(assessment)
+        names = [item["metric"] for item in assessment["material_signals"]]
+        if len(names) != len(set(names)):
+            raise StateError("reflection material signals must be unique")
         if assessment["strategy_behavior"]["id"] != request["strategy_behavior_id"]:
             raise StateError("reflection strategy behavior does not match the request")
-        if assessment_version in {2, 3}:
-            citation_ids = [item["entry_id"] for item in assessment["history_citations"]]
-            known_ids = {
-                entry["entry_id"] for entry in load_ledger(experiment.parent.parent)
-            }
-            if any(identifier not in known_ids for identifier in citation_ids):
-                raise StateError("reflection cites invalid exploration entries")
+        citation_ids = [item["entry_id"] for item in assessment["history_citations"]]
+        if len(citation_ids) != len(set(citation_ids)):
+            raise StateError("reflection history citations must be unique")
+        known_ids = {
+            entry["entry_id"] for entry in load_ledger(experiment.parent.parent)
+        }
+        if any(identifier not in known_ids for identifier in citation_ids):
+            raise StateError("reflection cites invalid exploration entries")
     except StoppedError:
         raise
     except TransientDownstreamError as error:
@@ -520,7 +653,7 @@ def run_reflection(
         )
         raise StateError(f"post-trial reflection failed: {error}") from error
     value = {
-        "schema_version": 3,
+        "schema_version": 4,
         "status": "COMPLETE",
         "warning": None,
         "basis": basis,

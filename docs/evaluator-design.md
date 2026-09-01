@@ -84,9 +84,10 @@ audit, or abandonment, but cannot change the verdict or promotion. If that
 required session fails, valid evidence is preserved and later research stops
 until a fresh reflection attempt succeeds.
 
-Reflection schema v3 fixes the selected behavior ID, history entry IDs, and
-exact telemetry field names in the model's output schema. Older published
-reflection versions remain readable.
+Reflection schema v4 fixes the selected behavior and known history IDs while
+recording only material telemetry interpretations, concrete implementation
+concerns, and a concise disposition. Older published reflection versions remain
+readable and render unchanged.
 
 ## Reference conformance fixtures
 

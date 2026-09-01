@@ -406,24 +406,7 @@ def _catalog_entry(task_directory: Path, entry: Mapping[str, Any]) -> dict[str, 
             "warning": reflection.get("warning"),
         }
         if isinstance(assessment, Mapping):
-            metric_assessments = assessment.get("metric_assessments", [])
-            if isinstance(metric_assessments, Mapping):
-                metric_findings = [
-                    {"metric": name, "finding": item.get("finding")}
-                    for name, item in metric_assessments.items()
-                    if isinstance(item, Mapping)
-                ]
-            else:
-                metric_findings = [
-                    {
-                        "metric": item.get("metric"),
-                        "finding": item.get("finding"),
-                    }
-                    for item in metric_assessments
-                    if isinstance(item, Mapping)
-                ]
-            compact_reflection.update(
-                {
+            compact = {
                     "summary": assessment.get("summary"),
                     "strategy_realization": (
                         assessment.get("strategy_behavior", {}).get("realization")
@@ -440,14 +423,31 @@ def _catalog_entry(task_directory: Path, entry: Mapping[str, Any]) -> dict[str, 
                         if isinstance(assessment.get("implementation"), Mapping)
                         else None
                     ),
-                    "metric_findings": metric_findings,
                     "next_action": (
                         assessment.get("next_action", {}).get("kind")
                         if isinstance(assessment.get("next_action"), Mapping)
                         else None
                     ),
                 }
-            )
+            if assessment.get("schema_version") != 4:
+                metric_assessments = assessment.get("metric_assessments", [])
+                if isinstance(metric_assessments, Mapping):
+                    metric_findings = [
+                        {"metric": name, "finding": item.get("finding")}
+                        for name, item in metric_assessments.items()
+                        if isinstance(item, Mapping)
+                    ]
+                else:
+                    metric_findings = [
+                        {
+                            "metric": item.get("metric"),
+                            "finding": item.get("finding"),
+                        }
+                        for item in metric_assessments
+                        if isinstance(item, Mapping)
+                    ]
+                compact["metric_findings"] = metric_findings
+            compact_reflection.update(compact)
         catalog["reflection"] = {
             key: value for key, value in compact_reflection.items() if value is not None
         }
