@@ -1028,28 +1028,49 @@ def _agent_run(
         agent = AgentDefinition(
             "setup-default", "codex-cli-v1", "gpt-5.6-sol", "medium"
         )
-        command = agent_command(
-            agent,
-            AgentSessionRequest(
-                worktree=worktree,
-                scratch=scratch,
-                output_schema=schema,
-                prompt=prompt,
-                output_name=output_name,
-                writable_worktree=writable_worktree,
-                read_paths=read_paths,
-                network_enabled=False,
-            ),
-        )
-        environment = agent_environment(
-            agent,
-            credential_home=Path(
-                os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
-            ),
-            writable_home=scratch,
-        )
+        try:
+            command = agent_command(
+                agent,
+                AgentSessionRequest(
+                    worktree=worktree,
+                    scratch=scratch,
+                    output_schema=schema,
+                    prompt=prompt,
+                    output_name=output_name,
+                    writable_worktree=writable_worktree,
+                    read_paths=read_paths,
+                    network_enabled=False,
+                ),
+            )
+        except (OSError, StateError) as error:
+            atomic_write_json(
+                root / "failure.json",
+                {"schema_version": 1, "message": str(error)},
+            )
+            raise
+        try:
+            environment = agent_environment(
+                agent,
+                credential_home=Path(
+                    os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
+                ),
+                writable_home=scratch,
+            )
+        except (OSError, StateError) as error:
+            atomic_write_json(
+                root / "failure.json",
+                {"schema_version": 1, "message": str(error)},
+            )
+            raise
     else:
-        command = command_builder(worktree, scratch, schema, prompt)
+        try:
+            command = command_builder(worktree, scratch, schema, prompt)
+        except (OSError, StateError) as error:
+            atomic_write_json(
+                root / "failure.json",
+                {"schema_version": 1, "message": str(error)},
+            )
+            raise
         environment = None
     result = run_or_load_once(
         root / "process",

@@ -16,7 +16,7 @@ from jsonschema.exceptions import ValidationError as JsonSchemaError
 from .agent_backend import AgentSessionRequest, agent_command, agent_environment, agent_provenance
 from .agent_selection import select_agent
 from .downstream import transient_process_error
-from .errors import ProcessError, StateError, StoppedError, TransientDownstreamError
+from .errors import ArctlError, ProcessError, StateError, StoppedError, TransientDownstreamError
 from .manifest import EvaluatorManifest
 from .models import TaskConfig
 from .process import run_or_load_once
@@ -533,51 +533,60 @@ def run_reflection(
             separators=(",", ":"),
         )
     )
-    if command_builder is None:
-        history_paths = [experiment.parent.parent / "exploration"]
-        if context["strategy"] is not None:
-            history_paths.append(Path(context["strategy"]))
-        history_paths.extend(
-            Path(path) for path in context["supporting_artifacts"].values()
-        )
-        assert task.method is not None
-        agent = select_agent(
-            task.method,
-            component="reflect",
-            lifecycle=f"reflection:{experiment.name}",
-            root=reflection_root,
-        )
-        read_paths = (champion_worktree, *history_paths)
-        command = agent_command(
-            agent,
-            AgentSessionRequest(
-                worktree=candidate_worktree,
-                scratch=scratch,
-                output_schema=schema_path,
-                prompt=prompt,
-                read_paths=read_paths,
-                write_paths=((python_cache,) if python_cache is not None else ()),
-                output_name="assessment.public.json",
-                writable_worktree=False,
-            ),
-        )
-        environment = agent_environment(
-            agent,
-            credential_home=Path(
-                os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
-            ),
-            writable_home=scratch,
-        )
-        if python_cache is not None:
-            environment.pop("PYTHONDONTWRITEBYTECODE", None)
-            environment["PYTHONPYCACHEPREFIX"] = str(python_cache.resolve())
+    try:
+        if command_builder is None:
+            history_paths = [experiment.parent.parent / "exploration"]
+            if context["strategy"] is not None:
+                history_paths.append(Path(context["strategy"]))
+            history_paths.extend(
+                Path(path) for path in context["supporting_artifacts"].values()
+            )
+            assert task.method is not None
+            agent = select_agent(
+                task.method,
+                component="reflect",
+                lifecycle=f"reflection:{experiment.name}",
+                root=reflection_root,
+            )
+            read_paths = (champion_worktree, *history_paths)
+            command = agent_command(
+                agent,
+                AgentSessionRequest(
+                    worktree=candidate_worktree,
+                    scratch=scratch,
+                    output_schema=schema_path,
+                    prompt=prompt,
+                    read_paths=read_paths,
+                    write_paths=((python_cache,) if python_cache is not None else ()),
+                    output_name="assessment.public.json",
+                    writable_worktree=False,
+                ),
+            )
+            environment = agent_environment(
+                agent,
+                credential_home=Path(
+                    os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
+                ),
+                writable_home=scratch,
+            )
+            if python_cache is not None:
+                environment.pop("PYTHONDONTWRITEBYTECODE", None)
+                environment["PYTHONPYCACHEPREFIX"] = str(python_cache.resolve())
+            write_json_once(
+                attempt / "agent.public.json",
+                agent_provenance(agent, lifecycle=f"reflection:{experiment.name}"),
+            )
+        else:
+            command = command_builder(candidate_worktree, scratch, schema_path, prompt)
+            environment = None
+    except StoppedError:
+        raise
+    except (OSError, ArctlError) as error:
         write_json_once(
-            attempt / "agent.public.json",
-            agent_provenance(agent, lifecycle=f"reflection:{experiment.name}"),
+            attempt / "reflection.failure.json",
+            {"schema_version": 1, "message": str(error)},
         )
-    else:
-        command = command_builder(candidate_worktree, scratch, schema_path, prompt)
-        environment = None
+        raise StateError(f"post-trial reflection failed: {error}") from error
     try:
         process = run_or_load_once(
             attempt / "process",

@@ -198,19 +198,26 @@ def _run_agent(
             lifecycle=f"{role}:{agent_root.parent.name}:{agent_root.name}",
             root=agent_root,
         )
-    command = (
-        command_builder(worktree, scratch, schema, prompt)
-        if command_builder is not None
-        else _agent_command(
-            agent,
-            worktree=worktree,
-            scratch=scratch,
-            schema=schema,
-            prompt=prompt,
-            output_name=output_name,
-            writable=writable,
+    try:
+        command = (
+            command_builder(worktree, scratch, schema, prompt)
+            if command_builder is not None
+            else _agent_command(
+                agent,
+                worktree=worktree,
+                scratch=scratch,
+                schema=schema,
+                prompt=prompt,
+                output_name=output_name,
+                writable=writable,
+            )
         )
-    )
+    except (OSError, StateError) as error:
+        write_json_once(
+            scratch / "failure.json",
+            {"schema_version": 1, "message": str(error)},
+        )
+        raise
     process_directory = scratch / "process"
     if command_builder is None:
         write_json_once(

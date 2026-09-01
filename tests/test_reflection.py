@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from arctl.errors import StateError
 from arctl.manifest import EvaluatorManifest
@@ -12,7 +13,7 @@ from arctl.reflection import run_reflection, validate_reflection
 from arctl.sandbox import MAX_AGENT_PROMPT_BYTES
 from arctl.search import add_ledger_entry
 
-from .helpers import valid_task
+from .helpers import valid_task, valid_task_v4
 from .test_manifest import valid_manifest
 
 
@@ -237,6 +238,24 @@ class ReflectionTests(unittest.TestCase):
         )
         self.assertEqual(properties["history_citations"]["maxItems"], 0)
         self.assertEqual(self.reflect(), reflected)
+
+    def test_agent_preflight_failure_is_saved_at_the_attempt_boundary(self) -> None:
+        raw_task = valid_task_v4()
+        raw_task["repo"] = str(self.root / "subject")
+        self.task = TaskConfig.from_mapping(raw_task)
+
+        with (
+            mock.patch(
+                "arctl.reflection.agent_command",
+                side_effect=StateError("Codex output schema rejected"),
+            ),
+            self.assertRaisesRegex(StateError, "post-trial reflection failed"),
+        ):
+            self.reflect()
+
+        failure = self.experiment / "reflection" / "attempts" / "0001" / "reflection.failure.json"
+        self.assertTrue(failure.is_file())
+        self.assertIn("Codex output schema rejected", failure.read_text())
 
     def test_version_two_reflection_cites_a_canonical_history_entry(self) -> None:
         entry = add_ledger_entry(

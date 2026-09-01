@@ -716,32 +716,54 @@ def ensure_strategy(
                 ),
                 *((exhaustion_path,) if refresh and exhaustion_path.is_file() else ()),
             )
-        command = agent_command(
-            agent,
-            AgentSessionRequest(
-                worktree=worktree,
-                scratch=scratch,
-                output_schema=schema,
-                prompt=prompt,
-                output_name="strategy.public.json",
-                read_paths=read_paths,
-                writable_worktree=False,
-                read_worktree=False,
-            ),
-        )
-        environment = agent_environment(
-            agent,
-            credential_home=Path(
-                os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
-            ),
-            writable_home=scratch,
-        )
+        try:
+            command = agent_command(
+                agent,
+                AgentSessionRequest(
+                    worktree=worktree,
+                    scratch=scratch,
+                    output_schema=schema,
+                    prompt=prompt,
+                    output_name="strategy.public.json",
+                    read_paths=read_paths,
+                    writable_worktree=False,
+                    read_worktree=False,
+                ),
+            )
+        except (OSError, StateError) as error:
+            write_json_once(
+                root / "strategy.failure.json",
+                {"schema_version": 1, "message": str(error)},
+            )
+            raise
+        try:
+            environment = agent_environment(
+                agent,
+                credential_home=Path(
+                    os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))
+                ),
+                writable_home=scratch,
+            )
+        except (OSError, StateError) as error:
+            if not (root / "strategy.failure.json").exists():
+                write_json_once(
+                    root / "strategy.failure.json",
+                    {"schema_version": 1, "message": str(error)},
+                )
+            raise
         write_json_once(
             attempt / "agent.public.json",
             agent_provenance(agent, lifecycle=f"strategy:{revision:06d}"),
         )
     else:
-        command = command_builder(worktree, scratch, schema, prompt)
+        try:
+            command = command_builder(worktree, scratch, schema, prompt)
+        except (OSError, StateError) as error:
+            write_json_once(
+                root / "strategy.failure.json",
+                {"schema_version": 1, "message": str(error)},
+            )
+            raise
         environment = None
     process_directory = attempt / "process"
     try:
