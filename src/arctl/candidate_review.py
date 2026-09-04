@@ -33,24 +33,84 @@ CheckCommandBuilder = Callable[[Sequence[str], Path, Path], Sequence[str]]
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 
-def requirement_audit_schema() -> dict[str, Any]:
+def requirement_audit_schema(*, structured: bool = False) -> dict[str, Any]:
+    required = ["requirement", "status", "evidence"]
+    properties: dict[str, Any] = {
+        "requirement": {"type": "string", "minLength": 1},
+        "status": {
+            "type": "string",
+            "enum": ["verified", "unverified"],
+        },
+        "evidence": {"type": "string", "minLength": 1},
+    }
+    if structured:
+        required = ["id", *required, "verification_ids"]
+        properties = {
+            "id": {"type": "string", "minLength": 1},
+            **properties,
+            "verification_ids": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+            },
+        }
     return {
         "type": "array",
         "minItems": 1,
         "items": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["requirement", "status", "evidence"],
+            "required": required,
+            "properties": properties,
+        },
+    }
+
+
+def verification_schema() -> dict[str, Any]:
+    text = {"type": "string", "minLength": 1}
+    return {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["id", "purpose", "command", "outcome", "evidence"],
             "properties": {
-                "requirement": {"type": "string", "minLength": 1},
-                "status": {
-                    "type": "string",
-                    "enum": ["verified", "unverified"],
-                },
-                "evidence": {"type": "string", "minLength": 1},
+                "id": text,
+                "purpose": text,
+                "command": text,
+                "outcome": {"type": "string", "enum": ["passed", "failed"]},
+                "evidence": text,
             },
         },
     }
+
+
+def verification_audit_error(
+    value: Mapping[str, Any], *, completed_status: str
+) -> str | None:
+    requirements = value["requirements"]
+    verifications = value["verifications"]
+    requirement_ids = [item["id"] for item in requirements]
+    if len(requirement_ids) != len(set(requirement_ids)):
+        return "duplicate requirement identifier"
+    verification_ids = [item["id"] for item in verifications]
+    if len(verification_ids) != len(set(verification_ids)):
+        return "duplicate verification identifier"
+    known = set(verification_ids)
+    for requirement in requirements:
+        references = requirement["verification_ids"]
+        if len(references) != len(set(references)):
+            return f"requirement {requirement['id']} repeats a verification identifier"
+        unknown = sorted(set(references) - known)
+        if unknown:
+            return f"requirement {requirement['id']} references unknown verification {unknown[0]}"
+    if value["status"] == completed_status:
+        if not verifications:
+            return f"completed {completed_status} report has no verification records"
+        if any(item["status"] != "verified" for item in requirements):
+            return f"completed {completed_status} report has unverified requirements"
+        if any(item["outcome"] != "passed" for item in verifications):
+            return f"completed {completed_status} report has unsuccessful verification"
+    return None
 
 
 def review_schema() -> dict[str, Any]:
@@ -81,12 +141,19 @@ def repair_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["schema_version", "status", "summary", "requirements"],
+        "required": [
+            "schema_version",
+            "status",
+            "summary",
+            "requirements",
+            "verifications",
+        ],
         "properties": {
-            "schema_version": {"type": "integer", "const": 2},
+            "schema_version": {"type": "integer", "const": 3},
             "status": {"type": "string", "enum": ["repaired", "infeasible"]},
             "summary": {"type": "string", "minLength": 1},
-            "requirements": requirement_audit_schema(),
+            "requirements": requirement_audit_schema(structured=True),
+            "verifications": verification_schema(),
         },
     }
 
@@ -107,15 +174,35 @@ def _validate_repair(value: Any) -> dict[str, Any]:
         except JsonSchemaError as error:
             raise StateError("candidate repair did not write valid repair JSON") from error
         return {**value, "status": "repaired", "requirements": []}
+    if isinstance(value, dict) and value.get("schema_version") == 2:
+        legacy = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["schema_version", "status", "summary", "requirements"],
+            "properties": {
+                "schema_version": {"type": "integer", "const": 2},
+                "status": {"type": "string", "enum": ["repaired", "infeasible"]},
+                "summary": {"type": "string", "minLength": 1},
+                "requirements": requirement_audit_schema(),
+            },
+        }
+        try:
+            Draft202012Validator(legacy).validate(value)
+        except JsonSchemaError as error:
+            raise StateError("candidate repair did not write valid repair JSON") from error
+        if value["status"] == "repaired" and any(
+            item["status"] != "verified" for item in value["requirements"]
+        ):
+            raise StateError("completed candidate repair has unverified requirements")
+        return value
     try:
         Draft202012Validator(repair_schema()).validate(value)
     except JsonSchemaError as error:
         raise StateError("candidate repair did not write valid repair JSON") from error
     assert isinstance(value, dict)
-    if value["status"] == "repaired" and any(
-        item["status"] != "verified" for item in value["requirements"]
-    ):
-        raise StateError("completed candidate repair has unverified requirements")
+    error = verification_audit_error(value, completed_status="repaired")
+    if error is not None:
+        raise StateError(error)
     return value
 
 
@@ -446,8 +533,11 @@ def _repair_prompt(
         "checklist. Inspect the relevant trusted interface, run applicable public checks "
         "and targeted probes, and keep fixing until every requirement has concrete code "
         "or test evidence. Preserve the research claim and mechanism; do not broaden "
-        "scope, commit, or touch denied paths. Return status repaired only when every "
-        "requirement is verified; otherwise return infeasible. Emit schema version 2 and "
+        "scope, commit, or touch denied paths. Give every requirement and targeted probe "
+        "a stable identifier. For each probe, record its purpose, exact command, observed "
+        "outcome, and concise evidence, and link requirements to the relevant probe IDs. "
+        "Return status repaired only when every requirement is verified and every recorded "
+        "probe succeeded; otherwise return infeasible. Emit schema version 3 and "
         "only the required repair JSON after editing.\n\n"
         + json.dumps(packet, sort_keys=True, separators=(",", ":"))
     )

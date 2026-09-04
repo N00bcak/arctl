@@ -10,6 +10,8 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
+
 from arctl.approval import confirm_approval, preview_approval
 from arctl.errors import StateError, ValidationError
 from arctl.experiment import start_experiment
@@ -346,6 +348,19 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
         self.assertEqual(plan["selection"], request["strategy_behavior_id"])
         self.assertEqual(plan["directions"][0]["request"], request)
         self.assertTrue((attempt / "implementation.public.json").is_file())
+        origin = json.loads(
+            (
+                self.task_directory
+                / "experiments"
+                / "000001"
+                / "implementation-origin.public.json"
+            ).read_text()
+        )
+        self.assertEqual(origin["schema_version"], 1)
+        self.assertEqual(
+            origin["transcript"],
+            "searches/000001/attempts/01/implementation/attempts/0001/process/stdout.bin",
+        )
 
     def test_isolated_python_cache_is_audited_without_replanning(self) -> None:
         def implementation(
@@ -1044,9 +1059,13 @@ scratch = Path(sys.argv[1])
             script = (
                 "import json,pathlib,sys;"
                 "pathlib.Path(sys.argv[1]).write_text(json.dumps({"
-                "'schema_version':2,'status':'implemented','summary':'done',"
-                "'deviations':[],'requirements':[{'requirement':'use runtime',"
-                "'status':'verified','evidence':'policy.py:1'}]}))"
+                "'schema_version':3,'status':'implemented','summary':'done',"
+                "'deviations':[],'requirements':[{'id':'runtime-path',"
+                "'requirement':'use runtime','status':'verified',"
+                "'evidence':'policy.py:1','verification_ids':['probe-runtime']}],"
+                "'verifications':[{'id':'probe-runtime','purpose':'exercise runtime',"
+                "'command':'python3 probe.py','outcome':'passed',"
+                "'evidence':'exit code 0'}]}))"
             )
             return (
                 "python3",
@@ -1078,8 +1097,9 @@ scratch = Path(sys.argv[1])
 
         self.assertEqual(captured["read_paths"], (runtime,))
         self.assertEqual(captured["model"], "gpt-5.6-terra")
-        self.assertEqual(captured["schema"]["properties"]["schema_version"]["const"], 2)
+        self.assertEqual(captured["schema"]["properties"]["schema_version"]["const"], 3)
         self.assertIn("sentence by sentence", captured["prompt"])
+        self.assertIn("exact command", captured["prompt"])
         self.assertIn(manifest.subject_interface, captured["prompt"])
 
     def test_implemented_report_requires_every_requirement_verified(self) -> None:
@@ -1099,6 +1119,77 @@ scratch = Path(sys.argv[1])
                     ],
                 }
             )
+
+    def test_v3_implementation_report_rejects_invalid_verification_links(self) -> None:
+        report = {
+            "schema_version": 3,
+            "status": "implemented",
+            "summary": "Implemented and checked.",
+            "deviations": [],
+            "requirements": [
+                {
+                    "id": "transition",
+                    "requirement": "Validate transitions.",
+                    "status": "verified",
+                    "evidence": "The targeted probe covers the transition.",
+                    "verification_ids": ["probe-transition"],
+                }
+            ],
+            "verifications": [
+                {
+                    "id": "probe-transition",
+                    "purpose": "Exercise the transition.",
+                    "command": "python3 -m unittest tests.test_transition",
+                    "outcome": "passed",
+                    "evidence": "1 test passed.",
+                }
+            ],
+        }
+        self.assertEqual(_validate_implementation_report(report), report)
+
+        missing = dict(report)
+        missing.pop("verifications")
+        with self.assertRaises(JsonSchemaValidationError):
+            _validate_implementation_report(missing)
+
+        duplicate = json.loads(json.dumps(report))
+        duplicate["verifications"].append(dict(duplicate["verifications"][0]))
+        with self.assertRaisesRegex(ValidationError, "duplicate verification identifier"):
+            _validate_implementation_report(duplicate)
+
+        failing = json.loads(json.dumps(report))
+        failing["verifications"][0]["outcome"] = "failed"
+        with self.assertRaisesRegex(ValidationError, "unsuccessful verification"):
+            _validate_implementation_report(failing)
+
+        dangling = json.loads(json.dumps(report))
+        dangling["requirements"][0]["verification_ids"] = ["missing-probe"]
+        with self.assertRaisesRegex(ValidationError, "unknown verification"):
+            _validate_implementation_report(dangling)
+
+    def test_historical_v1_and_v2_implementation_reports_remain_readable(self) -> None:
+        for report in (
+            {
+                "schema_version": 1,
+                "status": "implemented",
+                "summary": "Historical implementation.",
+                "deviations": [],
+            },
+            {
+                "schema_version": 2,
+                "status": "implemented",
+                "summary": "Historical audited implementation.",
+                "deviations": [],
+                "requirements": [
+                    {
+                        "requirement": "Preserve behavior.",
+                        "status": "verified",
+                        "evidence": "Historical prose evidence.",
+                    }
+                ],
+            },
+        ):
+            self.assertEqual(_validate_implementation_report(report), report)
 
     def test_resumes_finalizing_experiment_without_research_or_evaluation_reruns(
         self,

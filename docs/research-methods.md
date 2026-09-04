@@ -98,6 +98,17 @@ unavailable rather than projected. Likely overruns are visible to the
 implementer, reviewer, and operator but do not reject the candidate or alter
 approved trials.
 
+Implementation reports retain a structured, agent-reported verification
+disclosure. Each frozen requirement has a stable identifier and may cite
+targeted probe records containing the probe's purpose, exact command, observed
+outcome, and concise evidence. Candidate repairs use the same contract so the
+final disclosure describes post-repair verification rather than relying on the
+original implementation report. arctl validates the references and preserves
+the raw execution transcript, but does not rerun these commands in the
+controller or require candidate-owned permanent tests. This record supports
+human audit and replay; it is not independent evidence that the proposed
+mechanism caused an official result.
+
 Outside a frozen experiment, managed Python processes disable bytecode writes.
 After an experiment request is frozen, its checks, evaluator stages, subject
 workers, arms, and reflection share one cache under

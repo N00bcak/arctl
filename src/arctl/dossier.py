@@ -56,6 +56,86 @@ def _read_object(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
+def _implementation_document(
+    identifier: int,
+    disclosures: list[tuple[str, Mapping[str, Any]]],
+    origin: Mapping[str, Any] | None,
+    dossier_note: str,
+) -> str:
+    lines = [
+        f"# Implementation disclosure — Experiment {identifier}",
+        "",
+        dossier_note,
+        "",
+        "> Agent-reported verification disclosure. arctl retains these commands and ",
+        "> observations for audit and replay but does not rerun them. They are not ",
+        "> independent causal attribution.",
+        "",
+    ]
+    if origin is not None:
+        transcript = origin.get("transcript") or origin.get("process_directory")
+        if transcript:
+            lines.extend(
+                [
+                    "Authoritative process evidence: " + _code(transcript),
+                    "",
+                ]
+            )
+    for label, report in disclosures:
+        lines.extend(
+            [
+                f"## {safe_text(label)}",
+                "",
+                f"**Status:** **{safe_text(report.get('status', 'unknown'))}**",
+                "",
+                safe_text(report.get("summary", "")),
+                "",
+                "### Frozen requirements",
+                "",
+            ]
+        )
+        requirements = report.get("requirements", [])
+        lines.extend(
+            [
+                f"- **{safe_text(item.get('id', 'historical'))} — "
+                f"{safe_text(item.get('status', 'unknown'))}:** "
+                f"{safe_text(item.get('requirement', ''))} "
+                f"Evidence: {safe_text(item.get('evidence', ''))}"
+                for item in requirements
+                if isinstance(item, Mapping)
+            ]
+            or ["- Structured requirement audit was unavailable for this historical report."]
+        )
+        lines.extend(["", "### Targeted verification", ""])
+        verifications = report.get("verifications", [])
+        if verifications:
+            for item in verifications:
+                if not isinstance(item, Mapping):
+                    continue
+                lines.extend(
+                    [
+                        f"#### {safe_text(item.get('id', 'unknown'))}",
+                        "",
+                        f"Purpose: {safe_text(item.get('purpose', ''))}",
+                        "",
+                        "Exact command: " + _code(item.get("command", "")),
+                        "",
+                        f"Observed outcome: **{safe_text(item.get('outcome', 'unknown'))}**",
+                        "",
+                        f"Evidence: {safe_text(item.get('evidence', ''))}",
+                        "",
+                    ]
+                )
+        else:
+            lines.extend(
+                [
+                    "Structured replay information was unavailable for this historical report.",
+                    "",
+                ]
+            )
+    return "\n".join(lines)
+
+
 def _comparison_lines(result: dict[str, Any]) -> list[str]:
     comparisons = result.get("evaluation", {}).get("comparisons", [])
     lines = [
@@ -241,6 +321,27 @@ def _documents(
         if review_files
         else None
     )
+    disclosures: list[tuple[str, Mapping[str, Any]]] = []
+    implementation_path = experiment / "implementation.public.json"
+    if implementation_path.is_file():
+        disclosures.append(
+            ("Initial implementation", _read_object(implementation_path, "implementation report"))
+        )
+    for repair_path in sorted(
+        (experiment / "candidate-review").glob("round-*/repair/repair.public.json")
+    ):
+        disclosures.append(
+            (
+                f"Candidate repair {repair_path.parents[1].name}",
+                _read_object(repair_path, "candidate repair report"),
+            )
+        )
+    origin_path = experiment / "implementation-origin.public.json"
+    implementation_origin = (
+        _read_object(origin_path, "implementation process origin")
+        if origin_path.is_file()
+        else None
+    )
     readme = "\n".join(
         (
             f"# Experiment {identifier}",
@@ -258,6 +359,7 @@ def _documents(
             f"**Decision:** **{decision}**",
             "",
             "- [Research rationale](research.md)",
+            *(["- [Implementation disclosure](implementation.md)"] if disclosures else []),
             *(
                 ["- [Pre-trial policy review](candidate-review.md)"]
                 if review
@@ -503,6 +605,13 @@ def _documents(
         "evaluation.md": evaluation,
         "reflection.md": reflection_document,
     }
+    if disclosures:
+        documents["implementation.md"] = _implementation_document(
+            identifier,
+            disclosures,
+            implementation_origin,
+            dossier_note,
+        )
     if review is not None:
         documents["candidate-review.md"] = "\n".join(
             (

@@ -9,8 +9,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from arctl.candidate_review import review_candidate
-from arctl.errors import ResearchMiss, TransientDownstreamError
+from arctl.candidate_review import _validate_repair, review_candidate
+from arctl.errors import ResearchMiss, StateError, TransientDownstreamError
 from arctl.manifest import EvaluatorManifest
 from arctl.models import TaskConfig
 from arctl.registry import LocatedTask
@@ -219,6 +219,57 @@ scratch = Path(sys.argv[1])
         self.assertIn("findings array is exclusively", prompts[0])
         self.assertIn("Preserve deterministic behavior.", prompts[0])
         self.assertIn("report every independently supported violation", prompts[0])
+
+    def test_repair_v3_requires_replayable_successful_verification(self) -> None:
+        report = {
+            "schema_version": 3,
+            "status": "repaired",
+            "summary": "Repaired and checked.",
+            "requirements": [
+                {
+                    "id": "supplied-inputs",
+                    "requirement": "Use only supplied observations.",
+                    "status": "verified",
+                    "evidence": "The targeted probe covers the repaired branch.",
+                    "verification_ids": ["probe-repair"],
+                }
+            ],
+            "verifications": [
+                {
+                    "id": "probe-repair",
+                    "purpose": "Exercise the repaired branch.",
+                    "command": "python3 -m unittest tests.test_policy",
+                    "outcome": "passed",
+                    "evidence": "1 test passed.",
+                }
+            ],
+        }
+        self.assertEqual(_validate_repair(report), report)
+
+        dangling = json.loads(json.dumps(report))
+        dangling["requirements"][0]["verification_ids"] = ["not-recorded"]
+        with self.assertRaisesRegex(StateError, "unknown verification"):
+            _validate_repair(dangling)
+
+        failing = json.loads(json.dumps(report))
+        failing["verifications"][0]["outcome"] = "failed"
+        with self.assertRaisesRegex(StateError, "unsuccessful verification"):
+            _validate_repair(failing)
+
+    def test_historical_v2_repair_report_remains_readable(self) -> None:
+        report = {
+            "schema_version": 2,
+            "status": "repaired",
+            "summary": "Historical repair.",
+            "requirements": [
+                {
+                    "requirement": "Use only supplied observations.",
+                    "status": "verified",
+                    "evidence": "Historical prose evidence.",
+                }
+            ],
+        }
+        self.assertEqual(_validate_repair(report), report)
 
     def test_default_reviewer_reuses_ambient_authenticated_codex_home(self) -> None:
         seen_environment: list[dict[str, str]] = []

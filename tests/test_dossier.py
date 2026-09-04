@@ -138,6 +138,42 @@ class DossierTests(unittest.TestCase):
                     }
                 )
             )
+            (experiment / "implementation.public.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 3,
+                        "status": "implemented",
+                        "summary": "Implemented the score change.",
+                        "deviations": [],
+                        "requirements": [
+                            {
+                                "id": "score-change",
+                                "requirement": "Increase the score.",
+                                "status": "verified",
+                                "evidence": "The targeted probe observes score 2.",
+                                "verification_ids": ["score-probe"],
+                            }
+                        ],
+                        "verifications": [
+                            {
+                                "id": "score-probe",
+                                "purpose": "Exercise the changed score path.",
+                                "command": "python3 -c 'import agent; assert agent.score == 2'",
+                                "outcome": "passed",
+                                "evidence": "The command exited successfully.",
+                            }
+                        ],
+                    }
+                )
+            )
+            (experiment / "implementation-origin.public.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "transcript": "searches/000001/attempts/01/implementation/attempts/0001/process/stdout.bin",
+                    }
+                )
+            )
             (experiment / "reflection.public.json").write_text(
                 json.dumps(
                     {
@@ -225,6 +261,7 @@ class DossierTests(unittest.TestCase):
                     "README.md",
                     "change.diff",
                     "evaluation.md",
+                    "implementation.md",
                     "reflection.md",
                     "research.md",
                 ],
@@ -238,6 +275,9 @@ class DossierTests(unittest.TestCase):
             self.assertIn("The candidate value increased", rendered)
             self.assertIn("-score = 1", rendered)
             self.assertIn("+score = 2", rendered)
+            self.assertIn("Agent-reported verification disclosure", rendered)
+            self.assertIn("python3 -c", rendered)
+            self.assertIn("stdout.bin", rendered)
 
             readme.write_text("do not rewrite\n")
             self.assertEqual(

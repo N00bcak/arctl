@@ -25,7 +25,12 @@ from .approval import verify_approval
 from .bytecode import ensure_experiment_bytecode_cache
 from .calibration import CalibrationCommandBuilder, calibrate_trial_count
 from .candidate_review import AgentCommandBuilder as ReviewCommandBuilder
-from .candidate_review import requirement_audit_schema, review_candidate
+from .candidate_review import (
+    requirement_audit_schema,
+    review_candidate,
+    verification_audit_error,
+    verification_schema,
+)
 from .codex_schema import validate_codex_output_schema
 from .comparison import ComparisonReservation, load_reservation, reserve_comparison
 from .comparison_run import (
@@ -448,13 +453,15 @@ def _implementation_schema() -> dict[str, Any]:
             "summary",
             "deviations",
             "requirements",
+            "verifications",
         ],
         "properties": {
-            "schema_version": {"type": "integer", "const": 2},
+            "schema_version": {"type": "integer", "const": 3},
             "status": {"type": "string", "enum": ["implemented", "infeasible"]},
             "summary": text,
             "deviations": {"type": "array", "items": text},
-            "requirements": requirement_audit_schema(),
+            "requirements": requirement_audit_schema(structured=True),
+            "verifications": verification_schema(),
         },
     }
 
@@ -480,12 +487,42 @@ def _validate_implementation_report(value: Any) -> dict[str, Any]:
         }
         Draft202012Validator(legacy).validate(value)
         return value
+    if isinstance(value, dict) and value.get("schema_version") == 2:
+        legacy = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "schema_version",
+                "status",
+                "summary",
+                "deviations",
+                "requirements",
+            ],
+            "properties": {
+                "schema_version": {"type": "integer", "const": 2},
+                "status": {
+                    "type": "string",
+                    "enum": ["implemented", "infeasible"],
+                },
+                "summary": {"type": "string", "minLength": 1},
+                "deviations": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                },
+                "requirements": requirement_audit_schema(),
+            },
+        }
+        Draft202012Validator(legacy).validate(value)
+        if value["status"] == "implemented" and any(
+            item["status"] != "verified" for item in value["requirements"]
+        ):
+            raise ValidationError("completed implementation has unverified requirements")
+        return value
     Draft202012Validator(_implementation_schema()).validate(value)
     assert isinstance(value, dict)
-    if value["status"] == "implemented" and any(
-        item["status"] != "verified" for item in value["requirements"]
-    ):
-        raise ValidationError("completed implementation has unverified requirements")
+    error = verification_audit_error(value, completed_status="implemented")
+    if error is not None:
+        raise ValidationError(error)
     return value
 
 
@@ -517,8 +554,11 @@ def _run_implementation(
         "not verify mechanism-specific branches. Do not replace, broaden, or reinterpret "
         "the claim or mechanism. Stay within editable paths and respect the candidate-"
         "review contract. Return status implemented only when every checklist item is "
-        "verified. If fidelity cannot be established, do not substitute an easier idea: "
-        "report infeasible. Emit schema version 2, do not commit, and return only the "
+        "verified. Give every requirement and targeted probe a stable identifier. For "
+        "each probe, record its purpose, exact command, observed outcome, and concise "
+        "evidence, and link requirements to the relevant probe IDs. If fidelity cannot "
+        "be established, do not substitute an easier idea: report infeasible. Emit "
+        "schema version 3, do not commit, and return only the "
         "required implementation JSON.\n\n"
         + json.dumps(
             {
@@ -2270,6 +2310,23 @@ def run_task(
                 source = search_attempt / name
                 if source.is_file():
                     shutil.copy2(source, experiment / name)
+            implementation_sessions = sorted(
+                (search_attempt / "implementation" / "attempts").glob("[0-9]" * 4)
+            )
+            if implementation_sessions:
+                process_directory = implementation_sessions[-1] / "process"
+                origin = {
+                    "schema_version": 1,
+                    "process_directory": str(
+                        process_directory.relative_to(task.directory)
+                    ),
+                }
+                stdout = process_directory / "stdout.bin"
+                if stdout.is_file():
+                    origin["transcript"] = str(stdout.relative_to(task.directory))
+                write_json_once(
+                    experiment / "implementation-origin.public.json", origin
+                )
             review_directory = search_attempt / "candidate-review"
             if review_directory.is_dir():
                 shutil.copytree(review_directory, experiment / "candidate-review")
