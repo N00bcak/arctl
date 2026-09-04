@@ -134,11 +134,47 @@ class RunnerIntegrationTests(unittest.TestCase):
             )
 
         self.assertEqual(report["risk"], "likely_over_budget")
+        self.assertEqual(report["schema_version"], 2)
+        self.assertEqual(report["command"], list(task.config.public_probe))
+        self.assertEqual(
+            report["measurement_basis"], "declared_paired_trial_equivalents"
+        )
+        self.assertIsNone(report["unavailable_reason"])
         self.assertTrue(report["advisory_only"])
         self.assertEqual(
             json.loads((attempt / "compute-probe.public.json").read_text()),
             report,
         )
+
+    def test_compile_only_probe_is_reported_unavailable_without_execution(self) -> None:
+        manifest, _ = load_manifest(self.task_directory / "evaluator.manifest.json")
+        task = LocatedTask(
+            self.task_directory,
+            replace(
+                self.config,
+                public_probe=(sys.executable, "-m", "py_compile", "subject.py"),
+                public_probe_trial_equivalents=1,
+            ),
+        )
+        attempt = self.task_directory / "searches" / "000001" / "attempts" / "01"
+
+        with mock.patch("arctl.runner.run_or_load_once") as run:
+            report = _run_compute_probe(
+                task,
+                manifest,
+                attempt=attempt,
+                worktree=self.subject,
+                trial_count=4,
+                command_builder=lambda command, cwd, output: command,
+                stop_path=self.task_directory / "stop.requested",
+            )
+
+        run.assert_not_called()
+        self.assertEqual(report["schema_version"], 2)
+        self.assertEqual(report["status"], "unavailable")
+        self.assertEqual(report["risk"], "unavailable")
+        self.assertIsNone(report["projected_seconds"])
+        self.assertEqual(report["unavailable_reason"], "compile_only_probe")
 
     @staticmethod
     def unconfined_public(command, _cwd, _output):

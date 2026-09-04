@@ -81,10 +81,15 @@ EVALUATE may select another approved protocol implementation in the future,
 while the controller continues to own private seeds and data, evidence
 validation, budgets, and promotion.
 
-Task-v5 public probes declare how many paired trial-equivalents one probe represents.
-Before review, arctl times that approved probe and projects official runtime.
-Likely overruns are visible to the implementer, reviewer, and operator but do
-not reject the candidate or alter approved trials.
+Task-v5 public probes declare how many complete paired-trial equivalents one
+probe represents. Direct setup generates the probe as a denied, frozen harness
+over fixed synthetic public inputs and review checks that it exercises the
+public subject path. Compilation and import checks remain useful public checks,
+but are not runtime evidence. Before candidate review, arctl times the approved
+probe and projects official runtime. A legacy compile-only probe is reported as
+unavailable rather than projected. Likely overruns are visible to the
+implementer, reviewer, and operator but do not reject the candidate or alter
+approved trials.
 
 Outside a frozen experiment, managed Python processes disable bytecode writes.
 After an experiment request is frozen, its checks, evaluator stages, subject

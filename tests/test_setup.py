@@ -30,6 +30,7 @@ from arctl.setup import (
     brief_changed,
     _build_semantic_findings,
     _behavior_repair_identity,
+    _direct_build_schema,
     _normalize_entrypoint_design_revision,
     _agent_failure_detail,
     _agent_run,
@@ -346,7 +347,9 @@ class GuidedSetupTests(unittest.TestCase):
             ],
             "public_probe": {
                 "execution": {
-                    "kind": "module", "target": "compileall", "arguments": ["-q", "."]
+                    "kind": "module",
+                    "target": "_arctl.public_probe",
+                    "arguments": [],
                 },
                 "trial_equivalents": 1,
             },
@@ -447,7 +450,18 @@ class GuidedSetupTests(unittest.TestCase):
                 "        self.assertIn('public_batch', prepare(context))\n"
             ),
             "subject_files": [
-                {"path": "solution/policy.py", "content": "VALUE = 1\n"}
+                {"path": "solution/policy.py", "content": "VALUE = 1\n"},
+                {
+                    "path": "_arctl/public_probe.py",
+                    "content": (
+                        "from _arctl.hook import run_batch\n"
+                        "batch = {'trial_count': 2, 'cases': "
+                        "[{'value': 1, 'max_actions': 1000}, "
+                        "{'value': 1, 'max_actions': 1000}]}\n"
+                        "result = run_batch(batch)\n"
+                        "assert result['trial_count'] == 2\n"
+                    ),
+                },
             ],
             "environment_files": [
                 {"path": "README.md", "content": "Public environment rules.\n"}
@@ -1381,6 +1395,28 @@ class GuidedSetupTests(unittest.TestCase):
             _apply_authorized_build_fields(
                 value["task"], value["evaluator"], requirements
             )
+
+    def test_direct_build_contract_requires_frozen_runtime_probe(self) -> None:
+        requirements = json.loads(
+            (self.directory / "setup" / "authorized-design.public.json").read_text()
+        )
+        schema = _direct_build_schema(requirements)
+        probe = schema["properties"]["task"]["properties"]["public_probe"]
+        execution = probe["properties"]["execution"]["properties"]
+        self.assertEqual(execution["kind"]["const"], "module")
+        self.assertEqual(execution["target"]["const"], "_arctl.public_probe")
+
+        declarations = schema["properties"]["files"]["items"]["anyOf"]
+        probe_roles = [
+            item
+            for item in declarations
+            if item["properties"]["role"].get("const") == "public_probe"
+        ]
+        self.assertEqual(len(probe_roles), 1)
+        self.assertEqual(
+            probe_roles[0]["properties"]["path"]["const"],
+            "_arctl/public_probe.py",
+        )
 
     def test_protocol_preflight_failure_forces_fresh_generation(self) -> None:
         discover_setup(

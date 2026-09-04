@@ -660,15 +660,32 @@ def _run_compute_probe(
     command_builder: PublicCheckCommandBuilder | None,
     stop_path: Path,
 ) -> dict[str, Any]:
-    published = attempt / "compute-probe.public.json"
-    if published.is_file():
-        try:
-            value = json.loads(published.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise StateError("saved compute probe is invalid") from error
+    def unavailable_reason(command: Sequence[str]) -> str | None:
+        compile_modules = {"compileall", "py_compile"}
+        executable = Path(command[0]).name if command else ""
+        if executable in compile_modules:
+            return "compile_only_probe"
+        for index, argument in enumerate(command[:-1]):
+            if argument == "-m" and command[index + 1] in compile_modules:
+                return "compile_only_probe"
+        return None
+
+    def normalized_report(value: Mapping[str, Any]) -> dict[str, Any]:
+        reason = unavailable_reason(task.config.public_probe)
+        if value.get("schema_version") == 1:
+            value = {
+                **value,
+                "schema_version": 2,
+                "command": list(task.config.public_probe),
+                "measurement_basis": "declared_paired_trial_equivalents",
+                "unavailable_reason": None,
+            }
         fields = {
             "schema_version",
             "status",
+            "command",
+            "measurement_basis",
+            "unavailable_reason",
             "elapsed_seconds",
             "trial_equivalents",
             "official_trials",
@@ -679,10 +696,11 @@ def _run_compute_probe(
             "advisory_only",
         }
         if (
-            not isinstance(value, dict)
-            or set(value) != fields
-            or value["schema_version"] != 1
+            set(value) != fields
+            or value["schema_version"] != 2
             or value["status"] not in {"available", "unavailable"}
+            or value["command"] != list(task.config.public_probe)
+            or value["measurement_basis"] != "declared_paired_trial_equivalents"
             or value["risk"]
             not in {"within_advisory_budget", "likely_over_budget", "unavailable"}
             or value["official_trials"] != trial_count
@@ -692,43 +710,74 @@ def _run_compute_probe(
             or value["advisory_only"] is not True
         ):
             raise StateError("saved compute probe is invalid")
-        return value
+        if reason is not None:
+            return {
+                **value,
+                "status": "unavailable",
+                "unavailable_reason": reason,
+                "elapsed_seconds": None,
+                "projected_seconds": None,
+                "risk": "unavailable",
+            }
+        return dict(value)
+
+    published = attempt / "compute-probe.public.json"
+    if published.is_file():
+        try:
+            value = json.loads(published.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise StateError("saved compute probe is invalid") from error
+        if not isinstance(value, dict):
+            raise StateError("saved compute probe is invalid")
+        return normalized_report(value)
     root = attempt / "compute-probe"
     root.mkdir(parents=True, exist_ok=True)
     marker = root / "execution.started"
-    if command_builder is None:
-        command = sandbox_command(
-            marked_command(task.config.public_probe, marker),
-            cwd=worktree,
-            read_paths=command_runtime_read_paths(task.config.public_probe),
-            write_paths=(worktree, root),
-            profile="arctl-research",
-        )
-        environment = sanitized_environment(
-            codex_home=root / "codex-home",
-            writable_home=root / "home",
-        )
-    else:
-        command = command_builder(task.config.public_probe, worktree, root)
-        environment = None
-    try:
-        process = run_or_load_once(
-            root / "process",
-            command,
-            timeout_seconds=manifest.limits.timeout_seconds,
-            max_output_bytes=manifest.limits.max_output_bytes,
-            cwd=worktree,
-            env=environment,
-            stop_path=stop_path,
-        )
-        elapsed = process.get("elapsed_seconds")
-        available = process["return_code"] == 0 and isinstance(elapsed, (int, float))
-    except StoppedError:
-        raise
-    except ProcessError:
+    reason = unavailable_reason(task.config.public_probe)
+    if reason is not None:
         elapsed = None
         available = False
+    else:
+        if command_builder is None:
+            command = sandbox_command(
+                marked_command(task.config.public_probe, marker),
+                cwd=worktree,
+                read_paths=command_runtime_read_paths(task.config.public_probe),
+                write_paths=(worktree, root),
+                profile="arctl-research",
+            )
+            environment = sanitized_environment(
+                codex_home=root / "codex-home",
+                writable_home=root / "home",
+            )
+        else:
+            command = command_builder(task.config.public_probe, worktree, root)
+            environment = None
+        try:
+            process = run_or_load_once(
+                root / "process",
+                command,
+                timeout_seconds=manifest.limits.timeout_seconds,
+                max_output_bytes=manifest.limits.max_output_bytes,
+                cwd=worktree,
+                env=environment,
+                stop_path=stop_path,
+            )
+            elapsed = process.get("elapsed_seconds")
+            available = process["return_code"] == 0 and isinstance(
+                elapsed, (int, float)
+            )
+            if not available:
+                reason = "probe_execution_failed"
+        except StoppedError:
+            raise
+        except ProcessError:
+            elapsed = None
+            available = False
+            reason = "probe_execution_failed"
     equivalents = task.config.public_probe_trial_equivalents
+    if equivalents is None and reason is None:
+        reason = "trial_equivalents_undeclared"
     projected = (
         float(elapsed) * trial_count / equivalents
         if available and equivalents is not None
@@ -741,8 +790,11 @@ def _run_compute_probe(
         else "within_advisory_budget" if projected is not None else "unavailable"
     )
     value = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "available" if available else "unavailable",
+        "command": list(task.config.public_probe),
+        "measurement_basis": "declared_paired_trial_equivalents",
+        "unavailable_reason": reason,
         "elapsed_seconds": elapsed,
         "trial_equivalents": equivalents,
         "official_trials": trial_count,
@@ -753,7 +805,7 @@ def _run_compute_probe(
         "advisory_only": True,
     }
     write_json_once(published, value)
-    return value
+    return normalized_report(value)
 
 
 def _run_research(

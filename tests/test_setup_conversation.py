@@ -841,6 +841,9 @@ class SetupConversationTests(unittest.TestCase):
             (subject / "_arctl" / "hook.py").write_text(
                 "def run_batch(value): return value\n"
             )
+            (subject / "_arctl" / "public_probe.py").write_text(
+                "from _arctl.subject import main\n"
+            )
             (evaluator / "_arctl").mkdir()
             (evaluator / "_arctl" / "hook.py").write_text("# evaluator hooks\n")
             (evaluator / "test_generated_evaluator.py").write_text("# tests\n")
@@ -852,6 +855,11 @@ class SetupConversationTests(unittest.TestCase):
                         "repository": "subject",
                         "path": "_arctl/hook.py",
                         "role": "subject_hook",
+                    },
+                    {
+                        "repository": "subject",
+                        "path": "_arctl/public_probe.py",
+                        "role": "public_probe",
                     },
                     {
                         "repository": "evaluator",
@@ -867,6 +875,14 @@ class SetupConversationTests(unittest.TestCase):
                 "task": {
                     "objective": "Model echo.",
                     "editable_paths": ["wrong/**"],
+                    "public_probe": {
+                        "execution": {
+                            "kind": "module",
+                            "target": "_arctl.public_probe",
+                            "arguments": [],
+                        },
+                        "trial_equivalents": 1,
+                    },
                     "environment": {
                         "codebases": [
                             {

@@ -2724,6 +2724,7 @@ def _run_setup_command(
     environment = sanitized_environment(
         codex_home=root / "codex-home",
         writable_home=home,
+        python_cache=root / "python-bytecode",
     )
     try:
         result = run_or_load_once(
@@ -3551,6 +3552,16 @@ def _direct_build_schema(
             "const": requirements["objective"]["value"],
         }
         task["editable_paths"] = authorized_strings(expected_paths)
+        task["public_probe"]["properties"]["execution"] = _schema(
+            {
+                "kind": {"type": "string", "const": "module"},
+                "target": {
+                    "type": "string",
+                    "const": "_arctl.public_probe",
+                },
+                "arguments": {"type": "array", "maxItems": 0},
+            }
+        )
         evaluator = typed["evaluator"]["properties"]
         evaluator["public"]["properties"]["statistic"] = {
             "type": "string",
@@ -3623,24 +3634,29 @@ def _direct_build_schema(
             )
         )
     allowed_file_declarations = [
+        file_declaration(
+            "subject", "subject_hook", {"type": "string", "const": "_arctl/hook.py"}
+        ),
+        file_declaration(
+            "subject",
+            "public_probe",
+            {"type": "string", "const": "_arctl/public_probe.py"},
+        ),
+        file_declaration(
+            "evaluator", "evaluator_hook", {"type": "string", "const": "_arctl/hook.py"}
+        ),
+        file_declaration(
+            "evaluator",
+            "evaluator_test",
+            {"type": "string", "const": "test_generated_evaluator.py"},
+        ),
+        *(
             file_declaration(
-                "subject", "subject_hook", {"type": "string", "const": "_arctl/hook.py"}
-            ),
-            file_declaration(
-                "evaluator", "evaluator_hook", {"type": "string", "const": "_arctl/hook.py"}
-            ),
-            file_declaration(
-                "evaluator",
-                "evaluator_test",
-                {"type": "string", "const": "test_generated_evaluator.py"},
-            ),
-            *(
-                file_declaration(
-                    "subject", "support", {"type": "string", "const": path}
-                )
-                for path in exact_subject_paths
-            ),
-        ]
+                "subject", "support", {"type": "string", "const": path}
+            )
+            for path in exact_subject_paths
+        ),
+    ]
     file_declarations = {"anyOf": allowed_file_declarations}
     return _schema(
         {
@@ -3648,7 +3664,7 @@ def _direct_build_schema(
             "summary": text,
             "files": {
                 "type": "array",
-                "minItems": 3,
+                "minItems": 4,
                 "maxItems": len(allowed_file_declarations),
                 "items": file_declarations,
             },
@@ -3681,10 +3697,18 @@ def _apply_authorized_build_fields(
         "arguments": exact_editable_paths,
     }
     normalized_task["public_checks"] = [syntax_check]
-    normalized_task["public_probe"] = {
-        "execution": syntax_check,
-        "trial_equivalents": 1,
-    }
+    proposed_probe = normalized_task["public_probe"]["execution"]
+    if (
+        proposed_probe["kind"] == "module"
+        and proposed_probe["target"] in {"compileall", "py_compile"}
+    ):
+        # Legacy builders used compilation as both the check and the probe.
+        # Retain the safe setup behavior; the runner now reports this probe as
+        # unavailable instead of treating it as runtime evidence.
+        normalized_task["public_probe"] = {
+            "execution": syntax_check,
+            "trial_equivalents": 1,
+        }
     adapter = requirements["environment_adapter"]
     adapter_source_path = _authorized_adapter_source_path(adapter)
     codebases = normalized_task["environment"]["codebases"]
@@ -3857,6 +3881,7 @@ def _read_direct_build_files(
     }
     required = {
         "subject_hook": ("subject", "_arctl/hook.py"),
+        "public_probe": ("subject", "_arctl/public_probe.py"),
         "evaluator_hook": ("evaluator", "_arctl/hook.py"),
         "evaluator_test": ("evaluator", "test_generated_evaluator.py"),
     }
@@ -4111,9 +4136,14 @@ def build_setup_direct(
         "evaluator/_arctl/hook.py implementing prepare, calibrate, and score; and write "
         "evaluator/test_generated_evaluator.py. Do not write controller-owned api.py, "
         "subject.py, evaluator.py, evaluator.manifest.json, or files at the staging root. "
-        "Return task and evaluator designs in the strictly typed response fields, along with "
-        "one files list declaring every agent-authored staged file exactly once. Assign the "
-        "three required hook/test roles to their exact required paths. The schema permits support "
+        "Write subject/_arctl/public_probe.py as a fixed synthetic public runtime harness "
+        "invoked as the _arctl.public_probe module. "
+        "It must execute the public subject path for the declared number of complete paired-"
+        "trial equivalents, use no evaluator data or official seeds, and exit nonzero on an "
+        "invalid result. Return task and evaluator designs in the strictly typed response "
+        "fields, along with one files list declaring every agent-authored staged file "
+        "exactly once. Assign the four required hook/probe/test roles to their exact "
+        "required paths. The schema permits support "
         "only for the finite authorized generated subject paths; put all other implementation in "
         "the required hooks and do not create environment or evaluator helper files. "
         "Dependencies come only from the authorized design and are not returned by "
@@ -4916,7 +4946,10 @@ def build_setup(
         "code is executed. Inspect the subject integration, public environment, evaluator "
         "code, manifest, task draft, authorized design, and direct dependency plan. Cover "
         "every required area exactly once: intent_fidelity, grounding, editable_boundary, dependencies, "
-        "trial_independence, scoring_statistics, seed_handling, and runtime_behavior. Each "
+        "trial_independence, scoring_statistics, seed_handling, and runtime_behavior. For "
+        "runtime_behavior, verify that the frozen public probe executes the public subject path "
+        "on fixed synthetic inputs and that its declared paired-trial-equivalent count matches "
+        "the work performed; compilation and import checks are not runtime evidence. Each "
         "pass or failure needs a short evidence citation to an inspected file; "
         "not_applicable needs a cogent reason. Report every concrete defect. Do not treat an "
         "empty findings list as sufficient coverage. Treat the controller-provided mechanical "
