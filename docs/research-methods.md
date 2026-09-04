@@ -28,6 +28,14 @@ has narrowed the live uncertainty to that specificity, and explain why a
 broader structural repair is not presently better. Untested and inconclusive
 outcomes remain unresolved regardless of a favorable point estimate.
 
+Simplicity is an experiment-admission judgment, not a post-result correction.
+Planning compares expected information or improvement with implementation size,
+runtime cost, and human audit burden. Execution rechecks that the realized diff
+is proportionate to the frozen mechanism and reports infeasibility if faithful
+realization is materially more complex than planned. Once an approved
+experiment produces valid statistical evidence, simplicity cannot change its
+interpretation, promotion decision, or score.
+
 Each stage is a component with a strict input/output contract. A method profile
 selects one compatible implementation and an agent pool per agent-driven
 component. `serial-v1` uses one agent per pool. `serial-hotseat-v1` uniformly

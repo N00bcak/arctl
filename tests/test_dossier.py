@@ -166,6 +166,29 @@ class DossierTests(unittest.TestCase):
                     }
                 )
             )
+            (experiment / "planning.public.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "directions": [
+                            {
+                                "strategy_behavior_id": "improve-score",
+                                "champion_assessment": "The score path is active.",
+                                "remaining_gap": "Its offset remains improvable.",
+                                "disposition": "candidate",
+                                "request": json.loads(
+                                    (experiment / "request.public.json").read_text()
+                                ),
+                                "evidence": ["The offset is editable."],
+                                "feasibility": "A one-line diff and one probe; negligible runtime and audit burden.",
+                                "expected_value": "A material score gain for little implementation cost.",
+                            }
+                        ],
+                        "selection_rationale": "Best expected improvement per implementation and audit cost.",
+                        "selection": "improve-score",
+                    }
+                )
+            )
             (experiment / "implementation-origin.public.json").write_text(
                 json.dumps(
                     {
@@ -278,6 +301,9 @@ class DossierTests(unittest.TestCase):
             self.assertIn("Agent-reported verification disclosure", rendered)
             self.assertIn("python3 -c", rendered)
             self.assertIn("stdout.bin", rendered)
+            self.assertIn("Admission reasoning", rendered)
+            self.assertIn("negligible runtime and audit burden", rendered)
+            self.assertIn("Best expected improvement per implementation", rendered)
 
             readme.write_text("do not rewrite\n")
             self.assertEqual(

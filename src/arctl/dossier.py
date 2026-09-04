@@ -304,6 +304,24 @@ def _documents(
     result: dict[str, Any],
 ) -> dict[str, str]:
     request = _read_object(experiment / "request.public.json", "public research record")
+    planning_path = experiment / "planning.public.json"
+    planning = (
+        _read_object(planning_path, "public planning record")
+        if planning_path.is_file()
+        else None
+    )
+    selected_direction = None
+    if planning is not None:
+        selected = planning.get("selection")
+        selected_direction = next(
+            (
+                item
+                for item in planning.get("directions", [])
+                if isinstance(item, Mapping)
+                and item.get("strategy_behavior_id") == selected
+            ),
+            None,
+        )
     champion = str(result["champion_before"])
     candidate = str(result["candidate"])
     changed = candidate_changed_paths(task.repo, champion, candidate)
@@ -378,6 +396,20 @@ def _documents(
             "",
             dossier_note,
             "",
+            *(
+                [
+                    "## Admission reasoning",
+                    "",
+                    f"**Feasibility:** {safe_text(selected_direction.get('feasibility', ''))}",
+                    "",
+                    f"**Expected value:** {safe_text(selected_direction.get('expected_value', ''))}",
+                    "",
+                    f"**Selection rationale:** {safe_text(planning.get('selection_rationale', ''))}",
+                    "",
+                ]
+                if planning is not None and selected_direction is not None
+                else []
+            ),
             f"**Strategic behavior:** `{safe_text(request.get('strategy_behavior_id', ''))}`",
             "",
             f"## Claim\n\n{safe_text(request.get('claim', ''))}",

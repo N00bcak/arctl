@@ -273,6 +273,9 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
         assert "never prescribe trial counts" in _prompt
         assert "parameter-only or narrow local refinement" in _prompt
         assert "broader structural repair" in _prompt
+        assert "implementation size" in _prompt
+        assert "runtime cost" in _prompt
+        assert "human audit burden" in _prompt
         script = """\
 import json
 import sys
@@ -314,6 +317,8 @@ request = {
     def implementation_command(
         worktree: Path, scratch: Path, _schema: Path, _prompt: str
     ):
+        assert "realized diff remains proportionate" in _prompt
+        assert "materially more complex than planned" in _prompt
         script = """\
 import json
 import sys
