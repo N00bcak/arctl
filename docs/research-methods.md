@@ -4,6 +4,23 @@ arctl fixes the semantic loop but version-controls its implementation:
 
 `STRATEGIZE → (PLAN → EXECUTE → EVALUATE → REFLECT)`
 
+The [research principles](principles.md) make research agents principally
+responsible for search quality while architecture governs validity. Planning
+therefore owns hypothesis selection, experiment substantivity, review of prior
+evidence, expected effects, and falsifiers. Execution owns literal realization
+of the selected frozen brief. It may not substitute an easier mechanism or
+reinterpret the claim; if fidelity cannot be established, it reports
+infeasibility.
+
+Research agents design candidate interventions only within the approved
+validity envelope. Evaluator behavior, trial counts, seeds, calibration,
+statistical thresholds, and promotion rules are outside their role. A possible
+defect in one of those controls must be reported for oversight and
+reauthorization, never treated as a policy-search opportunity. It is valid to
+exhaust every current direction, and preferable to inventing an experiment
+whose specificity is not justified by structural analysis or accumulated
+evidence.
+
 Each stage is a component with a strict input/output contract. A method profile
 selects one compatible implementation and an agent pool per agent-driven
 component. `serial-v1` uses one agent per pool. `serial-hotseat-v1` uniformly

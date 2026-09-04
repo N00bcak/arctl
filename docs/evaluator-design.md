@@ -4,6 +4,20 @@ An arctl evaluator defines the task-specific experiment. arctl freezes and
 enforces that definition; it does not certify that the definition is
 scientifically correct.
 
+Under the [research principles](principles.md), these are separate
+responsibilities. A statistical and experimental-design specialist may propose
+the protocol from the objective, repository evidence, risk tolerance, and
+resource ceiling. The human checks and authorizes that proposal. The resulting
+architecture then freezes and enforces it without requiring the human to
+participate in each experiment. Authorization accepts the evaluator's explicit
+assumptions and limitations; it is not independent proof of its mathematics.
+
+Research agents optimize policies inside this approved envelope. If one finds a
+possible evaluator defect, the valid response is to surface it, stop affected
+research, and seek human review or reauthorization. Exploiting the defect,
+changing the evaluator, or compensating for it inside a candidate is not a
+research experiment.
+
 ## What arctl enforces
 
 - The approved evaluator commit, manifest, commands, schemas, and limits do not

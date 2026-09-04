@@ -7,6 +7,12 @@
 This work is not part of the current MVP. It changes no runtime behavior,
 research contract, evaluator schema, promotion rule, or experiment budget.
 
+The deferral is governed by the [research principles](principles.md), especially
+human-sensible honesty and contract-following. Current reports must preserve the
+distinction between package-level outcome evidence, evidence that the intended
+behavior activated, and evidence for a causal mechanism. Naming those stronger
+standards does not claim that the current runtime implements them.
+
 ## Problem
 
 A paired candidate-versus-champion comparison can establish that an exact

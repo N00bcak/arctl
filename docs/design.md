@@ -3,12 +3,15 @@
 This document describes the current controller implemented in `src/arctl`. It
 is an operational map for task authors, evaluator authors, human reviewers, and
 AI operators. The [MVP specification](../arctl_light_mvp_spec_simple.md) remains
-the normative contract; this document emphasizes how the pieces fit together.
+the normative implementation contract. The [research
+principles](principles.md) are normative for role boundaries and values; this
+document records the mechanisms currently used to realize them and must not
+imply that a documented limitation is already enforced away.
 
 ## The loop at a glance
 
 ```text
-  HUMAN + APPROVED CONFIGURATION
+  HUMAN INITIATION + APPROVED CONFIGURATION
   ┌──────────────────────────────────────────────────────────────────────┐
   │ task.yaml + evaluator commit + manifest + environment + champion    │
   └───────────────────────────────┬──────────────────────────────────────┘
@@ -32,7 +35,7 @@ the normative contract; this document emphasizes how the pieces fit together.
                                              │ candidate
                                              v
                  ┌──────────────────────────────────────────────────────┐
-                 │ Static checks -> independent review -> optional      │
+                 │ Static checks -> optional independent review and     │
                  │ bounded repair -> freeze candidate commit            │
                  └───────────────────────────┬──────────────────────────┘
                                              │
@@ -61,19 +64,20 @@ candidate is promoted.
 
 ```mermaid
 flowchart LR
-    H[Human approver] -->|locks exact bytes and commits| C[Trusted arctl controller]
+    H[Human initiator and overseer] -->|checks and authorizes exact inputs| C[Trusted arctl controller]
     O[Human or AI operator] -->|CLI or JSON commands| C
     C -->|environment snapshot only| S[Strategy model]
     C -->|champion and public history| P[Planning model]
     C -->|frozen brief and champion| X[Implementation model]
     X -->|candidate edits in whitelist| C
-    C -->|read-only candidate diff| R[Independent policy reviewer]
+    C -->|read-only diff when configured| R[Optional independent policy reviewer]
     C -->|private seeds and scoring inputs| E[Approved evaluator]
     C -->|public batch only| P1[Champion process]
     C -->|same public batch only| P2[Candidate process]
     E -->|aggregate evidence and allowlisted telemetry| C
     C -->|candidate, champion, result, public history| F[Reflection model]
     C -->|public result, dossier, ledger| O
+    C -->|auditable status and exceptions| H
 
     classDef trusted fill:#d8f3dc,stroke:#2d6a4f,color:#000;
     classDef untrusted fill:#ffe8cc,stroke:#d9480f,color:#000;
@@ -83,6 +87,17 @@ flowchart LR
     class E private;
 ```
 
+- **The architecture** is the validity authority formed by the controller,
+  approved evaluator contract, isolation boundaries, evidence records, and
+  promotion machinery. It enforces the authorized validity envelope but does
+  not prove that the evaluator's mathematics is scientifically correct.
+- **The human** initiates the task, checks and authorizes its architecture and
+  boundaries, oversees evidence and exceptions, and may stop or reauthorize it.
+  Normal research does not require human participation or per-experiment
+  approval.
+- **Research agents** principally own search quality and candidate experiment
+  design within the approved envelope. Their component roles below separate the
+  information and authority needed for that work.
 - **The controller** owns state transitions, Git refs, seeds, process records,
   validation, publication, and compare-and-swap promotion.
 - **The evaluator** owns the statistic, uncertainty method, calibration
@@ -94,7 +109,7 @@ flowchart LR
   references the chosen direction; it never restates or paraphrases the mechanism.
 - **Implementation** receives that frozen request and current code, not the growing
   research history.
-- **Review** controls pre-trial admission but cannot evaluate outcomes.
+- **Configured review** controls pre-trial admission but cannot evaluate outcomes.
   **Reflection** interprets completed evidence but cannot alter its verdict.
 
 ## Task lifecycle
@@ -136,7 +151,9 @@ calibration, scoring, and telemetry hooks. Controller-owned entrypoints compile
 Python execution descriptors into the task-v5/manifest-v4 setup protocol and enforce
 the declared telemetry wire shapes. Unsupported process-resource guarantees
 remain advisory instead of becoming nullable evaluator metrics. The generated evaluator includes public hook tests,
-but the human still owns the evaluator's mathematical validity at `approve`.
+while the human checks and authorizes the specialist-proposed evaluator design
+at `approve`; approval accepts its stated assumptions and limitations rather
+than proving its mathematics.
 Human intent comes from explicit revisioned setup answers. Discovery inspects
 public code offline and asks up to three related, cited decisions per batch. Every
 option displays its exact persisted value. Objective, outcome, and editable boundary
@@ -235,7 +252,9 @@ flowchart TD
     EDIT --> VALIDATE{Request, links, paths, and tree valid?}
     VALIDATE -->|no| MISS[Record typed public search miss]
     VALIDATE -->|yes| GUARD[Deterministic policy checks]
-    GUARD --> REVIEW[Review diff, audit coverage, and evidence]
+    GUARD --> OPTIONAL{Candidate review configured?}
+    OPTIONAL -->|no| FREEZE
+    OPTIONAL -->|yes| REVIEW[Review diff, audit coverage, and evidence]
     REVIEW -->|pass| FREEZE[Commit and freeze novel candidate]
     REVIEW -->|fail and repair available| REPAIR[Fresh bounded repair]
     REPAIR --> GUARD
@@ -250,8 +269,8 @@ hypothesis reappears.
 ## Experiment and comparison
 
 An official experiment is allocated only after a candidate has passed the
-search and review gates. Public checks can reject it before private seeds are
-reserved. After reservation, comparison work is exactly once.
+search gates and any configured review gate. Public checks can reject it before
+private seeds are reserved. After reservation, comparison work is exactly once.
 
 ```mermaid
 flowchart TD
@@ -389,13 +408,14 @@ commands, and environments are never linked into it.
 
 ## Operator interface
 
-Humans normally use `run`, `status`, `stop`, `report`, `history`, and
-`inspect`. AI operators use the same commands with `--json`; research agents
-never receive operator authority. Human `status` and `report` output uses
-bounded-width tables; champion displays identify the promoting experiment and
-hypothesis, while machine JSON retains exact evidence values. See the exact [command
-reference](cli-reference.md), which is mechanically mirrored from `arctl -h`
-and every `arctl COMMAND -h` screen.
+Humans initiate and authorize a task, then normally oversee it through `run`,
+`status`, `stop`, `report`, `history`, and `inspect`; they do not approve each
+ordinary experiment. AI operators use the same commands with `--json`;
+research agents never receive operator authority. Human `status` and `report`
+output uses bounded-width tables; champion displays identify the promoting
+experiment and hypothesis, while machine JSON retains exact evidence values.
+See the exact [command reference](cli-reference.md), which is mechanically
+mirrored from `arctl -h` and every `arctl COMMAND -h` screen.
 
 Related documents:
 

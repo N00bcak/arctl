@@ -3,6 +3,14 @@
 These protocols evaluate claims that controller conformance tests cannot prove.
 They are plans for a later evaluation phase, not release guarantees.
 
+They also test whether the implementation realizes the [research
+principles](principles.md). In particular, search-wide false-promotion behavior
+tests architectural validity beyond one paired comparison, while human audit
+comprehension tests human-sensible honesty and exception-driven oversight.
+These are validation obligations for the principles, not optional presentation
+polish, but the protocols below remain future work rather than current
+guarantees.
+
 ## Calibration and interval behavior
 
 For each reference and real evaluator, simulate data-generating processes with
