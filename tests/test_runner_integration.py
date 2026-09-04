@@ -234,6 +234,8 @@ class RunnerIntegrationTests(unittest.TestCase):
 
     @staticmethod
     def research_command(worktree: Path, scratch: Path, _schema: Path, _prompt: str):
+        assert "parameter-only or narrow local refinement" in _prompt
+        assert "broader structural repair" in _prompt
         script = """\
 import json
 import sys
@@ -267,6 +269,8 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
     def planning_command(worktree: Path, scratch: Path, _schema: Path, _prompt: str):
         assert "selection must contain only the chosen strategy behavior id" in _prompt
         assert "never prescribe trial counts" in _prompt
+        assert "parameter-only or narrow local refinement" in _prompt
+        assert "broader structural repair" in _prompt
         script = """\
 import json
 import sys

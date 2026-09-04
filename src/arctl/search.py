@@ -605,6 +605,11 @@ def validate_research_links(
         for citation in request["evidence_review"]["citations"]
     ):
         raise ValidationError("research evidence review names an unknown ledger entry")
+    cited = {
+        citation["entry_id"] for citation in request["evidence_review"]["citations"]
+    }
+    if lineage["kind"] == "refinement" and lineage["prior_entry_id"] not in cited:
+        raise ValidationError("research refinement must cite its prior ledger entry")
     by_id = {entry["entry_id"]: entry for entry in ledger}
     for citation in request["evidence_review"]["citations"]:
         prior = by_id[citation["entry_id"]]
@@ -614,6 +619,13 @@ def validate_research_links(
         ):
             raise ValidationError(
                 "untested experiments cannot support or contradict performance"
+            )
+        if (
+            prior.get("scientific_status") == "inconclusive"
+            and citation["bearing"] != "unresolved"
+        ):
+            raise ValidationError(
+                "inconclusive experiments cannot support or contradict performance"
             )
 
 

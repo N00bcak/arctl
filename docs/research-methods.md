@@ -21,6 +21,13 @@ exhaust every current direction, and preferable to inventing an experiment
 whose specificity is not justified by structural analysis or accumulated
 evidence.
 
+Parameter-only and narrow local refinements include coefficients, thresholds,
+search depths or widths, horizons, boundaries, and feature variants. Planning
+must cite the prior experiment being refined, explain why accumulated evidence
+has narrowed the live uncertainty to that specificity, and explain why a
+broader structural repair is not presently better. Untested and inconclusive
+outcomes remain unresolved regardless of a favorable point estimate.
+
 Each stage is a component with a strict input/output contract. A method profile
 selects one compatible implementation and an agent pool per agent-driven
 component. `serial-v1` uses one agent per pool. `serial-hotseat-v1` uniformly

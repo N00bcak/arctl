@@ -398,6 +398,26 @@ class ResearchRequestTests(unittest.TestCase):
         request["evidence_review"]["citations"][0]["bearing"] = "unresolved"
         validate_research_links(request, strategy=strategy, ledger=ledger)
 
+        ledger[0]["scientific_status"] = "inconclusive"
+        request["evidence_review"]["citations"][0]["bearing"] = "supports"
+        with self.assertRaisesRegex(ValidationError, "inconclusive experiments"):
+            validate_research_links(request, strategy=strategy, ledger=ledger)
+
+    def test_refinement_must_cite_its_prior_entry(self) -> None:
+        strategy = {"successful_policy_behaviors": [{"id": "preserve-options"}]}
+        ledger = [
+            {"entry_id": "entry-000001", "scientific_status": "inconclusive"}
+        ]
+        request = self.valid()
+        request["strategy_behavior_id"] = "preserve-options"
+        request["lineage"] = {
+            "kind": "refinement",
+            "prior_entry_id": "entry-000001",
+        }
+
+        with self.assertRaisesRegex(ValidationError, "must cite its prior"):
+            validate_research_links(request, strategy=strategy, ledger=ledger)
+
 
 class StrategyContractTests(unittest.TestCase):
     def test_observations_and_behaviors_must_cite_known_ids(self) -> None:
