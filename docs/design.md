@@ -148,7 +148,7 @@ untouched and locally clones it into a non-Git shell workspace containing the
 independent `subject`, `environment`, and `evaluator` repositories. The workspace
 subject changes only on an `arctl/setup-*` branch. The setup agent implements typed subject, preparation,
 calibration, scoring, and telemetry hooks. Controller-owned entrypoints compile
-Python execution descriptors into the task-v5/manifest-v4 setup protocol and enforce
+Python execution descriptors into the canonical task and evaluator contracts and enforce
 the declared telemetry wire shapes. Unsupported process-resource guarantees
 remain advisory instead of becoming nullable evaluator metrics. The generated evaluator includes public hook tests,
 while the human checks and authorizes the specialist-proposed evaluator design
@@ -208,7 +208,7 @@ champion.
 
 ```mermaid
 flowchart TD
-    P[Parse task v5 or compatible v3/v4] --> V[Validate repositories, paths, method, and manifest]
+    P[Parse the canonical task contract] --> V[Validate repositories, paths, method, and manifest]
     V --> ENV[Snapshot environment Git blobs and probe contracts]
     ENV --> PREVIEW[Show models, paths, seeds, trials, telemetry, risks, token]
     PREVIEW -->|explicit human confirmation| LOCK[Write immutable approval records]

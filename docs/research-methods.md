@@ -38,7 +38,7 @@ interpretation, promotion decision, or score.
 
 Each stage is a component with a strict input/output contract. A method profile
 selects one compatible implementation and an agent pool per agent-driven
-component. `serial-v1` uses one agent per pool. `serial-hotseat-v1` uniformly
+component. `serial` uses one agent per pool. `serial-hotseat` uniformly
 selects one agent, with replacement, for each component lifecycle.
 
 Installed component IDs resolve through an internal registry that binds each
@@ -65,7 +65,7 @@ policy-specific diagnosis belongs to EXECUTE or post-trial REFLECT.
 ## Agent backends and certification
 
 Agent definitions select a backend adapter, model, and settings independently
-of components. `codex-cli-v1` is the verified adapter in this release. Other
+of components. `codex-cli` is the verified adapter in this release. Other
 providers can be added without changing component contracts.
 
 Certification belongs to an adapter version and capability suite, not to a
@@ -96,12 +96,12 @@ EVALUATE may select another approved protocol implementation in the future,
 while the controller continues to own private seeds and data, evidence
 validation, budgets, and promotion.
 
-Task-v5 public probes declare how many complete paired-trial equivalents one
+Public probes declare how many complete paired-trial equivalents one
 probe represents. Direct setup generates the probe as a denied, frozen harness
 over fixed synthetic public inputs and review checks that it exercises the
 public subject path. Compilation and import checks remain useful public checks,
 but are not runtime evidence. Before candidate review, arctl times the approved
-probe and projects official runtime. A legacy compile-only probe is reported as
+probe and projects official runtime. A compile-only probe is reported as
 unavailable rather than projected. Likely overruns are visible to the
 implementer, reviewer, and operator but do not reject the candidate or alter
 approved trials.
@@ -126,8 +126,8 @@ the mutable worktree's mirrored cache subtree. After durable publication, a
 scoped transactional cleanup removes the experiment cache and recognized
 scratch debris. Canonical untracked `__pycache__/*.pyc` files that bypass these
 controls are discarded at writable lifecycle boundaries and recorded by stage
-in `runtime-artifacts.public.json`; manual `arctl gc` retains support for legacy
-per-process caches.
+in `runtime-artifacts.public.json`; manual `arctl gc` removes only canonical,
+recognized cache targets.
 
 Public results retain the promotion `decision` and add independent status axes.
 `operational_status` records whether execution completed; `scientific_status`

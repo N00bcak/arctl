@@ -70,7 +70,7 @@ The author must also explain:
 - each public diagnostic's unit, scope, favorable direction, and whether it
   measures outcome, mechanism, safety, implementation, or uncertainty.
 
-Manifest v3 requires semantic telemetry descriptors. A paired metric reports
+The canonical manifest requires semantic telemetry descriptors. A paired metric reports
 champion and candidate values; a comparison metric reports one aggregate
 value. Missing declared metrics, nulls, and undeclared aggregates invalidate
 the evidence. An evaluator may deliberately declare no telemetry, but arctl
@@ -98,10 +98,9 @@ audit, or abandonment, but cannot change the verdict or promotion. If that
 required session fails, valid evidence is preserved and later research stops
 until a fresh reflection attempt succeeds.
 
-Reflection schema v4 fixes the selected behavior and known history IDs while
+The reflection contract fixes the selected behavior and known history IDs while
 recording only material telemetry interpretations, concrete implementation
-concerns, and a concise disposition. Older published reflection versions remain
-readable and render unchanged.
+concerns, and a concise disposition.
 
 ## Reference conformance fixtures
 
