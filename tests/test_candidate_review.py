@@ -65,7 +65,6 @@ import json, sys
 from pathlib import Path
 scratch = Path(sys.argv[1])
 (scratch / 'review.public.json').write_text(json.dumps({
-    'schema_version': 1,
     'summary': 'The candidate obeys the supplied-observation contract.',
     'findings': [],
 }))
@@ -179,7 +178,6 @@ scratch = Path(sys.argv[1])
             (scratch / "review.public.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
                         "summary": "The candidate obeys the contract.",
                         "findings": [],
                     }
@@ -196,17 +194,25 @@ scratch = Path(sys.argv[1])
             request=self.request,
             stop_path=self.root / "stop",
             implementation_report={
-                "schema_version": 2,
                 "status": "implemented",
                 "summary": "Implemented the mechanism.",
                 "deviations": [],
                 "requirements": [
                     {
+                        "id": "determinism",
                         "requirement": "Preserve deterministic behavior.",
                         "status": "verified",
                         "evidence": "policy.py:10",
+                        "verification_ids": ["probe-determinism"],
                     }
                 ],
+                "verifications": [{
+                    "id": "probe-determinism",
+                    "purpose": "Check deterministic behavior.",
+                    "command": "python3 -m unittest tests.test_policy",
+                    "outcome": "passed",
+                    "evidence": "1 test passed.",
+                }],
             },
             review_command_builder=review,
             check_command_builder=self.check,
@@ -220,9 +226,8 @@ scratch = Path(sys.argv[1])
         self.assertIn("Preserve deterministic behavior.", prompts[0])
         self.assertIn("report every independently supported violation", prompts[0])
 
-    def test_repair_v3_requires_replayable_successful_verification(self) -> None:
+    def test_repair_requires_replayable_successful_verification(self) -> None:
         report = {
-            "schema_version": 3,
             "status": "repaired",
             "summary": "Repaired and checked.",
             "requirements": [
@@ -256,21 +261,6 @@ scratch = Path(sys.argv[1])
         with self.assertRaisesRegex(StateError, "unsuccessful verification"):
             _validate_repair(failing)
 
-    def test_historical_v2_repair_report_remains_readable(self) -> None:
-        report = {
-            "schema_version": 2,
-            "status": "repaired",
-            "summary": "Historical repair.",
-            "requirements": [
-                {
-                    "requirement": "Use only supplied observations.",
-                    "status": "verified",
-                    "evidence": "Historical prose evidence.",
-                }
-            ],
-        }
-        self.assertEqual(_validate_repair(report), report)
-
     def test_default_reviewer_reuses_ambient_authenticated_codex_home(self) -> None:
         seen_environment: list[dict[str, str]] = []
 
@@ -280,7 +270,6 @@ scratch = Path(sys.argv[1])
                 output.write_text(
                     json.dumps(
                         {
-                            "schema_version": 1,
                             "summary": "The candidate obeys the contract.",
                             "findings": [],
                         }
@@ -333,13 +322,21 @@ subprocess.run(
     check=True,
 )
 (scratch / 'repair.public.json').write_text(json.dumps({
-    'schema_version': 2,
     'status': 'repaired',
     'summary': 'Removed the prohibited access.',
     'requirements': [{
+        'id': 'supplied-inputs',
         'requirement': 'Use only supplied observations.',
         'status': 'verified',
         'evidence': 'bad was removed and the policy check passes.',
+        'verification_ids': ['compile-policy'],
+    }],
+    'verifications': [{
+        'id': 'compile-policy',
+        'purpose': 'Compile the repaired policy.',
+        'command': 'python -I -m py_compile policy.py',
+        'outcome': 'passed',
+        'evidence': 'The command exited successfully.',
     }],
 }))
 """
@@ -392,14 +389,16 @@ import json, sys
 from pathlib import Path
 scratch = Path(sys.argv[1])
 (scratch / 'repair.public.json').write_text(json.dumps({
-    'schema_version': 2,
     'status': 'infeasible',
     'summary': 'The mechanism cannot obey the interface.',
     'requirements': [{
+        'id': 'supplied-inputs',
         'requirement': 'Use only supplied observations.',
         'status': 'unverified',
         'evidence': 'The required input is not supplied.',
+        'verification_ids': [],
     }],
+    'verifications': [],
 }))
 """
             return ("python3", "-c", script, str(scratch))
@@ -429,8 +428,22 @@ import json, sys
 from pathlib import Path
 scratch = Path(sys.argv[1])
 (scratch / 'repair.public.json').write_text(json.dumps({
-    'schema_version': 1,
+    'status': 'repaired',
     'summary': 'No effective change.',
+    'requirements': [{
+        'id': 'supplied-inputs',
+        'requirement': 'Use only supplied observations.',
+        'status': 'verified',
+        'evidence': 'The policy file is syntactically valid.',
+        'verification_ids': ['compile-policy'],
+    }],
+    'verifications': [{
+        'id': 'compile-policy',
+        'purpose': 'Compile the unchanged policy.',
+        'command': 'python -m py_compile policy.py',
+        'outcome': 'passed',
+        'evidence': 'The command exited successfully.',
+    }],
 }))
 """
             return ("python3", "-c", script, str(scratch))

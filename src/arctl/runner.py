@@ -77,7 +77,7 @@ from .models import Evidence, ResearchRequest
 from .process import run_or_load_once
 from .reflection import ReflectionCommandBuilder, validate_reflection
 from .registry import LocatedTask
-from .results import normalize_result_statuses, validate_public_result
+from .results import canonical_result, validate_public_result
 from .sandbox import (
     agent_prompt_path,
     command_runtime_read_paths,
@@ -153,13 +153,13 @@ def _default_research_command(
     )
 
 
-def _compatibility_strategy_command(
+def _injected_strategy_command(
     _worktree: Path,
     scratch: Path,
     _schema: Path,
     prompt: str,
 ) -> Sequence[str]:
-    """Supply a neutral strategy for legacy injected research backends."""
+    """Supply a neutral strategy for injected research backends in tests."""
     packet = json.loads(prompt.split("\n\n", 1)[1])
     source_id = next(
         source["id"]
@@ -167,7 +167,6 @@ def _compatibility_strategy_command(
         if source["kind"] != "probe"
     )
     value = {
-        "schema_version": 2,
         "environment_observations": [
             {
                 "id": "environment-baseline",
@@ -302,7 +301,7 @@ def _run_planning(
     stop_path: Path,
 ) -> dict[str, Any] | None:
     assert task.config.method is not None
-    task.config.method.require_component("plan", "plan.comparative-v1")
+    task.config.method.require_component("plan", "plan.comparative")
     rebuild_catalog(task.directory)
     strategy_files = sorted((task.directory / "strategy").glob("*.public.json"))
     strategy = json.loads(strategy_files[-1].read_text(encoding="utf-8"))
@@ -451,7 +450,6 @@ def _implementation_schema() -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "required": [
-            "schema_version",
             "status",
             "summary",
             "deviations",
@@ -459,7 +457,6 @@ def _implementation_schema() -> dict[str, Any]:
             "verifications",
         ],
         "properties": {
-            "schema_version": {"type": "integer", "const": 3},
             "status": {"type": "string", "enum": ["implemented", "infeasible"]},
             "summary": text,
             "deviations": {"type": "array", "items": text},
@@ -470,57 +467,6 @@ def _implementation_schema() -> dict[str, Any]:
 
 
 def _validate_implementation_report(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict) and value.get("schema_version") == 1:
-        legacy = {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["schema_version", "status", "summary", "deviations"],
-            "properties": {
-                "schema_version": {"type": "integer", "const": 1},
-                "status": {
-                    "type": "string",
-                    "enum": ["implemented", "infeasible"],
-                },
-                "summary": {"type": "string", "minLength": 1},
-                "deviations": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-            },
-        }
-        Draft202012Validator(legacy).validate(value)
-        return value
-    if isinstance(value, dict) and value.get("schema_version") == 2:
-        legacy = {
-            "type": "object",
-            "additionalProperties": False,
-            "required": [
-                "schema_version",
-                "status",
-                "summary",
-                "deviations",
-                "requirements",
-            ],
-            "properties": {
-                "schema_version": {"type": "integer", "const": 2},
-                "status": {
-                    "type": "string",
-                    "enum": ["implemented", "infeasible"],
-                },
-                "summary": {"type": "string", "minLength": 1},
-                "deviations": {
-                    "type": "array",
-                    "items": {"type": "string", "minLength": 1},
-                },
-                "requirements": requirement_audit_schema(),
-            },
-        }
-        Draft202012Validator(legacy).validate(value)
-        if value["status"] == "implemented" and any(
-            item["status"] != "verified" for item in value["requirements"]
-        ):
-            raise ValidationError("completed implementation has unverified requirements")
-        return value
     Draft202012Validator(_implementation_schema()).validate(value)
     assert isinstance(value, dict)
     error = verification_audit_error(value, completed_status="implemented")
@@ -541,7 +487,7 @@ def _run_implementation(
     stop_path: Path,
 ) -> dict[str, Any]:
     assert task.config.method is not None
-    task.config.method.require_component("execute", "execute.worktree-v1")
+    task.config.method.require_component("execute", "execute.worktree")
     scratch = attempt / "implementation"
     scratch.mkdir(parents=True, exist_ok=True)
     schema_value = _implementation_schema()
@@ -564,7 +510,7 @@ def _run_implementation(
         "claiming completion, recheck that the realized diff remains proportionate to the "
         "frozen mechanism. If faithful realization is materially more complex than planned, "
         "report infeasible rather than silently broadening or simplifying the brief. Emit "
-        "schema version 3, do not commit, and return only the "
+        "Do not commit, and return only the "
         "required implementation JSON.\n\n"
         + json.dumps(
             {
@@ -726,16 +672,7 @@ def _run_compute_probe(
 
     def normalized_report(value: Mapping[str, Any]) -> dict[str, Any]:
         reason = unavailable_reason(task.config.public_probe)
-        if value.get("schema_version") == 1:
-            value = {
-                **value,
-                "schema_version": 2,
-                "command": list(task.config.public_probe),
-                "measurement_basis": "declared_paired_trial_equivalents",
-                "unavailable_reason": None,
-            }
         fields = {
-            "schema_version",
             "status",
             "command",
             "measurement_basis",
@@ -751,7 +688,6 @@ def _run_compute_probe(
         }
         if (
             set(value) != fields
-            or value["schema_version"] != 2
             or value["status"] not in {"available", "unavailable"}
             or value["command"] != list(task.config.public_probe)
             or value["measurement_basis"] != "declared_paired_trial_equivalents"
@@ -844,7 +780,6 @@ def _run_compute_probe(
         else "within_advisory_budget" if projected is not None else "unavailable"
     )
     value = {
-        "schema_version": 2,
         "status": "available" if available else "unavailable",
         "command": list(task.config.public_probe),
         "measurement_basis": "declared_paired_trial_equivalents",
@@ -967,7 +902,6 @@ def _run_research(
         write_json_once(
             experiment / "research.failure.json",
             {
-                "schema_version": 1,
                 "message": str(error),
             },
         )
@@ -1093,7 +1027,7 @@ def _candidate_search(
                 except (StateError, TransientDownstreamError) as error:
                     write_json_once(
                         attempt_directory / "planning.failure.json",
-                        {"schema_version": 1, "message": str(error)},
+                        {"message": str(error)},
                     )
                     raise
                 _notify(progress, "planning", selected=request is not None)
@@ -1145,7 +1079,6 @@ def _candidate_search(
                         add_ledger_entry(
                             task.directory,
                             {
-                                "schema_version": 1,
                                 "source": f"strategy-miss:{revision:06d}",
                                 "kind": "strategy_miss",
                                 "strategy_revision": revision,
@@ -1177,7 +1110,7 @@ def _candidate_search(
                 except (StateError, TransientDownstreamError) as error:
                     write_json_once(
                         attempt_directory / "implementation.failure.json",
-                        {"schema_version": 1, "message": str(error)},
+                        {"message": str(error)},
                     )
                     raise
             else:
@@ -1294,7 +1227,6 @@ def _candidate_search(
         write_json_once(
             attempt_directory / "candidate.public.json",
             {
-                "schema_version": 1,
                 "candidate": candidate,
                 "changed_paths": list(changed_paths),
             },
@@ -1302,7 +1234,7 @@ def _candidate_search(
         return worktree, candidate, request, attempt_directory
     write_json_once(
         search / "stalled.public.json",
-        {"schema_version": 1, "search_id": search_id, "attempts": 6},
+        {"search_id": search_id, "attempts": 6},
     )
     return None
 
@@ -1397,7 +1329,7 @@ def _recover_candidate_stage(
                     if not failure_path.exists():
                         write_json_once(
                             failure_path,
-                            {"schema_version": 1, "message": str(error)},
+                            {"message": str(error)},
                         )
                     raise
             except (StateError, TransientDownstreamError):
@@ -1460,7 +1392,6 @@ def _recover_candidate_stage(
             write_json_once(
                 attempt_directory / "candidate.public.json",
                 {
-                    "schema_version": 1,
                     "candidate": candidate,
                     "changed_paths": list(changed_paths),
                 },
@@ -1604,7 +1535,6 @@ def _recover_candidate_review(
             write_json_once(
                 candidate_path,
                 {
-                    "schema_version": 1,
                     "candidate": candidate,
                     "changed_paths": list(changed_paths),
                 },
@@ -1618,7 +1548,7 @@ def _record_official_result(
     result: Mapping[str, Any],
     manifest: EvaluatorManifest,
 ) -> None:
-    result = normalize_result_statuses(result)
+    result = canonical_result(result)
     request_path = (
         task.directory
         / "experiments"
@@ -1634,7 +1564,6 @@ def _record_official_result(
     if not isinstance(request, dict):
         raise StateError(f"published research request is invalid: {request_path}")
     entry = {
-        "schema_version": 1,
         "source": f"experiment:{int(result['experiment_id']):06d}",
         "kind": "experiment",
         "champion": result["champion_before"],
@@ -1955,7 +1884,6 @@ def _mark_reflection_failed(experiment: Path) -> None:
     write_json_once(
         experiment / "reflection.blocked.json",
         {
-            "schema_version": 1,
             "message": "Post-trial reflection did not complete; later research is blocked.",
         },
     )
@@ -2025,7 +1953,7 @@ def run_task(
         strategy_command_builder = (
             None
             if research_command_builder is _default_research_command
-            else _compatibility_strategy_command
+            else _injected_strategy_command
         )
     if (
         isinstance(subject_workers, bool)
@@ -2035,8 +1963,8 @@ def run_task(
         raise StateError(f"workers must be between 1 and {SUBJECT_WORKERS}")
     approval = verify_approval(task.directory, task.config)
     assert task.config.method is not None
-    task.config.method.require_component("search", "search.serial-champion-v1")
-    task.config.method.require_component("evaluate", "evaluate.paired-suspect-v1")
+    task.config.method.require_component("search", "search.serial-champion")
+    task.config.method.require_component("evaluate", "evaluate.paired-suspect")
     manifest, manifest_hash = load_manifest(task.directory / "evaluator.manifest.json")
     for published in _public_history(task, manifest):
         _record_official_result(task, published, manifest)
@@ -2295,21 +2223,19 @@ def run_task(
                 break
             research_worktree, candidate, raw_request, search_attempt = found
             experiment, record = start_experiment(task.directory, champion)
-            if task.config.schema_version >= 4:
-                write_json_once(
-                    experiment / "branch.public.json",
-                    {
-                        "schema_version": 1,
-                        "search_component": task.config.method.components[
-                            "search"
-                        ].identifier,
-                        "generation_id": record.experiment_id,
-                        "branch_id": f"serial-{record.experiment_id:06d}",
-                        "parent_branch_id": None,
-                        "seed_policy": champion,
-                        "official_champion": champion,
-                    },
-                )
+            write_json_once(
+                experiment / "branch.public.json",
+                {
+                    "search_component": task.config.method.components[
+                        "search"
+                    ].identifier,
+                    "generation_id": record.experiment_id,
+                    "branch_id": f"serial-{record.experiment_id:06d}",
+                    "parent_branch_id": None,
+                    "seed_policy": champion,
+                    "official_champion": champion,
+                },
+            )
             write_json_once(experiment / "request.public.json", raw_request)
             atomic_write_text(experiment / "candidate.commit", candidate + "\n")
             for name in ("planning.public.json", "implementation.public.json"):
@@ -2322,7 +2248,6 @@ def run_task(
             if implementation_sessions:
                 process_directory = implementation_sessions[-1] / "process"
                 origin = {
-                    "schema_version": 1,
                     "process_directory": str(
                         process_directory.relative_to(task.directory)
                     ),

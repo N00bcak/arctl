@@ -14,7 +14,6 @@ from .errors import ValidationError
 class ComponentSpec:
     stage: str
     identifier: str
-    contract_version: int
     handler: str
     agent_driven: bool
 
@@ -22,39 +21,34 @@ class ComponentSpec:
 _SPECS = (
     ComponentSpec(
         "search",
-        "search.serial-champion-v1",
-        1,
+        "search.serial-champion",
         "arctl.runner:_candidate_search",
         False,
     ),
     ComponentSpec(
         "strategize",
-        "strategize.environment-v1",
-        1,
+        "strategize.environment",
         "arctl.search:ensure_strategy",
         True,
     ),
     ComponentSpec(
-        "plan", "plan.comparative-v1", 1, "arctl.runner:_run_planning", True
+        "plan", "plan.comparative", "arctl.runner:_run_planning", True
     ),
     ComponentSpec(
         "execute",
-        "execute.worktree-v1",
-        1,
+        "execute.worktree",
         "arctl.runner:_run_implementation",
         True,
     ),
     ComponentSpec(
         "evaluate",
-        "evaluate.paired-suspect-v1",
-        1,
+        "evaluate.paired-suspect",
         "arctl.runner:_run_reserved_comparison",
         False,
     ),
     ComponentSpec(
         "reflect",
-        "reflect.evidence-v1",
-        1,
+        "reflect.evidence",
         "arctl.reflection:run_reflection",
         True,
     ),

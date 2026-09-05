@@ -27,9 +27,9 @@ def select_agent(
     if not pool:
         raise StateError(f"component {component} has no agent pool")
     policy = (
-        "uniform-with-replacement-v1"
-        if method.profile == "serial-hotseat-v1"
-        else "single-v1"
+        "uniform-with-replacement"
+        if method.profile == "serial-hotseat"
+        else "single"
     )
     path = root / "agent-selection.public.json"
     if path.is_file():
@@ -38,7 +38,6 @@ def select_agent(
         except (OSError, json.JSONDecodeError) as error:
             raise StateError("saved agent selection is invalid") from error
         expected = {
-            "schema_version": 1,
             "component": component,
             "lifecycle": lifecycle,
             "selection_policy": policy,
@@ -52,13 +51,12 @@ def select_agent(
         }:
             raise StateError("saved agent selection differs from the approved lifecycle")
         return method.agents[value["selected_agent"]]
-    selected = pool[0] if policy == "single-v1" else (chooser or secrets.choice)(pool)
+    selected = pool[0] if policy == "single" else (chooser or secrets.choice)(pool)
     if selected not in pool:
         raise StateError("agent chooser selected outside the component pool")
     write_json_once(
         path,
         {
-            "schema_version": 1,
             "component": component,
             "lifecycle": lifecycle,
             "selection_policy": policy,

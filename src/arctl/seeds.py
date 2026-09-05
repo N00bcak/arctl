@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .errors import StateError, ValidationError
 
-_VERSION = b"arctl-seed-v1"
+_DOMAIN = b"arctl-seed"
 _PHASES = frozenset({"calibration", "primary", "suspect"})
 _SUBJECTS = frozenset({"champion", "candidate", "evaluator"})
 
@@ -55,7 +55,7 @@ def derive_seed(
         raise ValidationError("trial must be a non-negative integer")
     message = b"\0".join(
         (
-            _VERSION,
+            _DOMAIN,
             str(experiment_id).encode("ascii"),
             phase.encode("ascii"),
             subject.encode("ascii"),

@@ -9,7 +9,7 @@ from arctl.models import Evidence
 from arctl.manifest import TelemetryMetric
 from arctl.results import (
     build_public_result,
-    normalize_result_statuses,
+    canonical_result,
     operational_assessment,
     resolve_outcome,
     result_statuses,
@@ -49,17 +49,6 @@ class ExperimentOutcomeTests(unittest.TestCase):
             result_statuses([], operational_status="candidate_failed"),
             ("candidate_failed", "untested"),
         )
-
-    def test_legacy_failure_statuses_are_derived_without_rewriting(self) -> None:
-        legacy = {
-            "failure": "candidate_execution",
-            "evaluation": {"comparisons": []},
-            "constraints": {"tests": "PASS"},
-        }
-        normalized = normalize_result_statuses(legacy)
-        self.assertNotIn("operational_status", legacy)
-        self.assertEqual(normalized["operational_status"], "candidate_failed")
-        self.assertEqual(normalized["scientific_status"], "untested")
 
     def test_operational_assessment_is_deterministic(self) -> None:
         assessment = operational_assessment(
@@ -186,7 +175,7 @@ class ExperimentOutcomeTests(unittest.TestCase):
             public,
         )
 
-    def test_accepts_explained_execution_failure_and_legacy_failure(self) -> None:
+    def test_accepts_explained_execution_failure(self) -> None:
         public = {
             "experiment_id": 7,
             "hypothesis": "Improve routing.",
@@ -207,9 +196,6 @@ class ExperimentOutcomeTests(unittest.TestCase):
         }
 
         self.assertEqual(validate_public_result(public, **arguments), public)
-        legacy = {key: value for key, value in public.items() if key != "failure_detail"}
-        self.assertEqual(validate_public_result(legacy, **arguments), legacy)
-
         invalid = {**public, "failure_detail": ""}
         with self.assertRaisesRegex(StateError, "failure detail"):
             validate_public_result(invalid, **arguments)

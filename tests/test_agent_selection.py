@@ -16,15 +16,15 @@ from arctl.agent_selection import select_agent
 from arctl.errors import ValidationError
 from arctl.models import TaskConfig
 
-from .helpers import fake_backend_adapter, valid_task_v4
+from .helpers import fake_backend_adapter, valid_task
 
 
 def fake_hotseat_task() -> TaskConfig:
-    raw = valid_task_v4(hotseat=True)
+    raw = valid_task(hotseat=True)
     raw["method"]["allow_unverified_isolation"] = True
     raw["method"]["agents"] = {
         name: {
-            "backend": "fake-v1",
+            "backend": "fake",
             "model": name,
             "settings": {"reasoning_effort": "low"},
         }
@@ -36,10 +36,10 @@ def fake_hotseat_task() -> TaskConfig:
             "agent_pool": ["alpha", "beta"],
         }
         for component, identifier in {
-            "strategize": "strategize.environment-v1",
-            "plan": "plan.comparative-v1",
-            "execute": "execute.worktree-v1",
-            "reflect": "reflect.evidence-v1",
+            "strategize": "strategize.environment",
+            "plan": "plan.comparative",
+            "execute": "execute.worktree",
+            "reflect": "reflect.evidence",
         }.items()
     }
     return TaskConfig.from_mapping(raw)
@@ -87,7 +87,7 @@ class AgentSelectionTests(unittest.TestCase):
                 prompt="plan",
                 output_name="planning.public.json",
             )
-            with mock.patch.dict(BACKEND_ADAPTERS, {"fake-v1": fake_backend_adapter()}):
+            with mock.patch.dict(BACKEND_ADAPTERS, {"fake": fake_backend_adapter()}):
                 command = agent_command(selected, request)
             self.assertEqual(command, ("fake-agent", "beta", "planning.public.json"))
 
@@ -114,19 +114,19 @@ class AgentSelectionTests(unittest.TestCase):
         semantic_lock = task.method.to_lock()
         with mock.patch.dict(
             BACKEND_ADAPTERS,
-            {"fake-v1": fake_backend_adapter(certification="experimental")},
+            {"fake": fake_backend_adapter(certification="experimental")},
         ):
             approved = validate_method_backends(task.method)
             old = agent_provenance(task.method.pool("plan")[0], lifecycle="plan:1")
         with mock.patch.dict(
             BACKEND_ADAPTERS,
-            {"fake-v1": fake_backend_adapter(certification="verified")},
+            {"fake": fake_backend_adapter(certification="verified")},
         ):
             promoted = validate_method_backends(task.method)
             new = agent_provenance(task.method.pool("plan")[0], lifecycle="plan:2")
         self.assertEqual(task.method.to_lock(), semantic_lock)
-        self.assertEqual(approved["fake-v1"]["certification"], "experimental")
-        self.assertEqual(promoted["fake-v1"]["certification"], "verified")
+        self.assertEqual(approved["fake"]["certification"], "experimental")
+        self.assertEqual(promoted["fake"]["certification"], "verified")
         self.assertEqual(old["certification"], "experimental")
         self.assertEqual(new["certification"], "verified")
 
@@ -135,22 +135,22 @@ class AgentSelectionTests(unittest.TestCase):
         assert task.method is not None
         with self.assertRaisesRegex(ValidationError, "not installed"):
             validate_method_backends(task.method)
-        raw = valid_task_v4()
+        raw = valid_task()
         raw["method"]["agents"] = {
             "experimental": {
-                "backend": "fake-v1",
+                "backend": "fake",
                 "model": "fake",
                 "settings": {"reasoning_effort": "low"},
             }
         }
         raw["method"]["overrides"] = {
             "plan": {
-                "component": "plan.comparative-v1",
+                "component": "plan.comparative",
                 "agent_pool": ["experimental"],
             }
         }
         disallowed = TaskConfig.from_mapping(raw)
         assert disallowed.method is not None
-        with mock.patch.dict(BACKEND_ADAPTERS, {"fake-v1": fake_backend_adapter()}):
+        with mock.patch.dict(BACKEND_ADAPTERS, {"fake": fake_backend_adapter()}):
             with self.assertRaisesRegex(ValidationError, "unverified isolation"):
                 validate_method_backends(disallowed.method)

@@ -10,7 +10,6 @@ from .commands import validate_command_template
 from .errors import StateError, ValidationError
 
 _FIELDS = {
-    "schema_version",
     "subject_command",
     "prepare_command",
     "calibrate_command",
@@ -23,6 +22,7 @@ _FIELDS = {
     "variation",
     "suspect_test",
     "calibration",
+    "setup_contract",
 }
 _SETUP_CONTRACT_FIELDS = {
     "environment_adapter",
@@ -49,8 +49,7 @@ _TRIAL_FIELDS = {"meaning", "dependence", "seed_to_case", "subject_visible_seed"
 _STATISTIC_FIELDS = {"score", "uncertainty", "positive_effect"}
 _VARIATION_FIELDS = {"known", "mitigations"}
 _SUSPECT_FIELDS = {"trigger", "reason_codes"}
-_CALIBRATION_V1_FIELDS = {"supported", "policy", "ceiling"}
-_CALIBRATION_V2_FIELDS = {"supported", "policy", "ladder", "diagnostic"}
+_CALIBRATION_FIELDS = {"supported", "policy", "ladder", "diagnostic"}
 _DIAGNOSTIC_FIELDS = {"name", "units", "maximum"}
 
 
@@ -183,18 +182,7 @@ def _setup_contract(value: Any) -> SetupContract:
     )
 
 
-def _telemetry_metrics(
-    value: Any,
-    *,
-    schema_version: int,
-) -> dict[str, TelemetryMetric]:
-    if schema_version < 3:
-        names = _string_tuple(value, "public.telemetry")
-        if names:
-            raise ValidationError(
-                "manifest-v1/v2 telemetry lacks semantic descriptors; use manifest-v3"
-            )
-        return {}
+def _telemetry_metrics(value: Any) -> dict[str, TelemetryMetric]:
     if not isinstance(value, Mapping):
         raise ValidationError("public.telemetry must be an object")
     metrics: dict[str, TelemetryMetric] = {}
@@ -243,7 +231,6 @@ def _telemetry_metrics(
 
 @dataclass(frozen=True)
 class EvaluatorManifest:
-    schema_version: int
     subject_command: tuple[str, ...]
     prepare_command: tuple[str, ...]
     calibrate_command: tuple[str, ...] | None
@@ -272,11 +259,7 @@ class EvaluatorManifest:
     def from_mapping(cls, value: Mapping[str, Any]) -> EvaluatorManifest:
         if not isinstance(value, Mapping):
             raise ValidationError("manifest must be an object")
-        schema_version = value.get("schema_version")
-        if schema_version not in (1, 2, 3, 4):
-            raise ValidationError("manifest.schema_version must equal 1, 2, 3, or 4")
-        fields = _FIELDS | ({"setup_contract"} if schema_version == 4 else set())
-        root = _object(value, fields, "manifest")
+        root = _object(value, _FIELDS, "manifest")
 
         limits = _object(root["limits"], _LIMIT_FIELDS, "limits")
         schemas = _object(root["schemas"], _SCHEMA_FIELDS, "schemas")
@@ -285,13 +268,7 @@ class EvaluatorManifest:
         statistics = _object(root["statistics"], _STATISTIC_FIELDS, "statistics")
         variation = _object(root["variation"], _VARIATION_FIELDS, "variation")
         suspect = _object(root["suspect_test"], _SUSPECT_FIELDS, "suspect_test")
-        calibration = _object(
-            root["calibration"],
-            (
-                _CALIBRATION_V1_FIELDS if schema_version == 1 else _CALIBRATION_V2_FIELDS
-            ),
-            "calibration",
-        )
+        calibration = _object(root["calibration"], _CALIBRATION_FIELDS, "calibration")
 
         try:
             from jsonschema import Draft202012Validator
@@ -321,69 +298,49 @@ class EvaluatorManifest:
                 placeholders=("request", "response"),
             )
             policy = _text(calibration["policy"], "calibration.policy")
-            if schema_version == 1:
-                ceiling = _positive_integer(
-                    calibration["ceiling"], "calibration.ceiling"
+            raw_ladder = calibration["ladder"]
+            if (
+                not isinstance(raw_ladder, list)
+                or not raw_ladder
+                or any(
+                    isinstance(count, bool)
+                    or not isinstance(count, int)
+                    or count <= 0
+                    for count in raw_ladder
                 )
-                ladder = (ceiling,)
-                diagnostic_name = None
-                diagnostic_units = None
-                diagnostic_maximum = None
-            else:
-                raw_ladder = calibration["ladder"]
-                if (
-                    not isinstance(raw_ladder, list)
-                    or not raw_ladder
-                    or any(
-                        isinstance(count, bool)
-                        or not isinstance(count, int)
-                        or count <= 0
-                        for count in raw_ladder
-                    )
-                    or raw_ladder != sorted(set(raw_ladder))
-                ):
-                    raise ValidationError(
-                        "calibration.ladder must be strictly increasing positive integers"
-                    )
-                ladder = tuple(raw_ladder)
-                ceiling = ladder[-1]
-                diagnostic = _object(
-                    calibration["diagnostic"],
-                    _DIAGNOSTIC_FIELDS,
-                    "calibration.diagnostic",
+                or raw_ladder != sorted(set(raw_ladder))
+            ):
+                raise ValidationError(
+                    "calibration.ladder must be strictly increasing positive integers"
                 )
-                diagnostic_name = _text(
-                    diagnostic["name"], "calibration.diagnostic.name"
+            ladder = tuple(raw_ladder)
+            ceiling = ladder[-1]
+            diagnostic = _object(
+                calibration["diagnostic"],
+                _DIAGNOSTIC_FIELDS,
+                "calibration.diagnostic",
+            )
+            diagnostic_name = _text(diagnostic["name"], "calibration.diagnostic.name")
+            diagnostic_units = _text(
+                diagnostic["units"], "calibration.diagnostic.units"
+            )
+            maximum = diagnostic["maximum"]
+            if (
+                isinstance(maximum, bool)
+                or not isinstance(maximum, (int, float))
+                or not math.isfinite(maximum)
+                or maximum < 0
+            ):
+                raise ValidationError(
+                    "calibration.diagnostic.maximum must be a finite non-negative number"
                 )
-                diagnostic_units = _text(
-                    diagnostic["units"], "calibration.diagnostic.units"
-                )
-                maximum = diagnostic["maximum"]
-                if (
-                    isinstance(maximum, bool)
-                    or not isinstance(maximum, (int, float))
-                    or not math.isfinite(maximum)
-                    or maximum < 0
-                ):
-                    raise ValidationError(
-                        "calibration.diagnostic.maximum must be a finite "
-                        "non-negative number"
-                    )
-                diagnostic_maximum = float(maximum)
+            diagnostic_maximum = float(maximum)
         else:
             if calibration_command is not None:
                 raise ValidationError(
                     "calibrate_command must be null when calibration is unsupported"
                 )
-            if schema_version == 1:
-                if (
-                    calibration["policy"] is not None
-                    or calibration["ceiling"] is not None
-                ):
-                    raise ValidationError(
-                        "calibration policy and ceiling must be null when unsupported"
-                    )
-            elif (
+            if (
                 calibration["policy"] is not None
                 or calibration["ladder"] is not None
                 or calibration["diagnostic"] is not None
@@ -411,7 +368,6 @@ class EvaluatorManifest:
                 raise ValidationError("suspect trigger requires at least one reason code")
 
         return cls(
-            schema_version=schema_version,
             subject_command=validate_command_template(
                 root["subject_command"],
                 label="subject_command",
@@ -440,9 +396,7 @@ class EvaluatorManifest:
             subject_result_schema=dict(schemas["subject_result"]),
             public_statistic=_text(public["statistic"], "public.statistic"),
             subject_interface=_text(public["subject_interface"], "public.subject_interface"),
-            public_telemetry=_telemetry_metrics(
-                public["telemetry"], schema_version=schema_version
-            ),
+            public_telemetry=_telemetry_metrics(public["telemetry"]),
             trial_meaning=_text(trial["meaning"], "trial.meaning"),
             trial_dependence=_text(trial["dependence"], "trial.dependence"),
             seed_to_case=_text(trial["seed_to_case"], "trial.seed_to_case"),
@@ -468,13 +422,9 @@ class EvaluatorManifest:
                 diagnostic_name,
                 diagnostic_units,
                 diagnostic_maximum,
-                schema_version >= 2 and calibration_supported,
+                calibration_supported,
             ),
-            setup_contract=(
-                _setup_contract(root["setup_contract"])
-                if schema_version == 4
-                else None
-            ),
+            setup_contract=_setup_contract(root["setup_contract"]),
         )
 
     def validate_trial_setting(self, trials: str | int) -> None:

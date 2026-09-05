@@ -27,7 +27,7 @@ from .manifest import EvaluatorManifest
 from .models import ResearchRequest
 from .process import run_or_load_once
 from .registry import LocatedTask
-from .results import normalize_result_statuses
+from .results import canonical_result
 from .sandbox import (
     agent_prompt_path,
     command_runtime_read_paths,
@@ -86,7 +86,6 @@ def strategy_schema(*, source_ids: Sequence[str] | None = None) -> dict[str, Any
     )
     schema = _strict_schema(
         {
-            "schema_version": {"type": "integer", "const": 2},
             "environment_observations": {
                 "type": "array",
                 "minItems": 1,
@@ -158,7 +157,6 @@ def research_schema(
     }
     return _strict_schema(
         {
-            "schema_version": {"type": "integer", "const": 2},
             "strategy_behavior_id": (
                 {"type": "string", "enum": list(behavior_ids)}
                 if behavior_ids is not None
@@ -218,7 +216,6 @@ def planning_schema(
     )
     return _strict_schema(
         {
-            "schema_version": {"type": "integer", "const": 2},
             "directions": {"type": "array", "minItems": 1, "items": direction},
             "selection_rationale": text,
             "selection": (
@@ -428,25 +425,15 @@ def _catalog_entry(task_directory: Path, entry: Mapping[str, Any]) -> dict[str, 
                         if isinstance(assessment.get("next_action"), Mapping)
                         else None
                     ),
-                }
-            if assessment.get("schema_version") != 4:
-                metric_assessments = assessment.get("metric_assessments", [])
-                if isinstance(metric_assessments, Mapping):
-                    metric_findings = [
-                        {"metric": name, "finding": item.get("finding")}
-                        for name, item in metric_assessments.items()
-                        if isinstance(item, Mapping)
-                    ]
-                else:
-                    metric_findings = [
+                    "metric_findings": [
                         {
-                            "metric": item.get("metric"),
-                            "finding": item.get("finding"),
+                            "metric": signal.get("metric"),
+                            "finding": signal.get("finding"),
                         }
-                        for item in metric_assessments
-                        if isinstance(item, Mapping)
-                    ]
-                compact["metric_findings"] = metric_findings
+                        for signal in assessment.get("material_signals", [])
+                        if isinstance(signal, Mapping)
+                    ],
+                }
             compact_reflection.update(compact)
         catalog["reflection"] = {
             key: value for key, value in compact_reflection.items() if value is not None
@@ -462,7 +449,7 @@ def _catalog_entry(task_directory: Path, entry: Mapping[str, Any]) -> dict[str, 
         if result_path.is_file():
             try:
                 result = json.loads(result_path.read_text(encoding="utf-8"))
-                result = normalize_result_statuses(result)
+                result = canonical_result(result)
                 comparisons = result["evaluation"]["comparisons"]
             except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
                 raise StateError(f"published result is invalid: {result_path}") from error
@@ -639,7 +626,7 @@ def ensure_strategy(
     stop_path: Path,
 ) -> tuple[int, dict[str, Any]]:
     assert task.config.method is not None
-    task.config.method.require_component("strategize", "strategize.environment-v1")
+    task.config.method.require_component("strategize", "strategize.environment")
     latest = _latest_strategy(task.directory)
     if latest is not None and not refresh:
         return latest
@@ -745,7 +732,7 @@ def ensure_strategy(
         except (OSError, StateError) as error:
             write_json_once(
                 root / "strategy.failure.json",
-                {"schema_version": 1, "message": str(error)},
+                {"message": str(error)},
             )
             raise
         try:
@@ -760,7 +747,7 @@ def ensure_strategy(
             if not (root / "strategy.failure.json").exists():
                 write_json_once(
                     root / "strategy.failure.json",
-                    {"schema_version": 1, "message": str(error)},
+                    {"message": str(error)},
                 )
             raise
         write_json_once(
@@ -773,7 +760,7 @@ def ensure_strategy(
         except (OSError, StateError) as error:
             write_json_once(
                 root / "strategy.failure.json",
-                {"schema_version": 1, "message": str(error)},
+                {"message": str(error)},
             )
             raise
         environment = None
@@ -816,20 +803,20 @@ def ensure_strategy(
             if not (root / "strategy.failure.json").exists():
                 write_json_once(
                     root / "strategy.failure.json",
-                    {"schema_version": 1, "message": str(failure)},
+                    {"message": str(failure)},
                 )
             raise failure
         if not (root / "strategy.failure.json").exists():
             write_json_once(
                 root / "strategy.failure.json",
-                {"schema_version": 1, "message": str(error)},
+                {"message": str(error)},
             )
         raise
     except StateError as error:
         if not (root / "strategy.failure.json").exists():
             write_json_once(
                 root / "strategy.failure.json",
-                {"schema_version": 1, "message": str(error)},
+                {"message": str(error)},
             )
         raise
     output = scratch / "strategy.public.json"
@@ -848,7 +835,7 @@ def ensure_strategy(
         if not (root / "strategy.failure.json").exists():
             write_json_once(
                 root / "strategy.failure.json",
-                {"schema_version": 1, "message": str(failure)},
+                {"message": str(failure)},
             )
         raise failure from error
     published = task.directory / "strategy" / f"{revision:06d}.public.json"
@@ -856,7 +843,6 @@ def ensure_strategy(
     add_ledger_entry(
         task.directory,
         {
-            "schema_version": 1,
             "source": f"strategy:{revision:06d}",
             "kind": "strategy",
             "strategy_revision": revision,
@@ -894,7 +880,6 @@ def record_miss(
     add_ledger_entry(
         task.directory,
         {
-            "schema_version": 1,
             "source": f"search:{search_id:06d}:attempt:{attempt:02d}",
             "kind": "research_miss",
             "champion": champion,

@@ -54,7 +54,6 @@ class CodexSchemaTests(unittest.TestCase):
                 ledger_ids=("entry-a",),
             ),
             "reflection": reflection_schema(
-                version=3,
                 metric_names=tuple(manifest.public_telemetry),
                 strategy_behavior_id="behavior-a",
                 history_entry_ids=("entry-a",),
@@ -109,17 +108,16 @@ class CodexSchemaTests(unittest.TestCase):
         self.assertEqual(decision_refs["maxItems"], 0)
         validate_codex_output_schema(schema)
 
-    def test_reflection_v3_requires_bounded_metric_names(self) -> None:
+    def test_reflection_requires_bounded_metric_names(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires metric_names"):
-            reflection_schema(version=3)
+            reflection_schema()
 
-    def test_production_reflection_v4_schema_reaches_codex_submission(self) -> None:
+    def test_production_reflection_schema_reaches_codex_submission(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             schema_path = root / "scratch" / "reflection.schema.json"
             schema_path.parent.mkdir()
             schema = reflection_schema(
-                version=4,
                 metric_names=("errors",),
                 strategy_behavior_id="avoid-errors",
                 history_entry_ids=("entry-a",),

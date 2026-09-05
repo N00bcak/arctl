@@ -10,12 +10,11 @@ from typing import Any, Literal, Mapping, Sequence
 
 from .errors import ValidationError
 from .manifest import TelemetryMetric
-from .methods import MethodConfig, legacy_method, parse_method
+from .methods import MethodConfig, parse_method
 
 ComparisonKind = Literal["primary", "suspect"]
 
 _TASK_FIELDS = {
-    "schema_version",
     "task_id",
     "repo",
     "objective",
@@ -31,21 +30,11 @@ _TASK_FIELDS = {
 _STRATEGY_FIELDS = {"model", "reasoning_effort"}
 _EXECUTION_FIELDS = {"model", "reasoning_effort"}
 _CANDIDATE_REVIEW_FIELDS = {"contract", "checks", "repair_attempts"}
-_ENVIRONMENT_FIELDS = {"sources"}
-_ENVIRONMENT_FILE_FIELDS = {"id", "kind", "description", "path"}
-_ENVIRONMENT_PROBE_FIELDS = {
-    "id",
-    "kind",
-    "description",
-    "command",
-    "backed_by",
-}
-_ENVIRONMENT_V4_FIELDS = {"codebases", "probes"}
+_ENVIRONMENT_FIELDS = {"codebases", "probes"}
 _ENVIRONMENT_CODEBASE_FIELDS = {"id", "description", "repo", "commit", "include"}
-_ENVIRONMENT_V4_PROBE_FIELDS = {"id", "description", "command", "backed_by"}
+_ENVIRONMENT_PROBE_FIELDS = {"id", "description", "command", "backed_by"}
 _EVALUATOR_FIELDS = {"repo", "commit"}
 _EVIDENCE_FIELDS = {
-    "schema_version",
     "kind",
     "trial_count",
     "hard_rules_pass",
@@ -57,7 +46,6 @@ _COMPARISON_FIELDS = {"effect_estimate", "one_sided_lower_bound"}
 _SUSPECT_FIELDS = {"required", "reason"}
 _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _RESEARCH_FIELDS = {
-    "schema_version",
     "strategy_behavior_id",
     "claim",
     "mechanism",
@@ -226,7 +214,7 @@ def _environment_sources(value: Any, *, repo: Path) -> tuple[EnvironmentSource, 
 def _environment_references(value: Any) -> tuple[EnvironmentSource, ...]:
     if not isinstance(value, Mapping):
         raise ValidationError("environment must be an object")
-    _require_exact_fields(value, _ENVIRONMENT_V4_FIELDS, "environment")
+    _require_exact_fields(value, _ENVIRONMENT_FIELDS, "environment")
     codebases = value["codebases"]
     probes = value["probes"]
     if not isinstance(codebases, list) or not codebases:
@@ -267,7 +255,7 @@ def _environment_references(value: Any) -> tuple[EnvironmentSource, ...]:
         label = f"environment.probes[{index}]"
         if not isinstance(raw, Mapping):
             raise ValidationError(f"{label} must be an object")
-        _require_exact_fields(raw, _ENVIRONMENT_V4_PROBE_FIELDS, label)
+        _require_exact_fields(raw, _ENVIRONMENT_PROBE_FIELDS, label)
         identifier = _string(raw["id"], f"{label}.id")
         backed_by = _string_list(raw["backed_by"], f"{label}.backed_by")
         if not backed_by or not set(backed_by) <= identifiers:
@@ -311,7 +299,6 @@ class TaskConfig:
     reflection_reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] = "medium"
     candidate_review: CandidateReviewConfig | None = None
     method: MethodConfig | None = None
-    schema_version: int = 3
 
     @property
     def environment_probes(self) -> tuple[tuple[str, ...], ...]:
@@ -321,114 +308,21 @@ class TaskConfig:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> TaskConfig:
-        if value.get("schema_version") in (4, 5):
-            return _task_modern(value)
+        required = _TASK_FIELDS | {"method"}
+        allowed = required | {"candidate_review"}
         actual = set(value)
-        required = _TASK_FIELDS | {"strategy", "execution"}
-        allowed = required | {"planning", "reflection", "candidate_review"}
-        if not required <= actual or not actual <= allowed:
+        if actual != required and not (
+            "candidate_review" in actual and actual == allowed
+        ):
             missing = sorted(required - actual)
             extra = sorted(actual - allowed)
-            raise ValidationError(f"task fields differ: missing={missing}, extra={extra}")
-        schema_version = value["schema_version"]
-        if schema_version != 3:
-            raise ValidationError("task.schema_version must equal 3")
-        repo = Path(_string(value["repo"], "repo"))
-        if not repo.is_absolute():
-            raise ValidationError("repo must be absolute")
-        trials = value["trials"]
-        if trials != "auto" and (
-            isinstance(trials, bool) or not isinstance(trials, int) or trials <= 0
-        ):
-            raise ValidationError("trials must be 'auto' or a positive integer")
-        maximum = value["max_experiments"]
-        if maximum == "unlimited":
-            maximum = None
-        elif isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
-            raise ValidationError("max_experiments must be a positive integer or 'unlimited'")
-        strategy = value["strategy"]
-        if not isinstance(strategy, Mapping):
-            raise ValidationError("strategy must be an object")
-        _require_exact_fields(strategy, _STRATEGY_FIELDS, "strategy")
-        strategy_model = _string(strategy.get("model", "gpt-5.6-sol"), "strategy.model")
-        strategy_effort = strategy.get("reasoning_effort", "medium")
-        if strategy_effort not in {"minimal", "low", "medium", "high", "xhigh"}:
-            raise ValidationError("strategy.reasoning_effort is invalid")
-        execution = value["execution"]
-        if not isinstance(execution, Mapping):
-            raise ValidationError("execution must be an object")
-        _require_exact_fields(execution, _EXECUTION_FIELDS, "execution")
-        execution_model = _string(
-            execution.get("model", "gpt-5.6-terra"), "execution.model"
-        )
-        execution_effort = execution.get("reasoning_effort", "medium")
-        if execution_effort not in {"minimal", "low", "medium", "high", "xhigh"}:
-            raise ValidationError("execution.reasoning_effort is invalid")
-        planning = value.get("planning", strategy)
-        if not isinstance(planning, Mapping):
-            raise ValidationError("planning must be an object")
-        _require_exact_fields(planning, _STRATEGY_FIELDS, "planning")
-        planning_model = _string(planning["model"], "planning.model")
-        planning_effort = planning["reasoning_effort"]
-        if planning_effort not in {"minimal", "low", "medium", "high", "xhigh"}:
-            raise ValidationError("planning.reasoning_effort is invalid")
-        reflection = value.get("reflection", strategy)
-        if not isinstance(reflection, Mapping):
-            raise ValidationError("reflection must be an object")
-        _require_exact_fields(reflection, _STRATEGY_FIELDS, "reflection")
-        reflection_model = _string(reflection["model"], "reflection.model")
-        reflection_effort = reflection["reasoning_effort"]
-        if reflection_effort not in {"minimal", "low", "medium", "high", "xhigh"}:
-            raise ValidationError("reflection.reasoning_effort is invalid")
-        method = legacy_method(
-            strategy_model=strategy_model,
-            strategy_effort=strategy_effort,
-            planning_model=planning_model,
-            planning_effort=planning_effort,
-            execution_model=execution_model,
-            execution_effort=execution_effort,
-            reflection_model=reflection_model,
-            reflection_effort=reflection_effort,
-        )
-        return cls(
-            task_id=validate_task_id(value["task_id"]),
-            repo=repo,
-            objective=_string(value["objective"], "objective"),
-            editable_paths=_string_list(value["editable_paths"], "editable_paths"),
-            denied_paths=_string_list(value["denied_paths"], "denied_paths"),
-            public_checks=_commands(value["public_checks"], "public_checks"),
-            public_probe=_command(value["public_probe"], "public_probe"),
-            public_probe_trial_equivalents=None,
-            environment_sources=_environment_sources(value["environment"], repo=repo),
-            evaluator=EvaluatorRef.from_mapping(value["evaluator"]),
-            trials=trials,
-            max_experiments=maximum,
-            strategy_model=strategy_model,
-            strategy_reasoning_effort=strategy_effort,
-            planning_model=planning_model,
-            planning_reasoning_effort=planning_effort,
-            execution_model=execution_model,
-            execution_reasoning_effort=execution_effort,
-            reflection_model=reflection_model,
-            reflection_reasoning_effort=reflection_effort,
-            candidate_review=(
-                _candidate_review(value["candidate_review"])
-                if "candidate_review" in value
-                else None
-            ),
-            method=method,
-            schema_version=schema_version,
-        )
+            raise ValidationError(
+                f"task fields differ: missing={missing}, extra={extra}"
+            )
+        return _task_from_mapping(value)
 
 
-def _task_modern(value: Mapping[str, Any]) -> TaskConfig:
-    required = _TASK_FIELDS | {"method"}
-    allowed = required | {"candidate_review"}
-    actual = set(value)
-    if actual != required and not ("candidate_review" in actual and actual == allowed):
-        missing = sorted(required - actual)
-        extra = sorted(actual - allowed)
-        raise ValidationError(f"task fields differ: missing={missing}, extra={extra}")
+def _task_from_mapping(value: Mapping[str, Any]) -> TaskConfig:
     repo = Path(_string(value["repo"], "repo"))
     if not repo.is_absolute():
         raise ValidationError("repo must be absolute")
@@ -447,23 +341,18 @@ def _task_modern(value: Mapping[str, Any]) -> TaskConfig:
     planning = method.pool("plan")[0]
     execution = method.pool("execute")[0]
     reflection = method.pool("reflect")[0]
-    schema_version = value["schema_version"]
-    if schema_version == 5:
-        probe = value["public_probe"]
-        if not isinstance(probe, Mapping):
-            raise ValidationError("public_probe must be an object in task schema v5")
-        _require_exact_fields(probe, {"command", "trial_equivalents"}, "public_probe")
-        probe_command = _command(probe["command"], "public_probe.command")
-        trial_equivalents = probe["trial_equivalents"]
-        if (
-            isinstance(trial_equivalents, bool)
-            or not isinstance(trial_equivalents, int)
-            or trial_equivalents <= 0
-        ):
-            raise ValidationError("public_probe.trial_equivalents must be positive")
-    else:
-        probe_command = _command(value["public_probe"], "public_probe")
-        trial_equivalents = None
+    probe = value["public_probe"]
+    if not isinstance(probe, Mapping):
+        raise ValidationError("public_probe must be an object")
+    _require_exact_fields(probe, {"command", "trial_equivalents"}, "public_probe")
+    probe_command = _command(probe["command"], "public_probe.command")
+    trial_equivalents = probe["trial_equivalents"]
+    if (
+        isinstance(trial_equivalents, bool)
+        or not isinstance(trial_equivalents, int)
+        or trial_equivalents <= 0
+    ):
+        raise ValidationError("public_probe.trial_equivalents must be positive")
     return TaskConfig(
         task_id=validate_task_id(value["task_id"]),
         repo=repo,
@@ -491,7 +380,6 @@ def _task_modern(value: Mapping[str, Any]) -> TaskConfig:
             else None
         ),
         method=method,
-        schema_version=schema_version,
     )
 
 
@@ -528,8 +416,6 @@ class ResearchRequest:
             raise ValidationError(
                 f"research request fields differ: missing={missing}, extra={extra}"
             )
-        if value["schema_version"] != 2:
-            raise ValidationError("research request schema_version must equal 2")
         lineage = value["lineage"]
         if not isinstance(lineage, Mapping):
             raise ValidationError("research request lineage must be an object")
@@ -620,8 +506,6 @@ class Evidence:
         allowed_suspect_reasons: Sequence[str] = (),
     ) -> Evidence:
         _require_exact_fields(value, _EVIDENCE_FIELDS, "evidence")
-        if value["schema_version"] != 1:
-            raise ValidationError("evidence.schema_version must equal 1")
         if value["kind"] != expected_kind:
             raise ValidationError("evidence kind does not match the comparison")
         count = value["trial_count"]

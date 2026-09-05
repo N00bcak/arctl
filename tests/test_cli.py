@@ -104,7 +104,7 @@ class CliTests(unittest.TestCase):
                 "arm_symmetry_rationale": "Labels are exchangeable.",
             },
             "dependency_source_policy": {"index": "https://pypi.org/simple"},
-            "controller_contract": {"version": 1, "sha256": "a" * 64},
+            "controller_contract": {"sha256": "a" * 64},
             "direct_dependencies": [
                 {
                     "requirement": "numpy",
@@ -154,7 +154,6 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual(code, 0)
             payload = json.loads(output)
-            self.assertEqual(payload["schema_version"], 1)
             self.assertEqual(payload["state"], "TASK_DRAFT")
             self.assertTrue(payload["action_required"])
             self.assertEqual(
@@ -164,9 +163,9 @@ class CliTests(unittest.TestCase):
             task = root / "data" / "tasks" / "subject" / "task.yaml"
             task_text = task.read_text()
             self.assertIn(f'repo: "{repo.resolve()}"', task_text)
-            self.assertIn("schema_version: 4", task_text)
+            self.assertNotIn("schema" + "_version", task_text)
             self.assertIn("codebases:", task_text)
-            self.assertIn("profile: serial-v1", task_text)
+            self.assertIn("profile: serial", task_text)
             self.assertIn("allow_unverified_isolation: false", task_text)
             self.assertIn("max_experiments: 1000", task_text)
 
@@ -277,7 +276,6 @@ class CliTests(unittest.TestCase):
 
     def test_doctor_json_exposes_versioned_runtime_and_diagnostics(self) -> None:
         report = {
-            "schema_version": 2,
             "runtime": {
                 "system": "Darwin",
                 "architecture": "arm64",
@@ -292,7 +290,6 @@ class CliTests(unittest.TestCase):
 
         payload = json.loads(output)
         self.assertEqual(code, 1)
-        self.assertEqual(payload["schema_version"], 2)
         self.assertEqual(payload["runtime"], report["runtime"])
         self.assertEqual(payload["checks"], report["checks"])
         self.assertEqual(payload["diagnostics"], report["diagnostics"])
@@ -322,7 +319,6 @@ class CliTests(unittest.TestCase):
 
     def test_human_run_output_reports_exhaustion_instead_of_zero_work(self) -> None:
         payload = {
-            "schema_version": 1,
             "success": True,
             "task_id": "demo",
             "experiment_id": None,
@@ -347,7 +343,6 @@ class CliTests(unittest.TestCase):
 
     def test_human_status_output_reports_exhaustion(self) -> None:
         payload = {
-            "schema_version": 1,
             "success": True,
             "task_id": "demo",
             "experiment_id": 10,
@@ -384,7 +379,6 @@ class CliTests(unittest.TestCase):
 
     def test_status_table_names_promoting_experiment_and_stays_compact(self) -> None:
         payload = {
-            "schema_version": 1,
             "success": True,
             "task_id": "demo",
             "state": "READY",
@@ -415,7 +409,6 @@ class CliTests(unittest.TestCase):
 
     def test_status_table_explains_automatic_trial_count(self) -> None:
         payload = {
-            "schema_version": 1,
             "success": True,
             "task_id": "demo",
             "state": "READY",
@@ -458,6 +451,9 @@ class CliTests(unittest.TestCase):
         result = {
             "experiment_id": 12,
             "decision": "ARCHIVE",
+            "operational_status": "completed",
+            "scientific_status": "inconclusive",
+            "reason_code": "none",
             "hypothesis": "A broad algorithmic change " + "improves play " * 12,
             "evaluation": {
                 "comparisons": [
@@ -470,7 +466,6 @@ class CliTests(unittest.TestCase):
             "dossier_path": root + "/000012/README.md",
         }
         payload = {
-            "schema_version": 1,
             "success": True,
             "task_id": "demo",
             "state": "REPORT",
@@ -512,6 +507,9 @@ class CliTests(unittest.TestCase):
         result = {
             "experiment_id": 1,
             "decision": "REJECT",
+            "operational_status": "candidate_failed",
+            "scientific_status": "untested",
+            "reason_code": "candidate_timeout",
             "hypothesis": "Use bounded beam search.",
             "candidate": "b" * 40,
             "champion_after": "a" * 40,
@@ -521,7 +519,6 @@ class CliTests(unittest.TestCase):
             "dossier_path": "/tmp/reports/experiments/000001/README.md",
         }
         payload = {
-            "schema_version": 1,
             "success": True,
             "task_id": "demo",
             "state": "REPORT",
@@ -666,7 +663,6 @@ class CliTests(unittest.TestCase):
 
     def test_approval_table_is_compact_ordered_and_actionable(self) -> None:
         payload = {
-            "schema_version": 1,
             "success": True,
             "task_id": "demo",
             "experiment_id": None,
@@ -748,7 +744,6 @@ class CliTests(unittest.TestCase):
 
     def test_human_success_omits_generic_machine_boilerplate(self) -> None:
         payload = {
-            "schema_version": 1,
             "success": True,
             "task_id": "demo",
             "experiment_id": None,
@@ -925,7 +920,6 @@ class CliTests(unittest.TestCase):
 
     def test_human_status_discloses_ceiling_fallback(self) -> None:
         payload = {
-            "schema_version": 1,
             "success": True,
             "task_id": "demo",
             "experiment_id": None,
@@ -1053,7 +1047,6 @@ class CliTests(unittest.TestCase):
             data = root / "data"
             self.run_cli(["--data", str(data), "task", "create", str(repo), "--json"])
             recovered = {
-                "schema_version": 1,
                 "success": True,
                 "task_id": "subject",
                 "experiment_id": None,
@@ -1113,7 +1106,6 @@ class CliTests(unittest.TestCase):
                 mock.patch(
                     "arctl.doctor.run_doctor",
                     return_value={
-                        "schema_version": 2,
                         "runtime": {
                             "system": "Darwin",
                             "architecture": "arm64",
@@ -1138,7 +1130,6 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             data = Path(temporary) / "data"
             report = {
-                "schema_version": 2,
                 "runtime": {
                     "system": "Darwin",
                     "architecture": "arm64",

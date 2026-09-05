@@ -8,64 +8,62 @@ from arctl.models import Evidence, ResearchRequest, TaskConfig
 from arctl.search import validate_research_links, validate_strategy_links
 from arctl.manifest import TelemetryMetric
 
-from .helpers import valid_evidence, valid_task, valid_task_v4, valid_task_v5
+from .helpers import valid_evidence, valid_task
 
 
 class TaskConfigTests(unittest.TestCase):
-    def test_v5_declares_public_probe_trial_equivalents(self) -> None:
-        task = TaskConfig.from_mapping(valid_task_v5())
-        self.assertEqual(task.schema_version, 5)
+    def test_declares_public_probe_trial_equivalents(self) -> None:
+        task = TaskConfig.from_mapping(valid_task())
         self.assertEqual(task.public_probe, ("python3", "tools/probe.py"))
         self.assertEqual(task.public_probe_trial_equivalents, 3)
 
-        raw = valid_task_v5()
+        raw = valid_task()
         raw["public_probe"]["trial_equivalents"] = 0
         with self.assertRaisesRegex(ValidationError, "trial_equivalents"):
             TaskConfig.from_mapping(raw)
 
-    def test_v4_resolves_serial_and_hotseat_method_profiles(self) -> None:
-        serial = TaskConfig.from_mapping(valid_task_v4())
-        self.assertEqual(serial.schema_version, 4)
+    def test_resolves_serial_and_hotseat_method_profiles(self) -> None:
+        serial = TaskConfig.from_mapping(valid_task())
         assert serial.method is not None
-        self.assertEqual(serial.method.profile, "serial-v1")
+        self.assertEqual(serial.method.profile, "serial")
         self.assertEqual(len(serial.method.pool("strategize")), 1)
         self.assertEqual(serial.strategy_model, "gpt-5.6-sol")
         self.assertEqual(serial.environment_sources[0].commit, "b" * 40)
 
-        raw = valid_task_v4(hotseat=True)
+        raw = valid_task(hotseat=True)
         raw["method"]["agents"] = {
             "critic": {
-                "backend": "codex-cli-v1",
+                "backend": "codex-cli",
                 "model": "critic-model",
                 "settings": {"reasoning_effort": "high"},
             }
         }
         raw["method"]["overrides"] = {
             "strategize": {
-                "component": "strategize.environment-v1",
+                "component": "strategize.environment",
                 "agent_pool": ["strategy-a", "critic"],
             }
         }
         hotseat = TaskConfig.from_mapping(raw)
         assert hotseat.method is not None
-        self.assertEqual(hotseat.method.profile, "serial-hotseat-v1")
+        self.assertEqual(hotseat.method.profile, "serial-hotseat")
         self.assertEqual(hotseat.method.pool("strategize")[1].model, "critic-model")
 
-    def test_v4_rejects_cross_component_and_unknown_agent_assignments(self) -> None:
-        raw = valid_task_v4(hotseat=True)
+    def test_rejects_cross_component_and_unknown_agent_assignments(self) -> None:
+        raw = valid_task(hotseat=True)
         raw["method"]["overrides"] = {
             "strategize": {
-                "component": "execute.worktree-v1",
+                "component": "execute.worktree",
                 "agent_pool": [],
             }
         }
         with self.assertRaisesRegex(ValidationError, "incompatible"):
             TaskConfig.from_mapping(raw)
 
-        raw = valid_task_v4(hotseat=True)
+        raw = valid_task(hotseat=True)
         raw["method"]["overrides"] = {
             "reflect": {
-                "component": "reflect.evidence-v1",
+                "component": "reflect.evidence",
                 "agent_pool": ["reflection-a", "missing"],
             }
         }
@@ -73,23 +71,23 @@ class TaskConfigTests(unittest.TestCase):
             TaskConfig.from_mapping(raw)
 
     def test_backend_identifiers_are_resolved_at_approval_not_parse_time(self) -> None:
-        raw = valid_task_v4()
+        raw = valid_task()
         raw["method"]["agents"] = {
             "experimental": {
-                "backend": "fake-v1",
+                "backend": "fake",
                 "model": "adapter-under-test",
                 "settings": {"reasoning_effort": "low"},
             }
         }
         raw["method"]["overrides"] = {
             "plan": {
-                "component": "plan.comparative-v1",
+                "component": "plan.comparative",
                 "agent_pool": ["experimental"],
             }
         }
         task = TaskConfig.from_mapping(raw)
         assert task.method is not None
-        self.assertEqual(task.method.pool("plan")[0].backend, "fake-v1")
+        self.assertEqual(task.method.pool("plan")[0].backend, "fake")
         self.assertNotIn("certification", task.method.to_lock()["agents"]["experimental"])
 
     def test_accepts_strict_task(self) -> None:
@@ -106,27 +104,53 @@ class TaskConfigTests(unittest.TestCase):
 
     def test_agent_model_strict_override(self) -> None:
         raw = valid_task()
-        raw["strategy"] = {"model": "custom-model", "reasoning_effort": "xhigh"}
-        raw["execution"] = {"model": "fast-model", "reasoning_effort": "low"}
+        raw["method"]["agents"] = {
+            "strategy-custom": {
+                "backend": "codex-cli",
+                "model": "custom-model",
+                "settings": {"reasoning_effort": "xhigh"},
+            },
+            "execution-fast": {
+                "backend": "codex-cli",
+                "model": "fast-model",
+                "settings": {"reasoning_effort": "low"},
+            },
+        }
+        raw["method"]["overrides"] = {
+            "strategize": {
+                "component": "strategize.environment",
+                "agent_pool": ["strategy-custom"],
+            },
+            "execute": {
+                "component": "execute.worktree",
+                "agent_pool": ["execution-fast"],
+            },
+        }
         configured = TaskConfig.from_mapping(raw)
         self.assertEqual(configured.strategy_model, "custom-model")
         self.assertEqual(configured.strategy_reasoning_effort, "xhigh")
         self.assertEqual(configured.execution_model, "fast-model")
         self.assertEqual(configured.execution_reasoning_effort, "low")
 
-        raw["strategy"]["reasoning_effort"] = "extreme"
+        raw["method"]["agents"]["strategy-custom"]["settings"]["reasoning_effort"] = "extreme"
         with self.assertRaisesRegex(ValidationError, "reasoning_effort"):
             TaskConfig.from_mapping(raw)
 
-        raw["strategy"]["reasoning_effort"] = "high"
-        raw["execution"]["reasoning_effort"] = "extreme"
-        with self.assertRaisesRegex(ValidationError, "execution.reasoning_effort"):
+        raw["method"]["agents"]["strategy-custom"]["settings"]["reasoning_effort"] = "high"
+        raw["method"]["agents"]["execution-fast"]["settings"]["reasoning_effort"] = "extreme"
+        with self.assertRaisesRegex(ValidationError, "reasoning_effort"):
             TaskConfig.from_mapping(raw)
 
     def test_planning_reflection_roles_and_unlimited_budget(self) -> None:
         raw = valid_task()
-        raw["planning"] = {"model": "planner", "reasoning_effort": "medium"}
-        raw["reflection"] = {"model": "reflector", "reasoning_effort": "medium"}
+        raw["method"]["agents"] = {
+            "planner": {"backend": "codex-cli", "model": "planner", "settings": {"reasoning_effort": "medium"}},
+            "reflector": {"backend": "codex-cli", "model": "reflector", "settings": {"reasoning_effort": "medium"}},
+        }
+        raw["method"]["overrides"] = {
+            "plan": {"component": "plan.comparative", "agent_pool": ["planner"]},
+            "reflect": {"component": "reflect.evidence", "agent_pool": ["reflector"]},
+        }
         raw["max_experiments"] = "unlimited"
 
         configured = TaskConfig.from_mapping(raw)
@@ -136,13 +160,6 @@ class TaskConfigTests(unittest.TestCase):
         self.assertEqual(configured.reflection_model, "reflector")
         self.assertEqual(configured.reflection_reasoning_effort, "medium")
         self.assertIsNone(configured.max_experiments)
-
-        legacy = TaskConfig.from_mapping(valid_task())
-        self.assertEqual(legacy.planning_model, legacy.strategy_model)
-        self.assertEqual(
-            legacy.reflection_reasoning_effort,
-            legacy.strategy_reasoning_effort,
-        )
 
     def test_optional_candidate_review_is_strict_and_bounded(self) -> None:
         raw = valid_task()
@@ -160,13 +177,11 @@ class TaskConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "must equal 0 or 1"):
             TaskConfig.from_mapping(raw)
 
-    def test_schema_v3_requires_environment_and_agent_settings(self) -> None:
-        for missing in ("strategy", "execution"):
-            raw = valid_task()
-            del raw[missing]
-            with self.subTest(missing=missing):
-                with self.assertRaisesRegex(ValidationError, "fields differ"):
-                    TaskConfig.from_mapping(raw)
+    def test_requires_environment_and_agent_settings(self) -> None:
+        raw = valid_task()
+        del raw["method"]
+        with self.assertRaisesRegex(ValidationError, "fields differ"):
+            TaskConfig.from_mapping(raw)
 
         raw = valid_task()
         del raw["environment"]
@@ -176,7 +191,7 @@ class TaskConfigTests(unittest.TestCase):
     def test_rejects_shell_command_strings(self) -> None:
         raw = valid_task()
         raw["public_probe"] = "python3 tools/probe.py"
-        with self.assertRaisesRegex(ValidationError, "argument-vector"):
+        with self.assertRaisesRegex(ValidationError, "object"):
             TaskConfig.from_mapping(raw)
 
     def test_rejects_boolean_trial_count(self) -> None:
@@ -193,17 +208,18 @@ class TaskConfigTests(unittest.TestCase):
 
     def test_environment_sources_are_typed_and_linked(self) -> None:
         task = TaskConfig.from_mapping(valid_task())
-        self.assertEqual(task.environment_sources[0].kind, "documentation")
+        self.assertEqual(task.environment_sources[0].kind, "implementation")
         self.assertEqual(task.environment_probes[0][0], "python3")
 
         raw = valid_task()
-        raw["environment"]["sources"][1]["backed_by"] = ["missing"]
-        with self.assertRaisesRegex(ValidationError, "unknown backing"):
+        raw["environment"]["probes"][0]["backed_by"] = ["missing"]
+        with self.assertRaisesRegex(ValidationError, "unknown codebase"):
             TaskConfig.from_mapping(raw)
 
         raw = valid_task()
-        raw["environment"]["sources"][0]["id"] = "environment-probe"
-        with self.assertRaisesRegex(ValidationError, "duplicate environment"):
+        raw["environment"]["codebases"][0]["id"] = "environment-probe"
+        raw["environment"]["probes"][0]["backed_by"] = ["environment-probe"]
+        with self.assertRaisesRegex(ValidationError, "duplicate environment source"):
             TaskConfig.from_mapping(raw)
 
     def test_rejects_task_id_path_and_ref_escapes(self) -> None:
@@ -337,7 +353,6 @@ class EvidenceTests(unittest.TestCase):
 class ResearchRequestTests(unittest.TestCase):
     def valid(self) -> dict:
         return {
-            "schema_version": 2,
             "strategy_behavior_id": "preserve-options",
             "claim": "Prefer recoverable routes.",
             "mechanism": "Penalize branches without retreat.",

@@ -85,7 +85,6 @@ QUESTION_GROUPS = {
     "evaluator": ("telemetry", "evaluator_pattern"),
 }
 HUMAN_QUESTION_GROUPS = ("target", "constraints")
-DISCOVERY_SCHEMA_VERSION = 5
 SETUP_CONTROLLER_CONTRACT = {
     "comparison": (
         "For each experiment, freeze the current accepted champion as comparator "
@@ -163,7 +162,6 @@ UNSUPPORTED_PROCESS_TELEMETRY = frozenset(
     }
 )
 SETUP_BUILD_CONTRACT = {
-    "schema_version": 4,
     "hooks": {
         "subject": "run_batch(public_batch) -> JSON object",
         "prepare": "prepare(PrepareContext) -> PreparedBatch",
@@ -183,7 +181,6 @@ SETUP_BUILD_CONTRACT = {
         "max_experiments",
     ],
     "task_controller_owned": [
-        "schema_version",
         "task_id",
         "repo",
         "evaluator",
@@ -250,7 +247,7 @@ SETUP_BUILD_CONTRACT = {
         "evaluator.manifest.json",
     ],
 }
-SETUP_BUILD_CONTROLLER_VERSION = b"setup-controller-v5"
+SETUP_BUILD_CONTROLLER_DOMAIN = b"arctl-setup-build"
 _SETUP_TEMPLATE = """# ARCTL setup
 
 <!-- Fill what you know. arctl will inspect the repository and ask only about
@@ -416,7 +413,6 @@ def discovery_schema() -> dict[str, Any]:
     )
     return _schema(
         {
-            "schema_version": {"type": "integer", "const": DISCOVERY_SCHEMA_VERSION},
             "brief_sha256": text,
             "summary": text,
             "fields": {
@@ -442,62 +438,30 @@ def _brief(setup: Mapping[str, Any]) -> tuple[Path, str, str]:
 
 
 def setup_presentation(discovery: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the stable human/JSON view, including discovery-v1 consolidation."""
-    if discovery.get("schema_version") in {2, 3, 4, 5}:
-        downgrades = []
-        for item in discovery.get("capability_downgrades", []):
-            if "capability_id" not in item:
-                downgrades.append(item)
-                continue
-            capability = SETUP_CAPABILITIES[item["capability_id"]]
-            downgrades.append(
-                {
-                    "requested": capability["guarantee"],
-                    "supported_equivalent": (
-                        "fail the reserved batch without replacement"
-                        if capability["level"] == "fail_closed"
-                        else "document as an unenforced requirement"
-                    ),
-                    "consequence": (
-                        "the controller will not silently redraw or claim enforcement"
-                    ),
-                }
-            )
-        return {
-            "proposal": list(discovery["fields"]),
-            "open_questions": list(discovery["open_questions"]),
-            "capability_downgrades": downgrades,
-        }
-    fields = []
-    unresolved: set[str] = set()
-    markers = ("must confirm", "humans must", "should confirm", "need confirmation")
-    for item in discovery.get("questions", []):
-        fields.append({**item, "source": "repository"})
-        if any(marker in item["proposed_answer"].lower() for marker in markers):
-            unresolved.add(item["id"])
-    questions = []
-    by_id = {item["id"]: item for item in fields}
-    for group, members in QUESTION_GROUPS.items():
-        affected = [name for name in members if name in unresolved]
-        if not affected:
-            continue
-        first = by_id[affected[0]]
-        questions.append(
+    """Return the stable human/JSON view of canonical discovery output."""
+    downgrades = []
+    for item in discovery.get("capability_downgrades", []):
+        capability = SETUP_CAPABILITIES[item["capability_id"]]
+        downgrades.append(
             {
-                "id": group,
-                "prompt": f"Confirm the {group.replace('_', ' ')}.",
-                "why": "The earlier discovery marked these related details unresolved.",
-                "proposed_answer": first["proposed_answer"],
-                "affected_fields": affected,
+                "requested": capability["guarantee"],
+                "supported_equivalent": (
+                    "fail the reserved batch without replacement"
+                    if capability["level"] == "fail_closed"
+                    else "document as an unenforced requirement"
+                ),
+                "consequence": "the controller will not silently redraw or claim enforcement",
             }
         )
-    return {"proposal": fields, "open_questions": questions, "capability_downgrades": []}
+    return {
+        "proposal": list(discovery["fields"]),
+        "open_questions": list(discovery["open_questions"]),
+        "capability_downgrades": downgrades,
+    }
 
 
 def brief_changed(setup: Mapping[str, Any], discovery: Mapping[str, Any]) -> bool:
-    return discovery.get("schema_version") not in {4, 5} or discovery.get(
-        "brief_sha256"
-    ) != _brief(setup)[2]
+    return discovery.get("brief_sha256") != _brief(setup)[2]
 
 
 def build_schema() -> dict[str, Any]:
@@ -710,7 +674,6 @@ def build_schema() -> dict[str, Any]:
     )
     return _schema(
         {
-            "schema_version": {"type": "integer", "const": 4},
             "summary": text,
             "dependencies": {"type": "array", "items": text},
             "subject_hook": {"type": "string", "minLength": 1},
@@ -758,7 +721,6 @@ def review_schema() -> dict[str, Any]:
     }
     return _schema(
         {
-            "schema_version": {"type": "integer", "const": 2},
             "summary": text,
             "coverage": _schema(coverage),
             "findings": {
@@ -892,26 +854,14 @@ def _load_authorized_design(directory: Path) -> dict[str, Any]:
     try:
         Draft202012Validator(schema).validate(design)
     except JsonSchemaError as error:
-        legacy_schema = deepcopy(schema)
-        legacy_schema["properties"]["schema_version"]["const"] = 2
-        dependency_required = legacy_schema["properties"]["direct_dependencies"][
-            "items"
-        ]["required"]
-        dependency_required.remove("imports")
-        try:
-            if design.get("schema_version") != 2:
-                raise error
-            Draft202012Validator(legacy_schema).validate(design)
-        except JsonSchemaError as legacy_error:
-            raise StateError("authorized setup design is invalid") from legacy_error
+        raise StateError("authorized setup design is invalid") from error
     digest = hashlib.sha256(
         json.dumps(design, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     if (
         not isinstance(authorization, Mapping)
         or set(authorization)
-        != {"schema_version", "design_sha256", "decision_revision", "authorized"}
-        or authorization.get("schema_version") != 1
+        != {"design_sha256", "decision_revision", "authorized"}
         or authorization.get("authorized") is not True
         or authorization.get("design_sha256") != digest
     ):
@@ -962,7 +912,7 @@ def _validate_dependency_plan(
         atomic_write_json(setup_path, setup)
         atomic_write_json(
             directory / "setup" / "late-dependencies.public.json",
-            {"schema_version": 1, "requirements": unexpected},
+            {"requirements": unexpected},
         )
         raise StateError(
             "build discovered direct dependencies that require a new explicit decision: "
@@ -1027,7 +977,7 @@ def _agent_run(
     atomic_write_json(schema, schema_value)
     if command_builder is None:
         agent = AgentDefinition(
-            "setup-default", "codex-cli-v1", "gpt-5.6-sol", "medium"
+            "setup-default", "codex-cli", "gpt-5.6-sol", "medium"
         )
         try:
             command = agent_command(
@@ -1046,7 +996,7 @@ def _agent_run(
         except (OSError, StateError) as error:
             atomic_write_json(
                 root / "failure.json",
-                {"schema_version": 1, "message": str(error)},
+                {"message": str(error)},
             )
             raise
         try:
@@ -1060,7 +1010,7 @@ def _agent_run(
         except (OSError, StateError) as error:
             atomic_write_json(
                 root / "failure.json",
-                {"schema_version": 1, "message": str(error)},
+                {"message": str(error)},
             )
             raise
     else:
@@ -1069,7 +1019,7 @@ def _agent_run(
         except (OSError, StateError) as error:
             atomic_write_json(
                 root / "failure.json",
-                {"schema_version": 1, "message": str(error)},
+                {"message": str(error)},
             )
             raise
         environment = None
@@ -1179,8 +1129,7 @@ def initialize_setup(
     environment = (workspace / "environment").resolve()
     task_directory.mkdir(parents=True)
     record = {
-        "schema_version": 2,
-        "setup_contract": "conversation-v2",
+        "setup_contract": "conversation",
         "task_id": task_id,
         "workspace": str(workspace),
         "data_root": str(data_root.resolve()),
@@ -1195,7 +1144,6 @@ def initialize_setup(
     atomic_write_json(task_directory / "setup.json", record)
     atomic_write_text(
         workspace / "arctl.workspace.yaml",
-        "schema_version: 1\n"
         f"task_id: {json.dumps(task_id)}\n"
         f"data_root: {json.dumps(str(data_root.resolve()))}\n"
         f"source_repo: {json.dumps(str(source_repo))}\n"
@@ -1221,7 +1169,7 @@ def load_setup(data_root: Path, task_id: str | None) -> tuple[Path, dict[str, An
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise StateError("setup state is missing or invalid") from error
-    if not isinstance(value, dict) or value.get("schema_version") not in {1, 2}:
+    if not isinstance(value, dict):
         raise StateError("setup state is missing or invalid")
     return path.parent, value
 
@@ -1242,37 +1190,10 @@ def _invalidate_pending_build(
     atomic_write_json(
         directory / "setup" / "build-findings.public.json",
         {
-            "schema_version": 1,
             "findings": setup["prior_build_findings"],
         },
     )
     _save_setup(directory, setup)
-
-
-def _upgrade_discovery(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Translate the immediately preceding discovery contract without guessing intent."""
-    upgraded = dict(value)
-    if upgraded.get("schema_version") != 4:
-        return upgraded
-    capability_ids = []
-    for item in upgraded.get("capability_downgrades", []):
-        requested = str(item.get("requested", "")).lower()
-        matches = []
-        for identifier, capability in SETUP_CAPABILITIES.items():
-            words = capability["guarantee"].lower().replace("-", " ").split()
-            if sum(word in requested for word in words if len(word) > 4) >= 2:
-                matches.append(identifier)
-        if not matches:
-            if "memory" in requested or "rss" in requested:
-                matches.append("memory_limit")
-            if "whole" in requested or "overall" in requested or "comparison" in requested:
-                matches.append("comparison_deadline")
-        capability_ids.extend(matches)
-    upgraded["schema_version"] = DISCOVERY_SCHEMA_VERSION
-    upgraded["capability_downgrades"] = [
-        {"capability_id": identifier} for identifier in dict.fromkeys(capability_ids)
-    ]
-    return upgraded
 
 
 def discover_setup(
@@ -1343,8 +1264,7 @@ def discover_setup(
         recoverable = completed[-1] if completed else recoverable
     try:
         if recoverable.is_file():
-            candidate = json.loads(recoverable.read_text(encoding="utf-8"))
-            value = _upgrade_discovery(candidate)
+            value = json.loads(recoverable.read_text(encoding="utf-8"))
             Draft202012Validator(discovery_schema()).validate(value)
         else:
             value = _agent_run(
@@ -1544,7 +1464,6 @@ def _normalize_entrypoint_design_revision(
         ) from error
     corrected = deepcopy(authorized)
     for controller_field in (
-        "schema_version",
         "revision",
         "decision_revision",
         "source_provenance",
@@ -1552,7 +1471,7 @@ def _normalize_entrypoint_design_revision(
         "dependency_source_policy",
     ):
         corrected.pop(controller_field, None)
-    source_path = _authorized_adapter_source_path(corrected["environment_adapter"])
+    source_path = _adapter_source_path(corrected["environment_adapter"])
     corrected["environment_adapter"]["entrypoint"] = f"python {source_path}"
     normalized = deepcopy(dict(batch))
     normalized["questions"] = []
@@ -1646,7 +1565,6 @@ def _controller_dependency_questions(
             }
         )
     return {
-        "schema_version": batch["schema_version"],
         "revision": batch["revision"],
         "summary": (
             "Explicit authorization is required for newly proposed direct dependencies."
@@ -1816,7 +1734,6 @@ def reopen_review_decision_batch(
         }
         reopened = "seed_isolation"
     batch = {
-        "schema_version": 1,
         "revision": revision,
         "summary": summary,
         "questions": [question],
@@ -1861,7 +1778,6 @@ def save_answers(
     ):
         raise ValidationError("setup overrides name unknown or empty canonical fields")
     normalized = {
-        "schema_version": 2,
         "brief_sha256": discovery.get("brief_sha256"),
         "proposal": presentation["proposal"],
         "answers": {name: answers[name].strip() for name in sorted(answers)},
@@ -1875,9 +1791,8 @@ def save_answers(
         presentation, normalized["answers"], normalized["overrides"]
     )
     atomic_write_json(
-        directory / "setup" / "legacy-resolved.public.json",
+        directory / "setup" / "resolved.public.json",
         {
-            "schema_version": 1,
             "brief_sha256": normalized["brief_sha256"],
             "fields": resolved,
             "controller_owned_contract": SETUP_CONTROLLER_CONTRACT,
@@ -2010,10 +1925,10 @@ def _materialize_reviewed_files(
         shutil.copyfile(staged, target)
 
 
-def _archive_legacy_generated(
+def _archive_replaced_generated(
     directory: Path, destination: Path, collection: str
 ) -> None:
-    """Move only paths proved to originate in a legacy setup build artifact."""
+    """Move only paths proved to originate in an earlier setup build artifact."""
     paths: set[Path] = set()
     for output in (directory / "setup" / "build" / "attempts").glob(
         "*/output/build.public.json"
@@ -2037,14 +1952,14 @@ def _archive_legacy_generated(
                 Path("test_generated_evaluator.py"),
             }
         )
-    archive = directory / "setup" / "legacy-generated" / collection
+    archive = directory / "setup" / "replaced-generated" / collection
     for relative in sorted(paths):
         source = destination / relative
         if source.is_file() and not source.is_symlink():
             target = archive / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists():
-                raise StateError(f"legacy setup archive already contains: {target}")
+                raise StateError(f"setup replacement archive already contains: {target}")
             source.replace(target)
 
 
@@ -2061,40 +1976,6 @@ def _python_command(descriptor: Mapping[str, Any], setup: Mapping[str, Any]) -> 
             raise ValidationError("Python module descriptors must name a dotted module")
         prefix = [python, "-m", target]
     return [*prefix, *descriptor["arguments"]]
-
-
-def _command_descriptor(command: Sequence[str]) -> dict[str, Any]:
-    """Translate legacy Python argv without changing what it invokes."""
-    arguments = list(command)
-    if not arguments:
-        raise ValidationError("legacy Python command is empty")
-    executable = Path(arguments.pop(0)).name
-    if executable not in {"python", "python3"} and not executable.startswith("python3."):
-        raise ValidationError("legacy public commands must use Python")
-    if len(arguments) >= 2 and arguments[0] == "-m":
-        return {"kind": "module", "target": arguments[1], "arguments": arguments[2:]}
-    if arguments and Path(arguments[0]).suffix == ".py":
-        return {"kind": "script", "target": arguments[0], "arguments": arguments[1:]}
-    raise ValidationError("legacy public command cannot be represented safely")
-
-
-def _upgrade_build_v3(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Upgrade only controller-owned transport fields; preserve scientific content."""
-    if value.get("schema_version") != 3:
-        return dict(value)
-    upgraded = json.loads(json.dumps(value))
-    task = upgraded["task"]
-    task["public_checks"] = [
-        _command_descriptor(command) for command in task["public_checks"]
-    ]
-    probe = task["public_probe"]
-    probe["execution"] = _command_descriptor(probe.pop("command"))
-    for environment_probe in task["environment"]["probes"]:
-        environment_probe["execution"] = _command_descriptor(
-            environment_probe.pop("command")
-        )
-    upgraded["schema_version"] = 4
-    return upgraded
 
 
 def _build_semantic_findings(value: Mapping[str, Any]) -> list[str]:
@@ -2233,7 +2114,6 @@ def _validate_build_contract(
     task["denied_paths"] = denied
     task.update(
         {
-            "schema_version": 5,
             "task_id": setup["task_id"],
             "repo": setup["subject"],
             "evaluator": {
@@ -2241,7 +2121,7 @@ def _validate_build_contract(
                 "commit": "SETUP_EVALUATOR_COMMIT",
             },
             "method": {
-                "profile": "serial-v1",
+                "profile": "serial",
                 "allow_unverified_isolation": False,
             },
         }
@@ -2263,7 +2143,6 @@ def _validate_build_contract(
     calibration = manifest["calibration"]
     manifest.update(
         {
-            "schema_version": 4,
             "subject_command": [python, "_arctl/subject.py", "{input}", "{output}"],
             "prepare_command": [
                 python,
@@ -2308,8 +2187,6 @@ def _validate_build_contract(
         }
         manifest["public"] = raw_public
         parsed_manifest = EvaluatorManifest.from_mapping(manifest)
-        if parsed_manifest.schema_version != 4:
-            raise ValidationError("manifest.schema_version must equal 4 for setup")
         if parsed_manifest.subject_visible_seed:
             raise ValidationError("guided setup requires evaluator-hidden trial seeds")
         if task_config is not None:
@@ -2386,11 +2263,9 @@ def _validate_complete_build_contract(
     return validated
 
 
-def _authorized_adapter_source_path(adapter: Mapping[str, Any]) -> str:
-    """Return a canonical path, tolerating one legacy path-plus-note shape."""
-    source = str(adapter["source_path"])
-    matched = re.fullmatch(r"([^\s()]+\.[A-Za-z0-9]+) \([^()]+\)", source)
-    return matched.group(1) if matched else source
+def _adapter_source_path(adapter: Mapping[str, Any]) -> str:
+    """Return the authorized adapter source path exactly as declared."""
+    return str(adapter["source_path"])
 
 
 def _validate_authorized_design_for_build(
@@ -2401,10 +2276,6 @@ def _validate_authorized_design_for_build(
     adapter = design["environment_adapter"]
     source = str(adapter["source_path"])
     relative = Path(source)
-    if _authorized_adapter_source_path(adapter) != source:
-        findings.append(
-            "DESIGN_ADAPTER_PATH environment adapter source_path contains appended prose"
-        )
     if adapter["owner"] != "subject":
         findings.append(
             "DESIGN_ADAPTER_OWNER executable environment adapter must be subject-owned"
@@ -2438,7 +2309,6 @@ def _validate_authorized_design_for_build(
         atomic_write_json(
             directory / "setup" / "design-findings.public.json",
             {
-                "schema_version": 1,
                 "findings": setup["prior_design_findings"],
             },
         )
@@ -2498,7 +2368,7 @@ def _validate_authorized_design_match(
     ):
         errors.append("public cases do not carry the exact authorized finite horizon")
     adapter = design["environment_adapter"]
-    adapter_source_path = _authorized_adapter_source_path(adapter)
+    adapter_source_path = _adapter_source_path(adapter)
     codebases = task.get("environment", {}).get("codebases", [])
     owner_repo = adapter["owner"]
     # _validate_build_contract has already resolved owner names to workspace repositories.
@@ -2608,8 +2478,7 @@ def _acceptance_payload(directory: Path, readiness: Mapping[str, Any]) -> dict[s
     owned = readiness.get("owned_files")
     review_sha256 = readiness.get("review_sha256")
     if (
-        readiness.get("schema_version") != 2
-        or not isinstance(staging, Mapping)
+        not isinstance(staging, Mapping)
         or not isinstance(owned, Mapping)
         or not isinstance(review_sha256, str)
     ):
@@ -2626,7 +2495,6 @@ def _acceptance_payload(directory: Path, readiness: Mapping[str, Any]) -> dict[s
     if not isinstance(dependency_resolution, Mapping):
         raise StateError("setup readiness lacks dependency resolver provenance; rebuild setup")
     return {
-        "schema_version": 2,
         "subject_base": readiness.get("subject_base"),
         "authorization_bundle_sha256": _authorization_bundle_hash(directory),
         "task_draft_sha256": hashlib.sha256(task_draft.read_bytes()).hexdigest(),
@@ -2849,7 +2717,6 @@ def _protocol_preflight(
     atomic_write_json(
         prepare_request,
         {
-            "schema_version": 1,
             "operation": "prepare",
             "kind": "primary",
             "experiment_id": 1,
@@ -2911,7 +2778,6 @@ def _protocol_preflight(
         atomic_write_json(
             request,
             {
-                "schema_version": 1,
                 "operation": "prepare",
                 "kind": "primary",
                 "experiment_id": 1,
@@ -3022,7 +2888,6 @@ def _protocol_preflight(
         calibration_request = requests / "calibrate.json"
         calibration_response = calibration_output / "response.json"
         calibration_value = {
-            "schema_version": 2,
             "operation": "calibrate",
             "champion": "setup",
             "evaluator": "setup",
@@ -3055,8 +2920,7 @@ def _protocol_preflight(
         calibration_result = json.loads(calibration_response.read_text(encoding="utf-8"))
         assessments = calibration_result.get("assessments")
         if (
-            calibration_result.get("schema_version") != 2
-            or calibration_result.get("operation") != "calibrate"
+            calibration_result.get("operation") != "calibrate"
             or [item.get("trial_count") for item in assessments or []]
             != list(manifest.calibration.ladder)
             or any(
@@ -3074,7 +2938,6 @@ def _protocol_preflight(
     atomic_write_json(
         score_request,
         {
-            "schema_version": 1,
             "operation": "score",
             "kind": "primary",
             "experiment_id": 1,
@@ -3131,7 +2994,6 @@ def _protocol_preflight(
             atomic_write_json(
                 request,
                 {
-                    "schema_version": 1,
                     "operation": "score",
                     "kind": "primary",
                     "experiment_id": 1,
@@ -3181,7 +3043,6 @@ def _protocol_preflight(
             )
         exchangeability = "passed"
     summary = {
-        "schema_version": 1,
         "trial_count": count,
         "seeds": seeds,
         "effect_estimate": evidence.effect_estimate,
@@ -3443,7 +3304,7 @@ def _cross_artifact_findings(
     scanned_paths.add(subject / "_arctl" / "hook.py")
     adapter = requirements["environment_adapter"]
     scanned_paths.add(
-        roots[adapter["owner"]] / _authorized_adapter_source_path(adapter)
+        roots[adapter["owner"]] / _adapter_source_path(adapter)
     )
     pending_scan = list(scanned_paths)
     while pending_scan:
@@ -3469,7 +3330,7 @@ def _cross_artifact_findings(
             f"IMPORT_UNDECLARED {imported}: {', '.join(sorted(set(paths)))}"
         )
     adapter_root = roots[adapter["owner"]]
-    if not (adapter_root / _authorized_adapter_source_path(adapter)).is_file():
+    if not (adapter_root / _adapter_source_path(adapter)).is_file():
         findings.append(
             "ADAPTER_UNREACHABLE authorized environment adapter is absent from its repository"
         )
@@ -3622,7 +3483,7 @@ def _direct_build_schema(
         exact_subject_paths = list(
             dict.fromkeys(
                 [
-                    _authorized_adapter_source_path(
+                    _adapter_source_path(
                         requirements["environment_adapter"]
                     ),
                     *(
@@ -3660,7 +3521,6 @@ def _direct_build_schema(
     file_declarations = {"anyOf": allowed_file_declarations}
     return _schema(
         {
-            "schema_version": {"type": "integer", "const": 3},
             "summary": text,
             "files": {
                 "type": "array",
@@ -3697,20 +3557,8 @@ def _apply_authorized_build_fields(
         "arguments": exact_editable_paths,
     }
     normalized_task["public_checks"] = [syntax_check]
-    proposed_probe = normalized_task["public_probe"]["execution"]
-    if (
-        proposed_probe["kind"] == "module"
-        and proposed_probe["target"] in {"compileall", "py_compile"}
-    ):
-        # Legacy builders used compilation as both the check and the probe.
-        # Retain the safe setup behavior; the runner now reports this probe as
-        # unavailable instead of treating it as runtime evidence.
-        normalized_task["public_probe"] = {
-            "execution": syntax_check,
-            "trial_equivalents": 1,
-        }
     adapter = requirements["environment_adapter"]
-    adapter_source_path = _authorized_adapter_source_path(adapter)
+    adapter_source_path = _adapter_source_path(adapter)
     codebases = normalized_task["environment"]["codebases"]
     for source in codebases:
         if source.get("owner") == "subject":
@@ -3995,7 +3843,7 @@ def build_setup_direct(
         + EVALUATOR_ENTRYPOINT.encode()
         + SETUP_API_MODULE.encode()
         + UNITTEST_ENTRYPOINT.encode()
-        + SETUP_BUILD_CONTROLLER_VERSION
+        + SETUP_BUILD_CONTROLLER_DOMAIN
     ).hexdigest()
     requirements_digest = hashlib.sha256(
         resolved_path.read_bytes() + contract_digest.encode()
@@ -4164,7 +4012,7 @@ def build_setup_direct(
                 "prior_build_findings": setup.get("prior_build_findings", []),
                 "controller_normalized_fields": {
                     "environment_adapter_source_path": (
-                        _authorized_adapter_source_path(
+                        _adapter_source_path(
                             requirements["environment_adapter"]
                         )
                     ),
@@ -4234,7 +4082,6 @@ def build_setup_direct(
             report["task"], report["evaluator"], requirements
         )
         value = {
-            "schema_version": 4,
             "summary": report["summary"],
             "dependencies": list(authorized_dependencies),
             "subject_hook": subject_hook,
@@ -4393,7 +4240,7 @@ def _targeted_behavior_repair(
         # performed, so deterministically migrate that interrupted state.
         setup.pop("behavior_repair_attempted_for", None)
         _save_setup(directory, setup)
-    adapter_path = _authorized_adapter_source_path(
+    adapter_path = _adapter_source_path(
         requirements["environment_adapter"]
     )
     allowed = {
@@ -4413,7 +4260,6 @@ def _targeted_behavior_repair(
 
     schema = _schema(
         {
-            "schema_version": {"type": "integer", "const": 1},
             "summary": {"type": "string", "minLength": 1},
             "changed_files": {
                 "type": "array",
@@ -4461,7 +4307,7 @@ def _targeted_behavior_repair(
         "manifest in staging is the "
         "canonical wire contract: prepare must emit exactly its public-case schema; the adapter "
         "must accept that case and emit exactly its subject-result schema; and the subject and "
-        "evaluator hooks must preserve and score that shape without legacy horizon, metrics, or "
+        "evaluator hooks must preserve and score that shape without obsolete horizon, metrics, or "
         "diagnostics fields. The adapter's JSONL contract is streaming: one process must accept "
         "at least two newline-delimited cases and emit two corresponding newline-delimited "
         "results. Add a regression test that exercises two cases through one adapter process. "
@@ -4661,7 +4507,7 @@ def build_setup(
         + EVALUATOR_ENTRYPOINT.encode()
         + SETUP_API_MODULE.encode()
         + UNITTEST_ENTRYPOINT.encode()
-        + SETUP_BUILD_CONTROLLER_VERSION
+        + SETUP_BUILD_CONTROLLER_DOMAIN
     ).hexdigest()
     requirements_digest = hashlib.sha256(
         resolved_path.read_bytes() + contract_digest.encode()
@@ -4684,25 +4530,6 @@ def build_setup(
     if pending_path is not None and pending_path.is_file():
         value = json.loads(pending_path.read_text(encoding="utf-8"))
         attempt = int(pending_path.parents[1].name)
-    elif command_builder is None and prior_build_findings and attempts.is_dir():
-        completed_outputs = sorted(attempts.glob("*/output/build.public.json"))
-        if not completed_outputs:
-            raise StateError("setup recorded build findings without a recoverable output")
-        source = completed_outputs[-1]
-        try:
-            value = _upgrade_build_v3(json.loads(source.read_text(encoding="utf-8")))
-        except (OSError, json.JSONDecodeError, ValidationError) as error:
-            raise StateError(f"legacy setup build cannot be recovered safely: {error}") from error
-        migration = directory / "setup" / "build" / "migrations" / source.parents[1].name
-        pending_path = migration / "build.public.json"
-        atomic_write_json(pending_path, value)
-        setup["pending_build"] = {
-            "output": str(pending_path),
-            "requirements_sha256": requirements_digest,
-            "contract_sha256": contract_digest,
-            "migrated_from": str(source),
-        }
-        _save_setup(directory, setup)
     else:
         try:
             value = _agent_run(
@@ -5070,37 +4897,6 @@ def build_setup(
                 offline=offline,
                 validate_output=review_command_builder is None,
             )
-        if static_review.get("schema_version") == 1 and review_command_builder is not None:
-            legacy_findings = static_review.get("findings", [])
-            failed_area = "intent_fidelity" if legacy_findings else None
-            static_review = {
-                "schema_version": 2,
-                "summary": static_review.get("summary", "Legacy test review."),
-                "coverage": {
-                    area: {
-                        "status": "fail" if area == failed_area else "pass",
-                        "summary": "Adapted legacy command-builder review result.",
-                        "evidence": [
-                            {
-                                "path": str(directory / "task.draft.yaml"),
-                                "location": "line 1",
-                                "finding": "The command-builder fixture inspected the generated setup.",
-                            }
-                        ],
-                    }
-                    for area in (
-                        "intent_fidelity",
-                        "grounding",
-                        "editable_boundary",
-                        "dependencies",
-                        "trial_independence",
-                        "scoring_statistics",
-                        "seed_handling",
-                        "runtime_behavior",
-                    )
-                },
-                "findings": legacy_findings,
-            }
         _validate_review_evidence(
             static_review,
             roots=review_roots,
@@ -5236,7 +5032,6 @@ def build_setup(
         raise StateError("uv provisioning did not produce a dependency lock")
     dependency_lock_sha256 = hashlib.sha256(dependency_lock.read_bytes()).hexdigest()
     dependency_resolution = {
-        "schema_version": 1,
         "name": "uv",
         "version": _uv_runtime_version(workspace_environment),
         "index": configured_index,
@@ -5312,7 +5107,6 @@ def build_setup(
         progress({"stage": "public checks", "status": "completed"})
     review = static_review
     readiness = {
-        "schema_version": 2,
         "requirements": "ready",
         "subject": "ready" if value["subject_files"] or _clean(subject) else "blocked",
         "environment": "ready",
@@ -5384,7 +5178,7 @@ def _reviewed_artifacts(
     prior_task = readiness.get("task_contract")
     if not isinstance(prior_task, Mapping) or any(
         task_value.get(field) != prior_task.get(field)
-        for field in ("schema_version", "task_id", "repo", "evaluator", "method")
+        for field in ("task_id", "repo", "evaluator", "method")
     ):
         raise StateError("edited setup changed controller-owned task fields")
     locks = {
@@ -5474,8 +5268,7 @@ def _reviewed_artifacts(
         ),
     }
     if (
-        manifest.schema_version != 4
-        or manifest.subject_command != expected_commands["subject"]
+        manifest.subject_command != expected_commands["subject"]
         or manifest.prepare_command != expected_commands["prepare"]
         or manifest.score_command != expected_commands["score"]
         or (
@@ -5545,7 +5338,6 @@ def review_setup_edits(
     root = attempts / f"{attempt:04d}"
     stages = ["setup review"]
     change = {
-        "schema_version": 1,
         "prior_acceptance_token": readiness.get("acceptance_token"),
         "task_fields": [],
         "owned_files_changed": ownership_changed,
@@ -5668,30 +5460,6 @@ def review_setup_edits(
             offline=offline,
             validate_output=review_command_builder is None,
         )
-        if review.get("schema_version") == 1 and review_command_builder is not None:
-            legacy_findings = review.get("findings", [])
-            failed_area = "intent_fidelity" if legacy_findings else None
-            review = {
-                "schema_version": 2,
-                "summary": review.get("summary", "Legacy test review."),
-                "coverage": {
-                    area: {
-                        "status": "fail" if area == failed_area else "pass",
-                        "summary": "Adapted legacy command-builder review result.",
-                        "evidence": [{
-                            "path": str(directory / "task.draft.yaml"),
-                            "location": "line 1",
-                            "finding": "The command-builder fixture inspected the setup.",
-                        }],
-                    }
-                    for area in (
-                        "intent_fidelity", "grounding", "editable_boundary", "dependencies",
-                        "trial_independence", "scoring_statistics", "seed_handling",
-                        "runtime_behavior",
-                    )
-                },
-                "findings": legacy_findings,
-            }
         _validate_review_evidence(
             review, roots=(subject, environment, evaluator, directory)
         )
@@ -5704,7 +5472,6 @@ def review_setup_edits(
 
     readiness.update(
         {
-            "schema_version": 2,
             "review": "ready" if not review["findings"] else "blocked",
             "findings": review["findings"],
             "tree_hashes": current_payload["tree_hashes"],
@@ -5774,8 +5541,8 @@ def accept_setup(directory: Path, setup: dict[str, Any], token: str) -> TaskConf
             _git(subject, "switch", "-q", branch)
         else:
             _git(subject, "switch", "-q", "-c", branch)
-    _archive_legacy_generated(directory, environment, "environment_files")
-    _archive_legacy_generated(directory, evaluator, "evaluator_files")
+    _archive_replaced_generated(directory, environment, "environment_files")
+    _archive_replaced_generated(directory, evaluator, "evaluator_files")
     _materialize_reviewed_files(staged_subject, subject, owned["subject_files"])
     _materialize_reviewed_files(staged_environment, environment, owned["environment_files"])
     _materialize_reviewed_files(staged_evaluator, evaluator, owned["evaluator_files"])
@@ -5834,16 +5601,13 @@ def accept_setup(directory: Path, setup: dict[str, Any], token: str) -> TaskConf
         requirements = json.loads(
             (directory / "setup" / "answers.public.json").read_text(encoding="utf-8")
         )
-        if requirements.get("schema_version") == 2:
-            proposed = {
-                item["id"]: item["proposed_answer"] for item in requirements["proposal"]
-            }
-            setup["evaluator_pattern"] = requirements["overrides"].get(
-                "evaluator_pattern",
-                requirements["answers"].get("evaluator", proposed["evaluator_pattern"]),
-            )
-        else:
-            setup["evaluator_pattern"] = requirements["answers"]["evaluator_pattern"]
+        proposed = {
+            item["id"]: item["proposed_answer"] for item in requirements["proposal"]
+        }
+        setup["evaluator_pattern"] = requirements["overrides"].get(
+            "evaluator_pattern",
+            requirements["answers"].get("evaluator", proposed["evaluator_pattern"]),
+        )
     setup["subject_commit"] = subject_commit
     setup["environment_commit"] = environment_commit
     setup["evaluator_commit"] = evaluator_commit

@@ -27,7 +27,6 @@ class AgentSessionRequest:
 @dataclass(frozen=True)
 class BackendAdapter:
     identifier: str
-    version: str
     certification: str
     conformance_suite: str
     capabilities: frozenset[str]
@@ -62,11 +61,10 @@ def _codex_environment(credential_home: Path, writable_home: Path) -> dict[str, 
 
 
 BACKEND_ADAPTERS: dict[str, BackendAdapter] = {
-    "codex-cli-v1": BackendAdapter(
-        identifier="codex-cli-v1",
-        version="1",
+    "codex-cli": BackendAdapter(
+        identifier="codex-cli",
         certification="verified",
-        conformance_suite="arctl-agent-conformance-v1",
+        conformance_suite="arctl-agent-conformance",
         capabilities=frozenset(
             {
                 "fresh_session",
@@ -107,11 +105,9 @@ def agent_environment(
 def agent_provenance(agent: AgentDefinition, *, lifecycle: str) -> dict[str, object]:
     backend = adapter_for(agent)
     return {
-        "schema_version": 2,
         "lifecycle": lifecycle,
         "agent": agent.name,
         "backend": backend.identifier,
-        "adapter_version": backend.version,
         "certification": backend.certification,
         "conformance_suite": backend.conformance_suite,
         "model": agent.model,
@@ -147,7 +143,6 @@ def validate_method_backends(method: MethodConfig) -> dict[str, dict[str, object
                 f"agent backend {agent.backend} requires unverified isolation approval"
             )
         attestations[agent.backend] = {
-            "adapter_version": backend.version,
             "certification": backend.certification,
             "conformance_suite": backend.conformance_suite,
             "capabilities": sorted(backend.capabilities),

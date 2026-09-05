@@ -1,4 +1,4 @@
-"""Versioned research-method configuration."""
+"""Research-method configuration."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ class ComponentDefinition:
 
 @dataclass(frozen=True)
 class MethodConfig:
-    profile: Literal["serial-v1", "serial-hotseat-v1"]
+    profile: Literal["serial", "serial-hotseat"]
     allow_unverified_isolation: bool
     agents: Mapping[str, AgentDefinition]
     components: Mapping[str, ComponentDefinition]
@@ -57,12 +57,11 @@ class MethodConfig:
     def to_lock(self) -> dict[str, Any]:
         """Return semantic configuration; runtime certification is separate."""
         return {
-            "schema_version": 2,
             "profile": self.profile,
             "selection_policy": (
-                "uniform-with-replacement-v1"
-                if self.profile == "serial-hotseat-v1"
-                else "single-v1"
+                "uniform-with-replacement"
+                if self.profile == "serial-hotseat"
+                else "single"
             ),
             "allow_unverified_isolation": self.allow_unverified_isolation,
             "agents": {
@@ -102,21 +101,21 @@ def _defaults(
     }
     for component, stem in component_agent.items():
         names = (f"{stem}-default",)
-        if profile == "serial-hotseat-v1":
+        if profile == "serial-hotseat":
             names = (f"{stem}-a", f"{stem}-b")
         model, effort = base[stem]
         for name in names:
-            agents[name] = AgentDefinition(name, "codex-cli-v1", model, effort)
+            agents[name] = AgentDefinition(name, "codex-cli", model, effort)
         pools[component] = names
     components = {
-        "search": ComponentDefinition("search.serial-champion-v1", ()),
+        "search": ComponentDefinition("search.serial-champion", ()),
         "strategize": ComponentDefinition(
-            "strategize.environment-v1", pools["strategize"]
+            "strategize.environment", pools["strategize"]
         ),
-        "plan": ComponentDefinition("plan.comparative-v1", pools["plan"]),
-        "execute": ComponentDefinition("execute.worktree-v1", pools["execute"]),
-        "evaluate": ComponentDefinition("evaluate.paired-suspect-v1", ()),
-        "reflect": ComponentDefinition("reflect.evidence-v1", pools["reflect"]),
+        "plan": ComponentDefinition("plan.comparative", pools["plan"]),
+        "execute": ComponentDefinition("execute.worktree", pools["execute"]),
+        "evaluate": ComponentDefinition("evaluate.paired-suspect", ()),
+        "reflect": ComponentDefinition("reflect.evidence", pools["reflect"]),
     }
     return agents, components
 
@@ -148,7 +147,7 @@ def parse_method(value: Any) -> MethodConfig:
     if not {"profile", "allow_unverified_isolation"} <= set(value) <= allowed:
         raise ValidationError("method fields are invalid")
     profile = value["profile"]
-    if profile not in {"serial-v1", "serial-hotseat-v1"}:
+    if profile not in {"serial", "serial-hotseat"}:
         raise ValidationError("method.profile is unsupported")
     allow_unverified = value["allow_unverified_isolation"]
     if not isinstance(allow_unverified, bool):
@@ -175,10 +174,10 @@ def parse_method(value: Any) -> MethodConfig:
         ):
             raise ValidationError(f"method.overrides.{name}.agent_pool is invalid")
         if name in _AGENT_COMPONENTS:
-            required = 2 if profile == "serial-hotseat-v1" else 1
+            required = 2 if profile == "serial-hotseat" else 1
             invalid_size = (
                 len(pool) < 2
-                if profile == "serial-hotseat-v1"
+                if profile == "serial-hotseat"
                 else len(pool) != 1
             )
             if invalid_size or len(pool) != len(set(pool)):
@@ -191,25 +190,3 @@ def parse_method(value: Any) -> MethodConfig:
             raise ValidationError(f"method.overrides.{name} names an unknown agent")
         components[name] = ComponentDefinition(identifier, tuple(pool))
     return MethodConfig(profile, allow_unverified, agents, components)
-
-
-def legacy_method(
-    *,
-    strategy_model: str,
-    strategy_effort: ReasoningEffort,
-    planning_model: str,
-    planning_effort: ReasoningEffort,
-    execution_model: str,
-    execution_effort: ReasoningEffort,
-    reflection_model: str,
-    reflection_effort: ReasoningEffort,
-) -> MethodConfig:
-    agents, components = _defaults("serial-v1")
-    for name, model, effort in (
-        ("strategy-default", strategy_model, strategy_effort),
-        ("planning-default", planning_model, planning_effort),
-        ("execution-default", execution_model, execution_effort),
-        ("reflection-default", reflection_model, reflection_effort),
-    ):
-        agents[name] = AgentDefinition(name, "codex-cli-v1", model, effort)
-    return MethodConfig("serial-v1", False, agents, components)

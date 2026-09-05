@@ -13,55 +13,12 @@ from arctl.reflection import run_reflection, validate_reflection
 from arctl.sandbox import MAX_AGENT_PROMPT_BYTES
 from arctl.search import add_ledger_entry
 
-from .helpers import valid_task, valid_task_v4
+from .helpers import valid_task
 from .test_manifest import valid_manifest
 
 
 def assessment(metrics: list[str]) -> dict:
     return {
-        "schema_version": 1,
-        "summary": "The aggregate result is uncertain and the mechanism remains unproven.",
-        "strategy_behavior": {
-            "id": "avoid-errors",
-            "realization": "unclear",
-            "evidence": ["Aggregate telemetry does not identify behavior activation."],
-        },
-        "metric_assessments": [
-            {
-                "metric": name,
-                "finding": "inconclusive",
-                "rationale": "The metric does not isolate the proposed mechanism.",
-            }
-            for name in metrics
-        ],
-        "mechanism": {
-            "status": "not_demonstrated",
-            "evidence": [],
-            "missing_evidence": ["Direct activation telemetry is absent."],
-        },
-        "implementation": {
-            "status": "activation_unclear",
-            "evidence": [],
-            "concerns": ["Behavioral divergence is not measured."],
-        },
-        "policy_observations": [
-            {
-                "finding": "The safe-action branch may not activate consistently.",
-                "evidence": "Behavioral divergence is not measured.",
-                "implication": "A later executor should add an activation diagnostic.",
-            }
-        ],
-        "next_action": {
-            "kind": "revisit_after_better_evidence",
-            "rationale": "The positive estimate is not precise enough to promote.",
-            "test": "Add an activation diagnostic before refining the change.",
-        },
-    }
-
-
-def assessment_v4(metrics: list[str]) -> dict:
-    return {
-        "schema_version": 4,
         "summary": "The mechanism remains unproven.",
         "strategy_behavior": {
             "id": "avoid-errors",
@@ -174,7 +131,7 @@ class ReflectionTests(unittest.TestCase):
         )
 
     def test_saves_grounded_assessment_and_uncertainty_margin(self) -> None:
-        value = self.reflect(command_builder=self.builder(assessment_v4([])))
+        value = self.reflect(command_builder=self.builder(assessment([])))
 
         self.assertEqual(value["status"], "COMPLETE")
         self.assertAlmostEqual(value["basis"]["uncertainty_margin"], 0.7)
@@ -185,7 +142,6 @@ class ReflectionTests(unittest.TestCase):
 
     def test_malformed_saved_complete_reflection_has_a_domain_error(self) -> None:
         value = {
-            "schema_version": 3,
             "status": "COMPLETE",
             "warning": None,
             "basis": {"strategy_behavior_id": "avoid-errors"},
@@ -195,10 +151,9 @@ class ReflectionTests(unittest.TestCase):
         with self.assertRaisesRegex(StateError, "saved complete reflection is invalid"):
             validate_reflection(value, metric_names=("errors",))
 
-    def test_v4_rejects_duplicate_or_unknown_material_signals(self) -> None:
-        value = assessment_v4(["errors", "errors"])
+    def test_rejects_duplicate_or_unknown_material_signals(self) -> None:
+        value = assessment(["errors", "errors"])
         wrapper = {
-            "schema_version": 4,
             "status": "COMPLETE",
             "warning": None,
             "basis": {"strategy_behavior_id": "avoid-errors"},
@@ -217,8 +172,8 @@ class ReflectionTests(unittest.TestCase):
         with self.assertRaisesRegex(StateError, "assessment is invalid"):
             validate_reflection(wrapper, metric_names=("errors",))
 
-    def test_saved_v4_rejects_unknown_history_citations_from_its_basis(self) -> None:
-        value = assessment_v4(["errors"])
+    def test_saved_reflection_rejects_unknown_history_citations_from_its_basis(self) -> None:
+        value = assessment(["errors"])
         value["history_citations"] = [
             {
                 "entry_id": "unknown-entry",
@@ -227,7 +182,6 @@ class ReflectionTests(unittest.TestCase):
             }
         ]
         wrapper = {
-            "schema_version": 4,
             "status": "COMPLETE",
             "warning": None,
             "basis": {
@@ -245,12 +199,11 @@ class ReflectionTests(unittest.TestCase):
 
         def builder(_worktree, scratch, schema, _prompt):
             seen.update(json.loads(schema.read_text()))
-            value = assessment_v4(["errors"])
+            value = assessment(["errors"])
             return self.builder(value)(_worktree, scratch, schema, _prompt)
 
         reflected = self.reflect(command_builder=builder)
 
-        self.assertEqual(reflected["schema_version"], 4)
         properties = seen["properties"]
         self.assertEqual(
             properties["strategy_behavior"]["properties"]["id"]["const"],
@@ -264,7 +217,7 @@ class ReflectionTests(unittest.TestCase):
         self.assertEqual(self.reflect(), reflected)
 
     def test_agent_preflight_failure_is_saved_at_the_attempt_boundary(self) -> None:
-        raw_task = valid_task_v4()
+        raw_task = valid_task()
         raw_task["repo"] = str(self.root / "subject")
         self.task = TaskConfig.from_mapping(raw_task)
 
@@ -281,7 +234,7 @@ class ReflectionTests(unittest.TestCase):
         self.assertTrue(failure.is_file())
         self.assertIn("Codex output schema rejected", failure.read_text())
 
-    def test_version_two_reflection_cites_a_canonical_history_entry(self) -> None:
+    def test_reflection_cites_a_canonical_history_entry(self) -> None:
         entry = add_ledger_entry(
             self.experiment.parent.parent,
             {
@@ -292,25 +245,21 @@ class ReflectionTests(unittest.TestCase):
             },
         )
         value = assessment(["errors"])
-        value["schema_version"] = 2
         value["history_citations"] = [
             {
                 "entry_id": entry["entry_id"],
                 "bearing": "supports",
                 "finding": "The prior entry supports implementation feasibility.",
             },
-            {
-                "entry_id": entry["entry_id"],
-                "bearing": "unresolved",
-                "finding": "The same entry does not resolve causal attribution.",
-            },
         ]
 
         reflected = {
-            "schema_version": 2,
             "status": "COMPLETE",
             "warning": None,
-            "basis": {"strategy_behavior_id": "avoid-errors"},
+            "basis": {
+                "strategy_behavior_id": "avoid-errors",
+                "history_entry_ids": [entry["entry_id"]],
+            },
             "assessment": value,
         }
         validate_reflection(reflected, metric_names=("errors",))
@@ -319,7 +268,7 @@ class ReflectionTests(unittest.TestCase):
                 citation["entry_id"]
                 for citation in reflected["assessment"]["history_citations"]
             ],
-            [entry["entry_id"], entry["entry_id"]],
+            [entry["entry_id"]],
         )
 
     def test_prompt_size_does_not_grow_with_canonical_history(self) -> None:
@@ -338,7 +287,7 @@ class ReflectionTests(unittest.TestCase):
         def builder(worktree, scratch, schema, prompt):
             nonlocal seen_prompt
             seen_prompt = prompt
-            return self.builder(assessment_v4([]))(worktree, scratch, schema, prompt)
+            return self.builder(assessment([]))(worktree, scratch, schema, prompt)
 
         self.reflect(command_builder=builder)
 
@@ -347,7 +296,7 @@ class ReflectionTests(unittest.TestCase):
 
     def test_failure_is_preserved_and_a_later_attempt_can_recover(self) -> None:
         with self.assertRaisesRegex(StateError, "post-trial reflection failed"):
-            self.reflect(command_builder=self.builder(assessment_v4(["errors"] * 6)))
+            self.reflect(command_builder=self.builder(assessment(["errors"] * 6)))
         self.assertTrue(
             (
                 self.experiment
@@ -359,7 +308,7 @@ class ReflectionTests(unittest.TestCase):
         )
 
         recovered = self.reflect(
-            command_builder=self.builder(assessment_v4([]))
+            command_builder=self.builder(assessment([]))
         )
         self.assertEqual(recovered["status"], "COMPLETE")
         self.assertTrue(
@@ -367,7 +316,7 @@ class ReflectionTests(unittest.TestCase):
         )
 
     def test_reflection_must_assess_the_selected_strategy_behavior(self) -> None:
-        value = assessment_v4([])
+        value = assessment([])
         value["strategy_behavior"]["id"] = "different-behavior"
         with self.assertRaisesRegex(StateError, "post-trial reflection failed"):
             self.reflect(command_builder=self.builder(value))

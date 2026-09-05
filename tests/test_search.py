@@ -22,7 +22,6 @@ from .test_manifest import valid_manifest
 
 def request(behavior: str, mechanism: str) -> dict:
     return {
-        "schema_version": 2,
         "strategy_behavior_id": behavior,
         "claim": "The selected policy change improves the score.",
         "mechanism": mechanism,
@@ -64,7 +63,6 @@ class PlanningContractTests(unittest.TestCase):
             "Use four epochs with a fully specified cosine learning-rate schedule.",
         )
         value = {
-            "schema_version": 2,
             "directions": [
                 direction("behavior-a", selected_request),
                 direction("behavior-b", request("behavior-b", "Use an ensemble.")),
@@ -90,7 +88,6 @@ class PlanningContractTests(unittest.TestCase):
             ledger_ids=("entry-000001",),
         )
         value = {
-            "schema_version": 2,
             "directions": [
                 direction("behavior-a", request("behavior-a", "Use an ensemble.")),
                 direction("behavior-b", None),
@@ -118,7 +115,6 @@ class PlanningContractTests(unittest.TestCase):
 
     def test_request_must_belong_to_its_direction(self) -> None:
         value = {
-            "schema_version": 2,
             "directions": [
                 direction("behavior-a", request("behavior-b", "Use an ensemble.")),
                 direction("behavior-b", None),
@@ -136,7 +132,6 @@ class PlanningContractTests(unittest.TestCase):
 
     def test_selection_cannot_reference_an_exhausted_direction(self) -> None:
         value = {
-            "schema_version": 2,
             "directions": [
                 direction("behavior-a", request("behavior-a", "Use an ensemble.")),
                 direction("behavior-b", None),
@@ -154,7 +149,6 @@ class PlanningContractTests(unittest.TestCase):
 
     def test_selection_cannot_reference_an_unknown_direction(self) -> None:
         value = {
-            "schema_version": 2,
             "directions": [
                 direction("behavior-a", request("behavior-a", "Use an ensemble.")),
                 direction("behavior-b", None),
@@ -174,7 +168,6 @@ class PlanningContractTests(unittest.TestCase):
         inconsistent = direction("behavior-a", None)
         inconsistent["disposition"] = "candidate"
         value = {
-            "schema_version": 2,
             "directions": [inconsistent, direction("behavior-b", None)],
             "selection_rationale": "Invalid candidate direction.",
             "selection": None,
@@ -189,7 +182,6 @@ class PlanningContractTests(unittest.TestCase):
 
     def test_null_selection_requires_every_direction_to_be_exhausted(self) -> None:
         value = {
-            "schema_version": 2,
             "directions": [
                 direction("behavior-a", request("behavior-a", "Use an ensemble.")),
                 direction("behavior-b", None),
@@ -259,12 +251,13 @@ class ExplorationCatalogTests(unittest.TestCase):
                         "warning": None,
                         "assessment": {
                             "summary": "The mechanism remains plausible.",
-                            "metric_assessments": {
-                                "errors": {
+                            "material_signals": [
+                                {
+                                    "metric": "errors",
                                     "finding": "supports",
-                                    "rationale": "Errors decreased.",
+                                    "interpretation": "Errors decreased.",
                                 }
-                            },
+                            ],
                         },
                     },
                 },

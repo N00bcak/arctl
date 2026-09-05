@@ -15,7 +15,6 @@ from .storage import atomic_write_json
 ComparisonKind = Literal["primary", "suspect"]
 _SUBJECTS = ("champion", "candidate")
 _FIELDS = {
-    "schema_version",
     "kind",
     "experiment_id",
     "champion",
@@ -23,7 +22,6 @@ _FIELDS = {
     "evaluator",
     "manifest",
     "trial_count",
-    "seed_derivation",
     "master_seed",
     "trial_seeds",
     "schedule_hash",
@@ -79,7 +77,6 @@ class ComparisonReservation:
 
     def to_private_json(self) -> dict[str, Any]:
         return {
-            "schema_version": 1,
             "kind": self.kind,
             "experiment_id": self.experiment_id,
             "champion": self.champion,
@@ -87,7 +84,6 @@ class ComparisonReservation:
             "evaluator": self.evaluator,
             "manifest": self.manifest,
             "trial_count": self.trial_count,
-            "seed_derivation": "arctl-seed-v1",
             "master_seed": self.master_seed.hex(),
             "trial_seeds": list(self.trial_seeds),
             "schedule_hash": self.schedule_hash,
@@ -100,8 +96,6 @@ class ComparisonReservation:
     def from_private_json(cls, value: Any) -> ComparisonReservation:
         if not isinstance(value, Mapping) or set(value) != _FIELDS:
             raise ValidationError("reservation fields are invalid")
-        if value["schema_version"] != 1 or value["seed_derivation"] != "arctl-seed-v1":
-            raise ValidationError("reservation schema or seed derivation is unsupported")
         kind = value["kind"]
         if kind not in ("primary", "suspect"):
             raise ValidationError("reservation kind is invalid")
@@ -230,7 +224,6 @@ def reserve_comparison(
         else list(reversed(_SUBJECTS))
     )
     value = {
-        "schema_version": 1,
         "kind": kind,
         "experiment_id": experiment_id,
         "champion": champion,
@@ -238,7 +231,6 @@ def reserve_comparison(
         "evaluator": evaluator,
         "manifest": manifest,
         "trial_count": trial_count,
-        "seed_derivation": "arctl-seed-v1",
         "master_seed": master.hex(),
         "trial_seeds": seed_list,
         "schedule_hash": _canonical_hash(

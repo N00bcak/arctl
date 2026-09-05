@@ -23,14 +23,15 @@ from .storage import TaskLock, atomic_write_json, atomic_write_text
 
 _TASK_TEMPLATE = """\
 # arctl task: edit the objective, paths, evaluator, and public commands, then approve.
-schema_version: 4
 task_id: {task_id}
 repo: {repo}
 objective: Describe the improvement you want.
 editable_paths: [src/**, tests/**]
 denied_paths: [.git/**, pyproject.toml, uv.lock]
 public_checks: [[python, -m, pytest, -q]]
-public_probe: [python, tools/dev_benchmark.py]
+public_probe:
+  command: [python, tools/dev_benchmark.py]
+  trial_equivalents: 1
 environment:
   codebases:
     - id: environment-core
@@ -43,7 +44,7 @@ evaluator:
   repo: /absolute/path/to/private/evaluator
   commit: REPLACE_WITH_COMMIT
 method:
-  profile: serial-v1
+  profile: serial
   allow_unverified_isolation: false
 trials: auto
 max_experiments: 1000
@@ -105,7 +106,6 @@ def _payload(
     log_path: str | None = None,
 ) -> dict[str, Any]:
     return {
-        "schema_version": 1,
         "success": success,
         "task_id": task_id,
         "experiment_id": None,
@@ -123,9 +123,9 @@ def _payload(
 
 def _result_line(result: dict[str, Any]) -> str:
     from .dossier import safe_terminal_text
-    from .results import normalize_result_statuses
+    from .results import canonical_result
 
-    result = normalize_result_statuses(result)
+    result = canonical_result(result)
     comparisons = result.get("evaluation", {}).get("comparisons", [])
     final = comparisons[-1] if comparisons else {}
     if not final and result.get("failure_detail"):
@@ -222,9 +222,9 @@ def _status_table(payload: dict[str, Any]) -> str:
         rows.append(("Latest experiment", f"Expt #{status['experiment_id']}"))
     latest = status.get("last_result")
     if isinstance(latest, dict):
-        from .results import normalize_result_statuses
+        from .results import canonical_result
 
-        latest = normalize_result_statuses(latest)
+        latest = canonical_result(latest)
         comparisons = latest.get("evaluation", {}).get("comparisons", [])
         final = comparisons[-1] if comparisons else None
         evidence = (
@@ -287,9 +287,9 @@ def _report_table(report: dict[str, Any]) -> str:
 
     rows = []
     for result in report["results"]:
-        from .results import normalize_result_statuses
+        from .results import canonical_result
 
-        result = normalize_result_statuses(result)
+        result = canonical_result(result)
         comparisons = result.get("evaluation", {}).get("comparisons", [])
         final = comparisons[-1] if comparisons else None
         evidence = (
@@ -363,11 +363,11 @@ def _approval_table(payload: dict[str, Any]) -> str:
             "Hidden data",
             safe_terminal_text(summary.get("hidden_data", "Evaluator-private")),
         ),
-        ("Method", safe_terminal_text(summary.get("method", "serial-v1"))),
+        ("Method", safe_terminal_text(summary.get("method", "serial"))),
         ("Models", safe_terminal_text(summary["models"])),
         (
             "Backends",
-            safe_terminal_text(summary.get("backends", "codex-cli-v1 (verified)")),
+            safe_terminal_text(summary.get("backends", "codex-cli (verified)")),
         ),
         ("Environment", safe_terminal_text(summary["environment"])),
         (
@@ -590,7 +590,6 @@ def _emit_human(
             for name, value in readiness.items()
             if name
             not in {
-                "schema_version",
                 "findings",
                 "tree_hashes",
                 "acceptance_token",
@@ -623,7 +622,6 @@ def _emit_human(
             for name, value in readiness.items()
             if name
             not in {
-                "schema_version",
                 "findings",
                 "tree_hashes",
                 "acceptance_token",
@@ -987,7 +985,6 @@ def _doctor() -> dict[str, Any]:
         "runtime": report["runtime"],
         "diagnostics": report["diagnostics"],
     }
-    payload["schema_version"] = 2
     return payload
 
 
@@ -1250,9 +1247,7 @@ def _design_summary(design: Mapping[str, Any]) -> str:
             "Authorization",
             "Package index: "
             + safe_terminal_text(design["dependency_source_policy"]["index"])
-            + "\nController contract: v"
-            + str(design["controller_contract"]["version"])
-            + " "
+            + "\nController contract: "
             + safe_terminal_text(design["controller_contract"]["sha256"][:12]),
         ),
     ]
@@ -1295,12 +1290,9 @@ def _setup(
     if preflight:
         require_doctor()
     directory, record = load_setup(data_root, task_id)
-    if (
-        record.get("schema_version") != 2
-        or record.get("setup_contract") != "conversation-v2"
-    ):
+    if record.get("setup_contract") != "conversation":
         raise StateError(
-            "legacy guided-setup state is not supported; create a fresh workspace with arctl init; "
+            "guided-setup state is invalid; create a fresh workspace with arctl init; "
             f"it was not changed (state: {directory / 'setup.json'})"
         )
     identifier = record["task_id"]
@@ -1516,7 +1508,7 @@ def _setup(
                     artifacts=({"kind": "setup_summary", "path": str(note)},),
                     log_path=str(directory),
                 ),
-                "task": {"schema_version": task.schema_version, "repo": str(task.repo)},
+                "task": {"repo": str(task.repo)},
                 "readiness": readiness,
             }
 
@@ -1647,7 +1639,7 @@ def _approve(
                 "method": (
                     located.config.method.profile
                     if located.config.method is not None
-                    else "serial-v1"
+                    else "serial"
                 ),
                 "models": "; ".join(
                     f"{component.title()}: "

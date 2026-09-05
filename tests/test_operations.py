@@ -63,7 +63,6 @@ class OperationsTests(unittest.TestCase):
             (experiment / "research.failure.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
                         "message": "fresh research session exited unsuccessfully",
                     }
                 )
@@ -81,14 +80,16 @@ class OperationsTests(unittest.TestCase):
             attempt = task_directory / "searches" / "000001" / "attempts" / "01"
             attempt.mkdir(parents=True)
             (attempt / "planning.failure.json").write_text(
-                json.dumps({"schema_version": 1, "message": "planner failed"})
+                json.dumps({"message": "planner failed"})
             )
+            process = attempt / "planning" / "attempts" / "0001" / "process"
+            process.mkdir(parents=True)
             config = TaskConfig.from_mapping(valid_task())
 
             status = task_status(LocatedTask(task_directory, config))
 
             self.assertEqual(status["state"], "PLANNING_FAILED")
-            self.assertEqual(status["log_path"], str(attempt / "planning" / "process"))
+            self.assertEqual(status["log_path"], str(process))
 
     def test_status_distinguishes_preserved_public_check_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -100,7 +101,6 @@ class OperationsTests(unittest.TestCase):
             (experiment / "public-check.failure.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
                         "check": 1,
                         "message": "public-check sandbox did not start its command",
                     }

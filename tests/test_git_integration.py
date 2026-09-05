@@ -243,7 +243,6 @@ class GitIntegrationTests(unittest.TestCase):
         self.assertEqual(
             json.loads(audit.read_text(encoding="utf-8")),
             {
-                "schema_version": 1,
                 "events": [
                     {
                         "stage": "candidate-staging",

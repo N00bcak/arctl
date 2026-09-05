@@ -62,7 +62,6 @@ _STATES = {
     "COMPLETE",
 }
 _FIELDS = {
-    "schema_version",
     "experiment_id",
     "state",
     "champion",
@@ -100,7 +99,6 @@ class ExperimentRecord:
 
     def to_json(self) -> dict[str, Any]:
         return {
-            "schema_version": 1,
             "experiment_id": self.experiment_id,
             "state": self.state,
             "champion": self.champion,
@@ -124,8 +122,7 @@ class ExperimentRecord:
         checks = value["public_checks_passed"]
         decision_value = value["decision"]
         if (
-            value["schema_version"] != 1
-            or not isinstance(champion, str)
+            not isinstance(champion, str)
             or not champion
             or (candidate is not None and (not isinstance(candidate, str) or not candidate))
             or (checks is not None and not isinstance(checks, bool))
@@ -339,7 +336,6 @@ def run_public_checks(
             write_json_once(
                 failure,
                 {
-                    "schema_version": 1,
                     "check": index,
                     "message": "public check was stopped before completion",
                 },
@@ -350,7 +346,6 @@ def run_public_checks(
                 write_json_once(
                     failure,
                     {
-                        "schema_version": 1,
                         "check": index,
                         "message": "public-check sandbox did not start its command",
                     },
@@ -368,7 +363,6 @@ def run_public_checks(
                 write_json_once(
                     failure,
                     {
-                        "schema_version": 1,
                         "check": index,
                         "message": transient.detail,
                     },
@@ -381,7 +375,6 @@ def run_public_checks(
                 write_json_once(
                     failure,
                     {
-                        "schema_version": 1,
                         "check": index,
                         "message": "public-check sandbox did not start its command",
                     },
@@ -396,7 +389,6 @@ def run_public_checks(
                 write_json_once(
                     failure,
                     {
-                        "schema_version": 1,
                         "check": index,
                         "message": transient.detail,
                     },

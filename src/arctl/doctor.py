@@ -255,7 +255,6 @@ def run_doctor() -> dict[str, Any]:
         ):
             diagnostics[name] = "not run because a required prerequisite failed"
         return {
-            "schema_version": 2,
             "runtime": {
                 "system": system,
                 "architecture": platform.machine(),
@@ -357,7 +356,6 @@ def run_doctor() -> dict[str, Any]:
                 "managed process timeout did not clean up its descendant",
             )
     return {
-        "schema_version": 2,
         "runtime": {
             "system": system,
             "architecture": platform.machine(),

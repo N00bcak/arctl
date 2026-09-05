@@ -94,7 +94,6 @@ def _validated_response(
     ceiling: int,
 ) -> int:
     fields = {
-        "schema_version",
         "operation",
         "champion",
         "evaluator",
@@ -107,7 +106,6 @@ def _validated_response(
     count = response.get("recommended_trial_count")
     if (
         set(response) != fields
-        or response.get("schema_version") != 1
         or response.get("operation") != "calibrate"
         or response.get("champion") != request["champion"]
         or response.get("evaluator") != evaluator_commit
@@ -204,7 +202,6 @@ def _pilot_selection(
     manifest_hash: str,
 ) -> tuple[int, dict[str, Any]]:
     expected = {
-        "schema_version",
         "operation",
         "champion",
         "evaluator",
@@ -214,7 +211,6 @@ def _pilot_selection(
     }
     if (
         set(response) != expected
-        or response["schema_version"] != 2
         or response["operation"] != "calibrate"
         or response["champion"] != request["champion"]
         or response["evaluator"] != evaluator_commit
@@ -313,13 +309,11 @@ def _calibrate_controller_pilot(
     else:
         master = _calibration_master(task_directory, calibration.ceiling)
         reservation = {
-            "schema_version": 2,
             "operation": "calibrate",
             "champion": champion,
             "evaluator": evaluator_commit,
             "manifest": manifest_hash,
             "policy": calibration.policy,
-            "seed_derivation": "arctl-seed-v1",
             "master_seed": master.hex(),
             "trial_seeds": [
                 derive_seed(
@@ -340,13 +334,11 @@ def _calibrate_controller_pilot(
         }
         write_json_once(reservation_path, reservation)
     expected_fields = {
-        "schema_version",
         "operation",
         "champion",
         "evaluator",
         "manifest",
         "policy",
-        "seed_derivation",
         "master_seed",
         "trial_seeds",
         "ladder",
@@ -368,13 +360,11 @@ def _calibrate_controller_pilot(
     ]
     if (
         set(reservation) != expected_fields
-        or reservation["schema_version"] != 2
         or reservation["operation"] != "calibrate"
         or reservation["champion"] != champion
         or reservation["evaluator"] != evaluator_commit
         or reservation["manifest"] != manifest_hash
         or reservation["policy"] != calibration.policy
-        or reservation["seed_derivation"] != "arctl-seed-v1"
         or len(master) != 32
         or reservation["trial_seeds"] != expected_seeds
         or reservation["ladder"] != list(calibration.ladder)
@@ -415,7 +405,6 @@ def _calibrate_controller_pilot(
     write_json_once(
         prepare_request,
         {
-            "schema_version": 1,
             "operation": "prepare",
             "kind": "calibration",
             "experiment_id": 0,
@@ -501,7 +490,6 @@ def _calibrate_controller_pilot(
             **{
                 key: reservation[key]
                 for key in (
-                    "schema_version",
                     "operation",
                     "champion",
                     "evaluator",
@@ -622,13 +610,11 @@ def calibrate_trial_count(
     else:
         master = _calibration_master(task_directory, ceiling)
         request = {
-            "schema_version": 1,
             "operation": "calibrate",
             "champion": champion,
             "evaluator": evaluator_commit,
             "manifest": manifest_hash,
             "policy": policy,
-            "seed_derivation": "arctl-seed-v1",
             "master_seed": master.hex(),
             "trial_seeds": [
                 derive_seed(
@@ -644,13 +630,11 @@ def calibrate_trial_count(
         }
         write_json_once(request_path, request)
     expected_request_fields = {
-        "schema_version",
         "operation",
         "champion",
         "evaluator",
         "manifest",
         "policy",
-        "seed_derivation",
         "master_seed",
         "trial_seeds",
         "ceiling",
@@ -673,13 +657,11 @@ def calibrate_trial_count(
     ]
     if (
         set(request) != expected_request_fields
-        or request["schema_version"] != 1
         or request["operation"] != "calibrate"
         or request["champion"] != champion
         or request["evaluator"] != evaluator_commit
         or request["manifest"] != manifest_hash
         or request["policy"] != policy
-        or request["seed_derivation"] != "arctl-seed-v1"
         or request["ceiling"] != ceiling
         or not isinstance(request["trial_seeds"], list)
         or request["trial_seeds"] != expected_seeds

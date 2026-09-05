@@ -20,7 +20,7 @@ from arctl.models import CandidateReviewConfig, TaskConfig
 from arctl.operations import inspect_experiment, task_report, task_status
 from arctl.registry import LocatedTask
 from arctl.runner import (
-    _compatibility_strategy_command,
+    _injected_strategy_command,
     _default_research_command,
     _run_compute_probe,
     _run_implementation,
@@ -75,6 +75,13 @@ class RunnerIntegrationTests(unittest.TestCase):
         task_file = self.task_directory / "task.yaml"
         task_file.write_text("approved test task\n")
         raw = valid_task()
+        raw["environment"]["codebases"][0].update(
+            {
+                "repo": str(self.subject),
+                "commit": self.original_champion,
+                "include": ["ENVIRONMENT.md"],
+            }
+        )
         raw.update(
             {
                 "repo": str(self.subject),
@@ -118,7 +125,6 @@ class RunnerIntegrationTests(unittest.TestCase):
         with mock.patch(
             "arctl.runner.run_or_load_once",
             return_value={
-                "schema_version": 2,
                 "return_code": 0,
                 "stdout_bytes": 0,
                 "stderr_bytes": 0,
@@ -136,7 +142,6 @@ class RunnerIntegrationTests(unittest.TestCase):
             )
 
         self.assertEqual(report["risk"], "likely_over_budget")
-        self.assertEqual(report["schema_version"], 2)
         self.assertEqual(report["command"], list(task.config.public_probe))
         self.assertEqual(
             report["measurement_basis"], "declared_paired_trial_equivalents"
@@ -172,7 +177,6 @@ class RunnerIntegrationTests(unittest.TestCase):
             )
 
         run.assert_not_called()
-        self.assertEqual(report["schema_version"], 2)
         self.assertEqual(report["status"], "unavailable")
         self.assertEqual(report["risk"], "unavailable")
         self.assertIsNone(report["projected_seconds"])
@@ -201,6 +205,13 @@ class RunnerIntegrationTests(unittest.TestCase):
         task_file = directory / "task.yaml"
         task_file.write_text("approved unlimited task\n")
         raw = valid_task()
+        raw["environment"]["codebases"][0].update(
+            {
+                "repo": str(self.subject),
+                "commit": self.original_champion,
+                "include": ["ENVIRONMENT.md"],
+            }
+        )
         raw.update(
             {
                 "task_id": "unlimited",
@@ -247,7 +258,6 @@ worktree, scratch = map(Path, sys.argv[1:])
 subject = worktree / "subject.py"
 subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
 (scratch / "request.public.json").write_text(json.dumps({
-    "schema_version": 2,
     "strategy_behavior_id": "environment-compatible",
     "claim": "Add one point to each valid result.",
     "mechanism": "Increase the subject score by one.",
@@ -284,7 +294,6 @@ from pathlib import Path
 worktree, scratch = map(Path, sys.argv[1:])
 assert "+ 0" in (worktree / "subject.py").read_text()
 request = {
-    "schema_version": 2,
     "strategy_behavior_id": "environment-compatible",
     "claim": "Add one point to each valid result.",
     "mechanism": "Increase the subject score by one.",
@@ -296,7 +305,6 @@ request = {
     "lineage": {"kind": "new", "prior_entry_id": None},
 }
 (scratch / "planning.public.json").write_text(json.dumps({
-    "schema_version": 2,
     "directions": [{
         "strategy_behavior_id": "environment-compatible",
         "champion_assessment": "The baseline is environment compatible.",
@@ -328,10 +336,23 @@ worktree, scratch = map(Path, sys.argv[1:])
 subject = worktree / "subject.py"
 subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
 (scratch / "implementation.public.json").write_text(json.dumps({
-    "schema_version": 1,
     "status": "implemented",
     "summary": "Implemented the frozen one-point mechanism.",
     "deviations": [],
+    "requirements": [{
+        "id": "score-offset",
+        "requirement": "Increase the subject score by one.",
+        "status": "verified",
+        "evidence": "The source offset is one and the syntax check passes.",
+        "verification_ids": ["syntax-check"],
+    }],
+    "verifications": [{
+        "id": "syntax-check",
+        "purpose": "Validate the edited subject syntax.",
+        "command": "python3 -c import-ast-subject",
+        "outcome": "passed",
+        "evidence": "The public syntax check exits successfully.",
+    }],
 }))
 """
         return ("python3", "-c", script, str(worktree), str(scratch))
@@ -361,7 +382,6 @@ subject.write_text(subject.read_text().replace("+ 0", "+ 1"))
                 / "implementation-origin.public.json"
             ).read_text()
         )
-        self.assertEqual(origin["schema_version"], 1)
         self.assertEqual(
             origin["transcript"],
             "searches/000001/attempts/01/implementation/attempts/0001/process/stdout.bin",
@@ -386,10 +406,23 @@ subprocess.run(
     check=True,
 )
 (scratch / "implementation.public.json").write_text(json.dumps({
-    "schema_version": 1,
     "status": "implemented",
     "summary": "Implemented and probed the frozen mechanism.",
     "deviations": [],
+    "requirements": [{
+        "id": "score-offset",
+        "requirement": "Increase the subject score by one.",
+        "status": "verified",
+        "evidence": "The edited module compiled successfully.",
+        "verification_ids": ["compile-subject"],
+    }],
+    "verifications": [{
+        "id": "compile-subject",
+        "purpose": "Compile the edited subject module.",
+        "command": "python3 -I -m py_compile subject.py",
+        "outcome": "passed",
+        "evidence": "The compiler exited successfully.",
+    }],
 }))
 """
             return ("python3", "-c", script, str(worktree), str(scratch))
@@ -409,7 +442,6 @@ subprocess.run(
         audit = json.loads(
             (attempts / "01" / "runtime-artifacts.public.json").read_text()
         )
-        self.assertEqual(audit["schema_version"], 1)
         self.assertEqual(len(audit["events"]), 1)
         self.assertEqual(audit["events"][0]["stage"], "implementation")
         self.assertRegex(
@@ -440,7 +472,6 @@ import json, sys
 from pathlib import Path
 scratch = Path(sys.argv[1])
 (scratch / "planning.public.json").write_text(json.dumps({
-    "schema_version": 2,
     "directions": [{
         "strategy_behavior_id": "environment-compatible",
         "champion_assessment": "The champion already expresses this behavior.",
@@ -466,13 +497,12 @@ import json, sys
 from pathlib import Path
 scratch = Path(sys.argv[1])
 (scratch / "strategy.public.json").write_text(json.dumps({
-    "schema_version": 2,
     "environment_observations": [{
         "id": "environment-baseline",
         "claim": "The environment supports observable actions.",
         "status": "inferred",
         "evidence": [{
-            "source_id": "public-environment",
+            "source_id": "environment-core",
             "location": "refreshed analysis",
             "finding": "Observable actions remain available.",
         }],
@@ -488,7 +518,7 @@ scratch = Path(sys.argv[1])
 }))
 """
                 return ("python3", "-c", script, str(scratch))
-            return _compatibility_strategy_command(worktree, scratch, schema, prompt)
+            return _injected_strategy_command(worktree, scratch, schema, prompt)
 
         outcome = run_task(
             self.task,
@@ -522,8 +552,6 @@ import json, sys
 from pathlib import Path
 scratch = Path(sys.argv[1])
 (scratch / 'review.public.json').write_text(json.dumps({
-    'schema_version': 1,
-    'verdict': 'pass',
     'summary': 'The candidate uses only the declared interface.',
     'findings': [],
 }))
@@ -696,7 +724,6 @@ scratch = Path(sys.argv[1])
         failure.write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
                     "experiment_id": 7,
                     "phase": "planning",
                     "reason": "experiment bytecode cache manifest is invalid",
@@ -712,7 +739,6 @@ scratch = Path(sys.argv[1])
         self.assertEqual(
             status["mini_gc_failure"],
             {
-                "schema_version": 1,
                 "experiment_id": 7,
                 "phase": "planning",
                 "reason": "experiment bytecode cache manifest is invalid",
@@ -744,8 +770,6 @@ import json, sys
 from pathlib import Path
 scratch = Path(sys.argv[1])
 (scratch / 'review.public.json').write_text(json.dumps({
-    'schema_version': 1,
-    'verdict': 'pass',
     'summary': 'The candidate uses only the declared interface.',
     'findings': [],
 }))
@@ -868,7 +892,7 @@ scratch = Path(sys.argv[1])
             attempt = arguments["experiment"] / "reflection" / "attempts" / "0001"
             attempt.mkdir(parents=True)
             (attempt / "reflection.failure.json").write_text(
-                json.dumps({"schema_version": 1, "message": "backend failed"})
+                json.dumps({"message": "backend failed"})
             )
             raise StateError("reflection backend failed")
 
@@ -931,7 +955,7 @@ scratch = Path(sys.argv[1])
 
         def strategy(worktree, scratch, schema, prompt):
             strategy_calls.append(prompt)
-            return _compatibility_strategy_command(worktree, scratch, schema, prompt)
+            return _injected_strategy_command(worktree, scratch, schema, prompt)
 
         outcome = run_task(
             self.task,
@@ -998,7 +1022,6 @@ scratch = Path(sys.argv[1])
             (scratch / "request.public.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": 2,
                         "strategy_behavior_id": "environment-compatible",
                         "claim": "Use the approved public runtime.",
                         "mechanism": "Run public development tools.",
@@ -1064,7 +1087,7 @@ scratch = Path(sys.argv[1])
             script = (
                 "import json,pathlib,sys;"
                 "pathlib.Path(sys.argv[1]).write_text(json.dumps({"
-                "'schema_version':3,'status':'implemented','summary':'done',"
+                "'status':'implemented','summary':'done',"
                 "'deviations':[],'requirements':[{'id':'runtime-path',"
                 "'requirement':'use runtime','status':'verified',"
                 "'evidence':'policy.py:1','verification_ids':['probe-runtime']}],"
@@ -1102,32 +1125,35 @@ scratch = Path(sys.argv[1])
 
         self.assertEqual(captured["read_paths"], (runtime,))
         self.assertEqual(captured["model"], "gpt-5.6-terra")
-        self.assertEqual(captured["schema"]["properties"]["schema_version"]["const"], 3)
+        self.assertNotIn("schema" + "_version", captured["schema"]["properties"])
         self.assertIn("sentence by sentence", captured["prompt"])
         self.assertIn("exact command", captured["prompt"])
         self.assertIn(manifest.subject_interface, captured["prompt"])
 
     def test_implemented_report_requires_every_requirement_verified(self) -> None:
-        with self.assertRaisesRegex(ValidationError, "unverified requirements"):
+        with self.assertRaisesRegex(
+            ValidationError, "has no verification records"
+        ):
             _validate_implementation_report(
                 {
-                    "schema_version": 2,
                     "status": "implemented",
                     "summary": "Claimed complete.",
                     "deviations": [],
                     "requirements": [
                         {
+                            "id": "transition",
                             "requirement": "Validate transitions.",
                             "status": "unverified",
                             "evidence": "No targeted probe exists.",
+                            "verification_ids": [],
                         }
                     ],
+                    "verifications": [],
                 }
             )
 
-    def test_v3_implementation_report_rejects_invalid_verification_links(self) -> None:
+    def test_implementation_report_rejects_invalid_verification_links(self) -> None:
         report = {
-            "schema_version": 3,
             "status": "implemented",
             "summary": "Implemented and checked.",
             "deviations": [],
@@ -1171,30 +1197,6 @@ scratch = Path(sys.argv[1])
         dangling["requirements"][0]["verification_ids"] = ["missing-probe"]
         with self.assertRaisesRegex(ValidationError, "unknown verification"):
             _validate_implementation_report(dangling)
-
-    def test_historical_v1_and_v2_implementation_reports_remain_readable(self) -> None:
-        for report in (
-            {
-                "schema_version": 1,
-                "status": "implemented",
-                "summary": "Historical implementation.",
-                "deviations": [],
-            },
-            {
-                "schema_version": 2,
-                "status": "implemented",
-                "summary": "Historical audited implementation.",
-                "deviations": [],
-                "requirements": [
-                    {
-                        "requirement": "Preserve behavior.",
-                        "status": "verified",
-                        "evidence": "Historical prose evidence.",
-                    }
-                ],
-            },
-        ):
-            self.assertEqual(_validate_implementation_report(report), report)
 
     def test_resumes_finalizing_experiment_without_research_or_evaluation_reruns(
         self,
@@ -1262,6 +1264,13 @@ scratch = Path(sys.argv[1])
         task_file = auto_directory / "task.yaml"
         task_file.write_text("approved automatic test task\n")
         raw = valid_task()
+        raw["environment"]["codebases"][0].update(
+            {
+                "repo": str(self.subject),
+                "commit": self.original_champion,
+                "include": ["ENVIRONMENT.md"],
+            }
+        )
         raw.update(
             {
                 "task_id": "auto",
@@ -1369,6 +1378,13 @@ scratch = Path(sys.argv[1])
         task_file = task_directory / "task.yaml"
         task_file.write_text("approved suspect test task\n")
         raw = valid_task()
+        raw["environment"]["codebases"][0].update(
+            {
+                "repo": str(self.subject),
+                "commit": self.original_champion,
+                "include": ["ENVIRONMENT.md"],
+            }
+        )
         raw.update(
             {
                 "task_id": "suspect",

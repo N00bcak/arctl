@@ -51,7 +51,6 @@ def operational_assessment(
     if reason_code == "candidate_timeout":
         action = "optimize_implementation"
     return {
-        "schema_version": 1,
         "summary": summary,
         "scientific_interpretation": (
             "The approved comparison protocol did not complete; the mechanism remains untested."
@@ -60,27 +59,9 @@ def operational_assessment(
     }
 
 
-def normalize_result_statuses(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Add derived axes to a legacy public result without mutating its artifact."""
-    normalized = dict(value)
-    if "operational_status" in normalized:
-        return normalized
-    failure = normalized.get("failure")
-    tests_failed = normalized.get("constraints", {}).get("tests") == "FAIL"
-    if failure == "candidate_execution" or tests_failed:
-        status = "candidate_failed"
-    elif failure == "system_execution":
-        status = "system_failed"
-    else:
-        status = "completed"
-    comparisons = normalized.get("evaluation", {}).get("comparisons", [])
-    operational, scientific = result_statuses(comparisons, operational_status=status)
-    normalized.update(
-        operational_status=operational,
-        scientific_status=scientific,
-        reason_code=("legacy_failure" if status != "completed" else "none"),
-    )
-    return normalized
+def canonical_result(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a copy of a canonical public result."""
+    return dict(value)
 
 
 @dataclass(frozen=True)
@@ -250,12 +231,10 @@ def validate_public_result(
         if (
             not isinstance(assessment, Mapping)
             or set(assessment) != {
-                "schema_version",
                 "summary",
                 "scientific_interpretation",
                 "next_action",
             }
-            or assessment["schema_version"] != 1
             or any(
                 not isinstance(assessment[name], str) or not assessment[name]
                 for name in ("summary", "scientific_interpretation", "next_action")

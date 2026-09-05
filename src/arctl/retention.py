@@ -21,7 +21,7 @@ from .process import read_valid_result, read_valid_started, recorded_process_is_
 from .storage import atomic_write_bytes, atomic_write_json
 from .taskio import load_task
 
-_GC_SCHEMA_VERSION = 1
+_GC_SCHEMA_DOMAIN = 1
 _MINI_GC_FAILURE = Path(".gc/mini-gc-failure.json")
 _ROOT_CANONICAL = frozenset(
     {
@@ -51,7 +51,6 @@ def _record_mini_gc_failure(
     atomic_write_json(
         task / _MINI_GC_FAILURE,
         {
-            "schema_version": 1,
             "experiment_id": experiment_id,
             "phase": phase,
             "reason": reason,
@@ -269,7 +268,7 @@ def canonical_snapshot(
             entry["sha256"] = _sha256(os.readlink(path).encode())
         entries.append(entry)
     _add_container_hashes(entries)
-    return {"schema_version": 1, "entries": entries, "sha256": _sha256(_json_bytes(entries))}
+    return {"entries": entries, "sha256": _sha256(_json_bytes(entries))}
 
 
 def experiment_canonical_snapshot(
@@ -311,7 +310,6 @@ def experiment_canonical_snapshot(
         entries.append(entry)
     _add_container_hashes(entries)
     return {
-        "schema_version": 1,
         "entries": entries,
         "sha256": _sha256(_json_bytes(entries)),
     }
@@ -705,8 +703,7 @@ def _provenance_material(
     resolver = readiness.get("dependency_resolution")
     if (
         not isinstance(resolver, Mapping)
-        or set(resolver) != {"schema_version", "name", "version", "index", "options"}
-        or resolver.get("schema_version") != 1
+        or set(resolver) != {"name", "version", "index", "options"}
         or resolver.get("name") != "uv"
         or not isinstance(resolver.get("version"), str)
         or not resolver["version"]
@@ -719,7 +716,6 @@ def _provenance_material(
         raise StateError("setup dependency resolver provenance is missing or contradictory")
     files = {"pyproject.toml": project.read_bytes(), "uv.lock": lock.read_bytes()}
     manifest = {
-        "schema_version": 2,
         "reconstruction_strength": "dependency-lock",
         "claim": (
             "Retained inputs support dependency-resolution reconstruction and provenance "
@@ -1145,7 +1141,6 @@ def _experiment_cache_actions(
     except (OSError, json.JSONDecodeError) as error:
         raise StateError("experiment bytecode cache manifest is invalid") from error
     expected_fields = {
-        "schema_version",
         "experiment_id",
         "request_sha256",
         "approval_sha256",
@@ -1156,7 +1151,6 @@ def _experiment_cache_actions(
     if (
         not isinstance(manifest, Mapping)
         or set(manifest) != expected_fields
-        or manifest.get("schema_version") != 1
         or manifest.get("experiment_id") != int(experiment.name)
     ):
         raise StateError("experiment bytecode cache manifest is invalid")
@@ -1317,7 +1311,6 @@ def build_gc_plan(task_directory: Path) -> dict[str, Any]:
         exclude_exact=mutable_directories,
     )
     core = {
-        "schema_version": _GC_SCHEMA_VERSION,
         "task_id": task.name,
         "canonical_snapshot": snapshot,
         "future_canonical_outputs": sorted(future_outputs),
@@ -1387,7 +1380,6 @@ def build_experiment_gc_plan(
         exclude_exact=mutable_directories,
     )
     core = {
-        "schema_version": _GC_SCHEMA_VERSION,
         "task_id": task.name,
         "scope": {"kind": "experiment", "id": experiment.name},
         "canonical_snapshot": snapshot,
@@ -1585,7 +1577,7 @@ def _execute_plan(task: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
         journal["execution"] = execution
     else:
         execution = {action["action_id"]: action["initial_status"] for action in plan["actions"]}
-        journal = {"schema_version": 1, "plan": plan, "execution": execution}
+        journal = {"plan": plan, "execution": execution}
         _save_journal(journal_path, journal)
     action_by_id = {action["action_id"]: action for action in plan["actions"]}
     failed = False
@@ -1666,7 +1658,6 @@ def _execute_plan(task: Path, plan: Mapping[str, Any]) -> dict[str, Any]:
         if action["type"] == "remove_quarantined_root" and execution[action["action_id"]] == "removed"
     }
     summary = {
-        "schema_version": 1,
         "plan_hash": plan["plan_hash"],
         "scope": plan.get("scope", {"kind": "task"}),
         "reclaimed_bytes": sum(
@@ -1882,7 +1873,6 @@ def _present(
         if item["initial_status"] != "blocked"
     )
     return {
-        "schema_version": 1,
         "task_id": plan["task_id"],
         "scope": plan.get("scope", {"kind": "task"}),
         "dry_run": dry_run,

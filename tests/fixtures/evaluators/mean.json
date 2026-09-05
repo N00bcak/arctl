@@ -1,5 +1,4 @@
 {
-  "schema_version": 1,
   "subject_command": ["python3", "subject.py", "{input}", "{output}"],
   "prepare_command": ["python3", "evaluator.py", "{request}", "{response}"],
   "calibrate_command": null,
@@ -17,7 +16,7 @@
   "public": {
     "statistic": "paired arithmetic-mean score difference",
     "subject_interface": "One numeric result per independent case.",
-    "telemetry": []
+    "telemetry": {}
   },
   "trial": {
     "meaning": "one independently generated case",
@@ -35,5 +34,12 @@
     "mitigations": ["identical paired cases"]
   },
   "suspect_test": {"trigger": null, "reason_codes": []},
-  "calibration": {"supported": false, "policy": null, "ceiling": null}
+  "setup_contract": {
+    "environment_adapter": {"entrypoint": "fixture:Environment", "interface": "Python callable"},
+    "outcome": {"direction": "higher", "unit": "score", "aggregation": "paired arithmetic mean", "extraction": "subject result score"},
+    "trial": {"termination": "case completion", "horizon_unit": "actions"},
+    "hard_rules": ["Keep the environment fixed."],
+    "runtime_limits": ["60 seconds per process"]
+  },
+  "calibration": {"supported": false, "policy": null, "ladder": null, "diagnostic": null}
 }

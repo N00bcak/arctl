@@ -231,8 +231,6 @@ def _snapshot_hashes(task_directory: Path, task: TaskConfig) -> dict[str, str]:
 
 
 def preview_approval(task_file: Path, task: TaskConfig) -> ApprovalPreview:
-    if task.schema_version not in (3, 4, 5):
-        raise ValidationError("task must use schema v3, v4, or v5")
     target = task.repo.resolve()
     evaluator = task.evaluator.repo.resolve()
     if evaluator == target or target in evaluator.parents or evaluator in target.parents:
@@ -249,8 +247,6 @@ def preview_approval(task_file: Path, task: TaskConfig) -> ApprovalPreview:
     if not isinstance(value, dict):
         raise ValidationError("approved evaluator manifest must contain one object")
     manifest = EvaluatorManifest.from_mapping(value)
-    if manifest.schema_version not in (3, 4):
-        raise ValidationError("new tasks require a manifest-v3 or manifest-v4 contract")
     if manifest.subject_visible_seed:
         raise ValidationError("new tasks require evaluator-hidden trial seeds")
     manifest.validate_trial_setting(task.trials)
@@ -270,8 +266,6 @@ def preview_approval(task_file: Path, task: TaskConfig) -> ApprovalPreview:
                 backend_attestations, sort_keys=True, separators=(",", ":")
             ).encode()
         ).hexdigest()
-        if task.schema_version >= 4
-        else None
     )
     method_hash = (
         hashlib.sha256(
@@ -289,7 +283,7 @@ def preview_approval(task_file: Path, task: TaskConfig) -> ApprovalPreview:
     token = hashlib.sha256(
         b"\0".join(
             (
-                b"arctl-approval-v2",
+                b"arctl-approval",
                 task_hash.encode(),
                 commit.encode(),
                 manifest_hash.encode(),
@@ -335,13 +329,12 @@ def confirm_approval(
     )
     atomic_write_text(task_directory / "evaluator.commit", preview.evaluator_commit + "\n")
     atomic_write_bytes(task_directory / "evaluator.manifest.json", raw_manifest)
-    if task.schema_version >= 4:
-        assert task.method is not None
-        atomic_write_json(task_directory / "method.lock.json", task.method.to_lock())
-        atomic_write_json(
-            task_directory / "backend-approval.json", preview.backend_attestations
-        )
-        _materialize_environment_references(task_directory, task)
+    assert task.method is not None
+    atomic_write_json(task_directory / "method.lock.json", task.method.to_lock())
+    atomic_write_json(
+        task_directory / "backend-approval.json", preview.backend_attestations
+    )
+    _materialize_environment_references(task_directory, task)
 
     champion_ref = f"refs/arctl/{task.task_id}/champion"
     ensure_clean_worktree(task.repo)
@@ -374,23 +367,19 @@ def confirm_approval(
 
     freeze_fixed_trial_count(task_directory, task)
     record = {
-        "schema_version": 3 if task.schema_version >= 4 else 2,
         "task_sha256": preview.task_hash,
         "evaluator_commit": preview.evaluator_commit,
         "manifest_sha256": preview.manifest_hash,
         "champion": champion,
         "environment_sha256": dict(preview.environment_hashes),
     }
-    if task.schema_version >= 4:
-        record["method_sha256"] = preview.method_hash
-        record["backend_approval_sha256"] = preview.backend_hash
+    record["method_sha256"] = preview.method_hash
+    record["backend_approval_sha256"] = preview.backend_hash
     atomic_write_json(approval_path, record)
     os.chmod(task_directory / "task.yaml", 0o444)
 
 
 def verify_approval(task_directory: Path, task: TaskConfig) -> dict[str, str]:
-    if task.schema_version not in (3, 4, 5):
-        raise StateError("task must use schema v3, v4, or v5")
     try:
         approval = json.loads((task_directory / "approval.json").read_text())
         task_hash = hashlib.sha256((task_directory / "task.yaml").read_bytes()).hexdigest()
@@ -401,29 +390,22 @@ def verify_approval(task_directory: Path, task: TaskConfig) -> dict[str, str]:
     except (OSError, json.JSONDecodeError) as error:
         raise StateError("task approval is incomplete or unreadable") from error
     expected_fields = {
-        "schema_version",
         "task_sha256",
         "evaluator_commit",
         "manifest_sha256",
         "champion",
         "environment_sha256",
     }
-    if task.schema_version >= 4:
-        expected_fields.add("method_sha256")
-        expected_fields.add("backend_approval_sha256")
+    expected_fields.add("method_sha256")
+    expected_fields.add("backend_approval_sha256")
     if not isinstance(approval, dict) or set(approval) != expected_fields:
         raise StateError("task approval record is invalid")
     try:
-        environment_hashes = (
-            _snapshot_hashes(task_directory, task)
-            if task.schema_version >= 4
-            else environment_source_hashes(task, task_directory=task_directory)
-        )
+        environment_hashes = _snapshot_hashes(task_directory, task)
     except (OSError, ValidationError) as error:
         raise StateError("approved environment sources are invalid") from error
     if (
-        approval["schema_version"] != (3 if task.schema_version >= 4 else 2)
-        or approval["task_sha256"] != task_hash
+        approval["task_sha256"] != task_hash
         or approval["manifest_sha256"] != manifest_hash
         or approval["evaluator_commit"] != evaluator_commit
         or evaluator_commit != resolve_commit(task.evaluator.repo, task.evaluator.commit)
@@ -431,32 +413,31 @@ def verify_approval(task_directory: Path, task: TaskConfig) -> dict[str, str]:
         != environment_hashes
     ):
         raise StateError("approved task or evaluator artifacts changed")
-    if task.schema_version >= 4:
-        assert task.method is not None
-        try:
-            method_bytes = (task_directory / "method.lock.json").read_bytes()
-            locked_method = json.loads(method_bytes)
-        except (OSError, json.JSONDecodeError) as error:
-            raise StateError("approved method lock is incomplete or unreadable") from error
-        expected_method = task.method.to_lock()
-        method_hash = hashlib.sha256(
-            json.dumps(expected_method, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-        if locked_method != expected_method or approval["method_sha256"] != method_hash:
-            raise StateError("approved research method changed")
-        try:
-            backend_bytes = (task_directory / "backend-approval.json").read_bytes()
-            json.loads(backend_bytes)
-        except (OSError, json.JSONDecodeError) as error:
-            raise StateError("backend approval snapshot is incomplete") from error
-        if hashlib.sha256(backend_bytes.rstrip(b"\n")).hexdigest() != approval[
-            "backend_approval_sha256"
-        ]:
-            raise StateError("backend approval snapshot changed")
-        try:
-            validate_method_backends(task.method)
-        except ValidationError as error:
-            raise StateError(f"agent backend preflight failed: {error}") from error
+    assert task.method is not None
+    try:
+        method_bytes = (task_directory / "method.lock.json").read_bytes()
+        locked_method = json.loads(method_bytes)
+    except (OSError, json.JSONDecodeError) as error:
+        raise StateError("approved method lock is incomplete or unreadable") from error
+    expected_method = task.method.to_lock()
+    method_hash = hashlib.sha256(
+        json.dumps(expected_method, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if locked_method != expected_method or approval["method_sha256"] != method_hash:
+        raise StateError("approved research method changed")
+    try:
+        backend_bytes = (task_directory / "backend-approval.json").read_bytes()
+        json.loads(backend_bytes)
+    except (OSError, json.JSONDecodeError) as error:
+        raise StateError("backend approval snapshot is incomplete") from error
+    if hashlib.sha256(backend_bytes.rstrip(b"\n")).hexdigest() != approval[
+        "backend_approval_sha256"
+    ]:
+        raise StateError("backend approval snapshot changed")
+    try:
+        validate_method_backends(task.method)
+    except ValidationError as error:
+        raise StateError(f"agent backend preflight failed: {error}") from error
     champion_ref = f"refs/arctl/{task.task_id}/champion"
     if task.trials != "auto":
         load_trial_count(task_directory, task)

@@ -97,14 +97,14 @@ def _implementation_document(
         requirements = report.get("requirements", [])
         lines.extend(
             [
-                f"- **{safe_text(item.get('id', 'historical'))} — "
+                f"- **{safe_text(item.get('id', 'unknown'))} — "
                 f"{safe_text(item.get('status', 'unknown'))}:** "
                 f"{safe_text(item.get('requirement', ''))} "
                 f"Evidence: {safe_text(item.get('evidence', ''))}"
                 for item in requirements
                 if isinstance(item, Mapping)
             ]
-            or ["- Structured requirement audit was unavailable for this historical report."]
+            or ["- No requirements were reported."]
         )
         lines.extend(["", "### Targeted verification", ""])
         verifications = report.get("verifications", [])
@@ -129,7 +129,7 @@ def _implementation_document(
         else:
             lines.extend(
                 [
-                    "Structured replay information was unavailable for this historical report.",
+                    "No targeted verification was reported.",
                     "",
                 ]
             )
@@ -174,7 +174,7 @@ def _telemetry_lines(telemetry: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _v4_reflection_document(
+def _reflection_document(
     identifier: int, assessment: Mapping[str, Any], dossier_note: str
 ) -> str:
     lines = [
@@ -548,88 +548,9 @@ def _documents(
         )
     else:
         assessment = reflection.get("assessment", {})
-        if assessment.get("schema_version") == 4:
-            reflection_document = _v4_reflection_document(
-                identifier, assessment, dossier_note
-            )
-        else:
-            metric_assessments = assessment.get("metric_assessments", [])
-            if isinstance(metric_assessments, Mapping):
-                metric_items = (
-                    {"metric": name, **item}
-                    for name, item in metric_assessments.items()
-                    if isinstance(item, Mapping)
-                )
-            else:
-                metric_items = metric_assessments
-            metric_lines = [
-                f"- **{safe_text(item.get('metric', ''))} — "
-                f"{safe_text(item.get('finding', ''))}:** "
-                f"{safe_text(item.get('rationale', ''))}"
-                for item in metric_items
-            ]
-            mechanism = assessment.get("mechanism", {})
-            implementation = assessment.get("implementation", {})
-            behavior = assessment.get("strategy_behavior", {})
-            policy_observations = assessment.get("policy_observations", [])
-            action = assessment.get("next_action", {})
-            reflection_document = "\n".join(
-                (
-                    f"# Post-trial reflection — Experiment {identifier}",
-                    "",
-                    dossier_note,
-                    "",
-                    f"## Summary\n\n{safe_text(assessment.get('summary', ''))}",
-                    "",
-                    "## Strategic behavior",
-                    "",
-                    f"`{safe_text(behavior.get('id', ''))}` — "
-                    f"**{safe_text(behavior.get('realization', 'unknown'))}**",
-                    "",
-                    *[f"- {safe_text(item)}" for item in behavior.get("evidence", [])],
-                    "",
-                    "## Telemetry assessment",
-                    "",
-                    *(metric_lines or ["- No metrics assessed."]),
-                    "",
-                    "## Mechanism",
-                    "",
-                    f"**{safe_text(mechanism.get('status', 'unknown'))}**",
-                    "",
-                    *[f"- {safe_text(item)}" for item in mechanism.get("evidence", [])],
-                    *[
-                        f"- Missing: {safe_text(item)}"
-                        for item in mechanism.get("missing_evidence", [])
-                    ],
-                    "",
-                    "## Implementation",
-                    "",
-                    f"**{safe_text(implementation.get('status', 'unknown'))}**",
-                    "",
-                    *[f"- {safe_text(item)}" for item in implementation.get("evidence", [])],
-                    *[f"- Concern: {safe_text(item)}" for item in implementation.get("concerns", [])],
-                    "",
-                    "## Policy observations",
-                    "",
-                    *(
-                        [
-                            f"- **{safe_text(item.get('finding', ''))}:** "
-                            f"{safe_text(item.get('evidence', ''))} "
-                            f"Implication: {safe_text(item.get('implication', ''))}"
-                            for item in policy_observations
-                        ]
-                        or ["- None recorded."]
-                    ),
-                    "",
-                    "## Advisory next action",
-                    "",
-                    f"**{safe_text(action.get('kind', 'unknown'))}:** "
-                    f"{safe_text(action.get('rationale', ''))}",
-                    "",
-                    f"Suggested test: {safe_text(action.get('test', ''))}",
-                    "",
-                )
-            )
+        reflection_document = _reflection_document(
+            identifier, assessment, dossier_note
+        )
     documents = {
         "README.md": readme,
         "change.diff": candidate_diff(task.repo, champion, candidate) + "\n",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 SETUP_API_MODULE = '''\
-"""Versioned arctl setup hook types. Do not change this controller-owned file."""
+"""Canonical arctl setup hook types. Do not change this controller-owned file."""
 
 from __future__ import annotations
 
@@ -88,8 +88,7 @@ def main() -> None:
     batch = json.loads(source.read_text(encoding="utf-8"))
     if (
         not isinstance(batch, dict)
-        or set(batch) != {"schema_version", "trial_count", "cases"}
-        or batch["schema_version"] != 1
+        or set(batch) != {"trial_count", "cases"}
         or not isinstance(batch["trial_count"], int)
         or isinstance(batch["trial_count"], bool)
         or batch["trial_count"] < 1
@@ -97,28 +96,17 @@ def main() -> None:
         or len(batch["cases"]) != batch["trial_count"]
     ):
         raise ValueError("subject input batch has an invalid controller envelope")
-    try:
-        result = run_batch({"cases": batch["cases"]})
-    except (KeyError, ValueError):
-        # Transitional compatibility for schema-v4 hooks that consumed the
-        # controller envelope before task-only hook payloads were standardized.
-        result = run_batch(batch)
+    result = run_batch({"cases": batch["cases"]})
     if not isinstance(result, dict):
         raise TypeError("run_batch must return one JSON object")
-    if set(result) == {"results"}:
-        results = result["results"]
-    elif set(result) == {"schema_version", "trial_count", "results"}:
-        if result["schema_version"] != 1 or result["trial_count"] != batch["trial_count"]:
-            raise ValueError("run_batch returned an invalid controller envelope")
-        results = result["results"]
-    else:
+    if set(result) != {"results"}:
         raise ValueError("run_batch must return one canonical results shape")
+    results = result["results"]
     if not isinstance(results, list):
         raise ValueError("run_batch results must be a list")
     if len(results) != batch["trial_count"]:
         raise ValueError("run_batch result count differs from trial_count")
     destination.write_text(json.dumps({
-        "schema_version": 1,
         "trial_count": batch["trial_count"],
         "results": results,
     }, sort_keys=True), encoding="utf-8")
@@ -189,16 +177,11 @@ def _write(path, value):
 
 def _subject_results(path, expected_count=None):
     output = _read(path)
-    if set(output) == {"results"}:
-        results = output["results"]
-    elif set(output) == {"schema_version", "trial_count", "results"}:
-        if output["schema_version"] != 1:
-            raise ValueError("subject output has an invalid schema version")
-        if expected_count is not None and output["trial_count"] != expected_count:
-            raise ValueError("subject output trial count differs from request")
-        results = output["results"]
-    else:
+    if set(output) != {"trial_count", "results"}:
         raise ValueError("subject output has an invalid controller envelope")
+    if expected_count is not None and output["trial_count"] != expected_count:
+        raise ValueError("subject output trial count differs from request")
+    results = output["results"]
     if not isinstance(results, list):
         raise ValueError("subject output results must be a list")
     if expected_count is not None and len(results) != expected_count:
@@ -215,29 +198,19 @@ def _prepare(request, response):
     if set(result) != {"public_batch", "private_scoring"}:
         raise ValueError("prepare must return public_batch and private_scoring")
     public_batch = _object(result["public_batch"], "prepared public batch")
-    if set(public_batch) == {"cases"}:
-        cases = public_batch["cases"]
-    elif set(public_batch) == {"schema_version", "trial_count", "cases"}:
-        if (
-            public_batch["schema_version"] != 1
-            or public_batch["trial_count"] != request["trial_count"]
-        ):
-            raise ValueError("prepare returned an invalid controller envelope")
-        cases = public_batch["cases"]
-    else:
+    if set(public_batch) != {"cases"}:
         raise ValueError("prepare public_batch has an invalid shape")
+    cases = public_batch["cases"]
     if not isinstance(cases, list):
         raise ValueError("prepare public cases must be a list")
     if len(cases) != request["trial_count"]:
         raise ValueError("prepare public case count differs from trial_count")
     _write(request["public_batch"], {
-        "schema_version": 1,
         "trial_count": request["trial_count"],
         "cases": cases,
     })
     _write(request["private_scoring"], result["private_scoring"])
     _write(response, {
-        "schema_version": 1,
         "operation": "prepare",
         "kind": request["kind"],
         "trial_count": request["trial_count"],
@@ -256,7 +229,6 @@ def _calibrate(request, response):
     if not isinstance(assessments, list):
         raise TypeError("calibrate must return a list of assessments")
     _write(response, {
-        "schema_version": 2,
         "operation": "calibrate",
         "champion": request["champion"],
         "evaluator": request["evaluator"],
@@ -288,7 +260,6 @@ def _score(request, response):
     if set(result) != expected:
         raise ValueError("score returned fields differing from its typed contract")
     _write(response, {
-        "schema_version": 1,
         "kind": request["kind"],
         "trial_count": request["trial_count"],
         "hard_rules_pass": result["hard_rules_pass"],

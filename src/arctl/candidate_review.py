@@ -128,9 +128,8 @@ def review_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["schema_version", "summary", "findings"],
+        "required": ["summary", "findings"],
         "properties": {
-            "schema_version": {"type": "integer", "const": 1},
             "summary": text,
             "findings": {"type": "array", "items": finding},
         },
@@ -142,14 +141,12 @@ def repair_schema() -> dict[str, Any]:
         "type": "object",
         "additionalProperties": False,
         "required": [
-            "schema_version",
             "status",
             "summary",
             "requirements",
             "verifications",
         ],
         "properties": {
-            "schema_version": {"type": "integer", "const": 3},
             "status": {"type": "string", "enum": ["repaired", "infeasible"]},
             "summary": {"type": "string", "minLength": 1},
             "requirements": requirement_audit_schema(structured=True),
@@ -159,42 +156,6 @@ def repair_schema() -> dict[str, Any]:
 
 
 def _validate_repair(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict) and value.get("schema_version") == 1:
-        legacy = {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["schema_version", "summary"],
-            "properties": {
-                "schema_version": {"type": "integer", "const": 1},
-                "summary": {"type": "string", "minLength": 1},
-            },
-        }
-        try:
-            Draft202012Validator(legacy).validate(value)
-        except JsonSchemaError as error:
-            raise StateError("candidate repair did not write valid repair JSON") from error
-        return {**value, "status": "repaired", "requirements": []}
-    if isinstance(value, dict) and value.get("schema_version") == 2:
-        legacy = {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["schema_version", "status", "summary", "requirements"],
-            "properties": {
-                "schema_version": {"type": "integer", "const": 2},
-                "status": {"type": "string", "enum": ["repaired", "infeasible"]},
-                "summary": {"type": "string", "minLength": 1},
-                "requirements": requirement_audit_schema(),
-            },
-        }
-        try:
-            Draft202012Validator(legacy).validate(value)
-        except JsonSchemaError as error:
-            raise StateError("candidate repair did not write valid repair JSON") from error
-        if value["status"] == "repaired" and any(
-            item["status"] != "verified" for item in value["requirements"]
-        ):
-            raise StateError("completed candidate repair has unverified requirements")
-        return value
     try:
         Draft202012Validator(repair_schema()).validate(value)
     except JsonSchemaError as error:
@@ -207,17 +168,12 @@ def _validate_repair(value: Any) -> dict[str, Any]:
 
 
 def _validate_review(value: Any) -> dict[str, Any]:
-    legacy_verdict = value.get("verdict") if isinstance(value, dict) else None
-    if legacy_verdict is not None:
-        value = {key: item for key, item in value.items() if key != "verdict"}
     try:
         Draft202012Validator(review_schema()).validate(value)
     except JsonSchemaError as error:
         raise StateError("candidate reviewer did not write valid review JSON") from error
     assert isinstance(value, dict)
     verdict = "fail" if value["findings"] else "pass"
-    if legacy_verdict is not None and legacy_verdict != verdict:
-        raise StateError("legacy candidate review verdict contradicts its findings")
     return {**value, "verdict": verdict}
 
 
@@ -269,8 +225,7 @@ def _run_agent(
     agent_root = scratch
     attempts = agent_root / "attempts"
     existing = sorted(attempts.glob("[0-9][0-9][0-9][0-9]"))
-    legacy_started = (agent_root / "process" / "started.json").is_file()
-    attempt_number = len(existing) + 1 + int(legacy_started)
+    attempt_number = len(existing) + 1
     scratch = attempts / f"{attempt_number:04d}"
     scratch.mkdir(parents=True, exist_ok=True)
     schema = scratch / "output.schema.json"
@@ -302,7 +257,7 @@ def _run_agent(
     except (OSError, StateError) as error:
         write_json_once(
             scratch / "failure.json",
-            {"schema_version": 1, "message": str(error)},
+            {"message": str(error)},
         )
         raise
     process_directory = scratch / "process"
@@ -455,7 +410,6 @@ def _check_failure(
                 output += path.read_text(encoding="utf-8", errors="replace")
         detail = output.strip()[:4000] or f"candidate check {index} failed"
         return {
-            "schema_version": 1,
             "verdict": "fail",
             "summary": f"Deterministic candidate check {index} failed.",
             "findings": [
@@ -537,7 +491,7 @@ def _repair_prompt(
         "a stable identifier. For each probe, record its purpose, exact command, observed "
         "outcome, and concise evidence, and link requirements to the relevant probe IDs. "
         "Return status repaired only when every requirement is verified and every recorded "
-        "probe succeeded; otherwise return infeasible. Emit schema version 3 and "
+        "probe succeeded; otherwise return infeasible. Return "
         "only the required repair JSON after editing.\n\n"
         + json.dumps(packet, sort_keys=True, separators=(",", ":"))
     )

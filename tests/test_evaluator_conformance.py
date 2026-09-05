@@ -14,7 +14,6 @@ from arctl.models import Evidence
 def _evidence(estimate: float, lower: float, trial_count: int) -> Evidence:
     return Evidence.from_mapping(
         {
-            "schema_version": 1,
             "kind": "primary",
             "trial_count": trial_count,
             "hard_rules_pass": True,

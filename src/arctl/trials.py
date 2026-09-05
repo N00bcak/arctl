@@ -11,8 +11,7 @@ from .errors import StateError
 from .models import TaskConfig
 from .storage import write_json_once
 
-_V1_FIELDS = {"schema_version", "source", "trial_count"}
-_V2_FIELDS = _V1_FIELDS | {"calibration"}
+_FIELDS = {"source", "trial_count"}
 _CALIBRATION_FIELDS = {
     "criterion_met",
     "diagnostic",
@@ -29,7 +28,6 @@ def freeze_fixed_trial_count(task_directory: Path, task: TaskConfig) -> None:
     write_json_once(
         task_directory / "trial-count.json",
         {
-            "schema_version": 1,
             "source": "fixed",
             "trial_count": task.trials,
         },
@@ -48,7 +46,6 @@ def freeze_automatic_trial_count(
     if isinstance(trial_count, bool) or not isinstance(trial_count, int) or trial_count <= 0:
         raise StateError("automatic trial count must be a positive integer")
     value: dict[str, Any] = {
-        "schema_version": 1 if calibration is None else 2,
         "source": "automatic",
         "trial_count": trial_count,
     }
@@ -73,9 +70,7 @@ def load_trial_count_record(
         raise StateError("fixed trial-count record is missing") from error
     if (
         not isinstance(value, Mapping)
-        or value.get("schema_version") not in (1, 2)
-        or set(value)
-        != (_V1_FIELDS if value.get("schema_version") == 1 else _V2_FIELDS)
+        or set(value) not in (_FIELDS, _FIELDS | {"calibration"})
     ):
         raise StateError("trial-count record fields are invalid")
     count = value["trial_count"]
@@ -92,9 +87,9 @@ def load_trial_count_record(
         raise StateError("fixed trial-count record differs from the approved task")
     if task.trials == "auto" and value["source"] != "automatic":
         raise StateError("automatic task has a non-automatic trial-count record")
-    if value["schema_version"] == 2:
+    if "calibration" in value:
         if value["source"] != "automatic":
-            raise StateError("version-2 trial-count record must be automatic")
+            raise StateError("calibrated trial-count record must be automatic")
         calibration = value["calibration"]
         if not isinstance(calibration, Mapping) or set(calibration) != _CALIBRATION_FIELDS:
             raise StateError("automatic calibration summary fields are invalid")

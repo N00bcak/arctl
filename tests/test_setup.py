@@ -17,7 +17,7 @@ from arctl.setup_protocol import UNITTEST_ENTRYPOINT
 from arctl.setup import (
     QUESTION_IDS,
     SETUP_CONTROLLER_CONTRACT,
-    _authorized_adapter_source_path,
+    _adapter_source_path,
     accept_setup,
     build_schema,
     build_setup,
@@ -35,7 +35,6 @@ from arctl.setup import (
     _agent_failure_detail,
     _agent_run,
     _apply_authorized_build_fields,
-    _upgrade_build_v3,
     _validate_authorized_design_match,
     _validate_build_contract,
     _run_setup_command,
@@ -117,20 +116,8 @@ class GuidedSetupTests(unittest.TestCase):
 
             self.assertEqual(result, {"locked": "authorized value"})
 
-    def test_legacy_authorized_adapter_note_is_not_part_of_source_path(self) -> None:
         self.assertEqual(
-            _authorized_adapter_source_path(
-                {
-                    "source_path": (
-                        "arctl_environment_adapter.py "
-                        "(environment-owned generated adapter; not subject-editable)"
-                    )
-                }
-            ),
-            "arctl_environment_adapter.py",
-        )
-        self.assertEqual(
-            _authorized_adapter_source_path({"source_path": "nested/adapter.py"}),
+            _adapter_source_path({"source_path": "nested/adapter.py"}),
             "nested/adapter.py",
         )
 
@@ -141,7 +128,6 @@ class GuidedSetupTests(unittest.TestCase):
         proposal["summary"] = "Unrelated churn."
         proposal["outcome"]["statistic"] = "Changed statistic."
         batch = {
-            "schema_version": 1,
             "revision": 1,
             "summary": "Generated revision.",
             "questions": [],
@@ -157,7 +143,6 @@ class GuidedSetupTests(unittest.TestCase):
 
         expected = json.loads(json.dumps(authorized))
         for controller_field in (
-            "schema_version",
             "revision",
             "decision_revision",
             "source_provenance",
@@ -200,7 +185,6 @@ class GuidedSetupTests(unittest.TestCase):
     ) -> None:
         derived = {"source": "derived", "decision_refs": [], "citations": []}
         design = {
-            "schema_version": 2,
             "revision": 1,
             "decision_revision": 1,
             "summary": "Demo guided setup.",
@@ -245,7 +229,6 @@ class GuidedSetupTests(unittest.TestCase):
                 "path": str(self.source), "commit": self.record["source_commit"],
             },
             "controller_contract": {
-                "version": 1,
                 "sha256": hashlib.sha256(
                     json.dumps(
                         SETUP_CONTROLLER_CONTRACT,
@@ -266,7 +249,6 @@ class GuidedSetupTests(unittest.TestCase):
         (self.directory / "setup" / "authorization.public.json").write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
                     "authorized": True,
                     "design_sha256": hashlib.sha256(
                         json.dumps(design, sort_keys=True, separators=(",", ":")).encode()
@@ -279,7 +261,6 @@ class GuidedSetupTests(unittest.TestCase):
         (self.directory / "setup" / "decisions.public.json").write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
                     "revision": design["decision_revision"],
                     "decisions": [],
                 }
@@ -289,7 +270,6 @@ class GuidedSetupTests(unittest.TestCase):
 
     def discovery(self) -> dict:
         return {
-            "schema_version": 5,
             "brief_sha256": hashlib.sha256(b"").hexdigest(),
             "summary": "The repository exposes one small policy.",
             "fields": [
@@ -311,8 +291,47 @@ class GuidedSetupTests(unittest.TestCase):
             "capability_downgrades": [],
         }
 
+    def review_value(self) -> dict:
+        evidence = [{
+            "path": "README.md",
+            "location": "line 1",
+            "finding": "The reviewed repository fixture is present.",
+        }]
+        return {
+            "summary": "No findings.",
+            "coverage": {
+                area: {
+                    "status": "pass",
+                    "summary": "The generated setup satisfies this area.",
+                    "evidence": evidence,
+                }
+                for area in (
+                    "intent_fidelity",
+                    "grounding",
+                    "editable_boundary",
+                    "dependencies",
+                    "trial_independence",
+                    "scoring_statistics",
+                    "seed_handling",
+                    "runtime_behavior",
+                )
+            },
+            "findings": [],
+        }
+
+    def review_failure(self, code: str, message: str) -> dict:
+        review = self.review_value()
+        review["summary"] = message
+        review["coverage"]["intent_fidelity"].update(
+            status="fail", summary=message
+        )
+        review["findings"] = [
+            {"code": code, "location": "README.md: line 1", "message": message}
+        ]
+        return review
+
     def build_value(self) -> dict:
-        manifest = valid_manifest(version=4)
+        manifest = valid_manifest()
         manifest["setup_contract"] = {
             "environment_adapter": {
                 "entrypoint": "demo:Environment",
@@ -336,7 +355,6 @@ class GuidedSetupTests(unittest.TestCase):
             "const": 1000
         }
         task = {
-            "schema_version": 5,
             "task_id": "demo",
             "repo": str(self.subject),
             "objective": "Improve the demo policy.",
@@ -377,14 +395,13 @@ class GuidedSetupTests(unittest.TestCase):
                 "commit": "SETUP_EVALUATOR_COMMIT",
             },
             "method": {
-                "profile": "serial-v1",
+                "profile": "serial",
                 "allow_unverified_isolation": False,
             },
             "trials": 1,
             "max_experiments": 10,
         }
         for controller_field in (
-            "schema_version",
             "task_id",
             "repo",
             "evaluator",
@@ -400,7 +417,6 @@ class GuidedSetupTests(unittest.TestCase):
             for name, metric in manifest["public"]["telemetry"].items()
         ]
         for field in (
-            "schema_version",
             "subject_command",
             "prepare_command",
             "calibrate_command",
@@ -413,21 +429,17 @@ class GuidedSetupTests(unittest.TestCase):
             )
             source.pop("commit")
         return {
-            "schema_version": 4,
             "summary": "Generated a minimal Python task.",
             "dependencies": [],
             "subject_hook": (
                 "def run_batch(public_batch):\n"
-                "    return {'schema_version': 1, "
-                "'trial_count': public_batch['trial_count'], "
-                "'results': [{'score': float(case['value'])} "
+                "    return {'results': [{'score': float(case['value'])} "
                 "for case in public_batch['cases']]}\n"
             ),
             "evaluator_hook": (
                 "def prepare(context):\n"
-                "    return {'public_batch': {'schema_version': 1, "
-                "'trial_count': context['trial_count'], "
-                "'cases': [{'value': seed, 'max_actions': 1000} "
+                "    return {'public_batch': {'cases': "
+                "[{'value': seed, 'max_actions': 1000} "
                 "for seed in context['trial_seeds']]}, "
                 "'private_scoring': {}}\n\n"
                 "def calibrate(context):\n"
@@ -454,12 +466,18 @@ class GuidedSetupTests(unittest.TestCase):
                 {
                     "path": "_arctl/public_probe.py",
                     "content": (
-                        "from _arctl.hook import run_batch\n"
-                        "batch = {'trial_count': 2, 'cases': "
+                        "import json, subprocess, sys, tempfile\n"
+                        "from pathlib import Path\n"
+                        "with tempfile.TemporaryDirectory() as temporary:\n"
+                        "    source = Path(temporary) / 'input.json'\n"
+                        "    destination = Path(temporary) / 'output.json'\n"
+                        "    source.write_text(json.dumps({'trial_count': 2, 'cases': "
                         "[{'value': 1, 'max_actions': 1000}, "
-                        "{'value': 1, 'max_actions': 1000}]}\n"
-                        "result = run_batch(batch)\n"
-                        "assert result['trial_count'] == 2\n"
+                        "{'value': 1, 'max_actions': 1000}]}))\n"
+                        "    subprocess.run([sys.executable, str(Path(__file__).with_name('subject.py')), "
+                        "str(source), str(destination)], check=True)\n"
+                        "    result = json.loads(destination.read_text())\n"
+                        "    assert result['trial_count'] == 2\n"
                     ),
                 },
             ],
@@ -487,11 +505,11 @@ class GuidedSetupTests(unittest.TestCase):
             command_builder=output_builder("build.public.json", self.build_value()),
             review_command_builder=output_builder(
                 "review.public.json",
-                {"schema_version": 1, "summary": "No findings.", "findings": []},
+                self.review_value(),
             ),
         )
 
-    def test_complete_setup_accepts_reviewed_trees_and_writes_task_v5(self) -> None:
+    def test_complete_setup_accepts_reviewed_trees_and_writes_task(self) -> None:
         events: list[dict] = []
         discovered = discover_setup(
             self.directory,
@@ -511,7 +529,7 @@ class GuidedSetupTests(unittest.TestCase):
             command_builder=output_builder("build.public.json", self.build_value()),
             review_command_builder=output_builder(
                 "review.public.json",
-                {"schema_version": 1, "summary": "No findings.", "findings": []},
+                self.review_value(),
             ),
             progress=lambda event: events.append(dict(event)),
         )
@@ -521,7 +539,6 @@ class GuidedSetupTests(unittest.TestCase):
         )
         _, record = load_setup(self.data, "demo")
         task = accept_setup(self.directory, record, readiness["acceptance_token"])
-        self.assertEqual(task.schema_version, 5)
         self.assertEqual(task.evaluator.commit, git(Path(record["evaluator"]), "rev-parse", "HEAD"))
         self.assertTrue((self.directory / "task.yaml").is_file())
         self.assertEqual(git(self.source, "status", "--porcelain"), "")
@@ -563,7 +580,7 @@ class GuidedSetupTests(unittest.TestCase):
             command_builder=output_builder("build.public.json", self.build_value()),
             review_command_builder=output_builder(
                 "review.public.json",
-                {"schema_version": 1, "summary": "No findings.", "findings": []},
+                self.review_value(),
             ),
         )
         self.assertEqual(readiness["preflight"]["conformance"]["seeded_variation"], "passed")
@@ -611,7 +628,7 @@ class GuidedSetupTests(unittest.TestCase):
         self.assertEqual(set(saved["answers"]), {"constraints"})
         self.assertEqual(set(saved["overrides"]), {"runtime_budget"})
         resolved = json.loads(
-            (self.directory / "setup" / "legacy-resolved.public.json").read_text()
+            (self.directory / "setup" / "resolved.public.json").read_text()
         )
         by_id = {item["id"]: item["resolved_answer"] for item in resolved["fields"]}
         self.assertIn(
@@ -643,7 +660,7 @@ class GuidedSetupTests(unittest.TestCase):
         _, record = load_setup(self.data, "demo")
         save_answers(self.directory, record, {"constraints": "Accepted."})
         resolved = json.loads(
-            (self.directory / "setup" / "legacy-resolved.public.json").read_text()
+            (self.directory / "setup" / "resolved.public.json").read_text()
         )
         by_id = {item["id"]: item["resolved_answer"] for item in resolved["fields"]}
         for identifier in ("hard_rules", "telemetry", "runtime_budget"):
@@ -682,32 +699,6 @@ class GuidedSetupTests(unittest.TestCase):
                 command_builder=output_builder("discovery.public.json", discovery),
             )
 
-    def test_discovery_v2_is_invalidated_for_specialist_owned_protocols(self) -> None:
-        discovery = self.discovery()
-        discovery["schema_version"] = 2
-        self.assertTrue(brief_changed(self.record, discovery))
-
-    def test_v1_discovery_consolidates_repeated_pairing_questions(self) -> None:
-        old = {
-            "schema_version": 1,
-            "summary": "old",
-            "questions": [
-                {
-                    "id": identifier,
-                    "prompt": f"Confirm {identifier}",
-                    "why": "old contract",
-                    "proposed_answer": "Humans must confirm paired trials.",
-                    "citations": [],
-                }
-                for identifier in QUESTION_IDS
-            ],
-        }
-        presentation = setup_presentation(old)
-        groups = [item["id"] for item in presentation["open_questions"]]
-        self.assertEqual(
-            groups, ["target", "trial_protocol", "constraints", "evaluator"]
-        )
-
     def test_acceptance_rejects_changes_after_review(self) -> None:
         discover_setup(
             self.directory,
@@ -728,7 +719,7 @@ class GuidedSetupTests(unittest.TestCase):
             command_builder=output_builder("build.public.json", self.build_value()),
             review_command_builder=output_builder(
                 "review.public.json",
-                {"schema_version": 1, "summary": "No findings.", "findings": []},
+                self.review_value(),
             ),
         )
         staged_subject = Path(readiness["staging"]["subject"])
@@ -823,7 +814,7 @@ class GuidedSetupTests(unittest.TestCase):
             offline=False,
             review_command_builder=output_builder(
                 "review.public.json",
-                {"schema_version": 1, "summary": "No findings.", "findings": []},
+                self.review_value(),
             ),
         )
         self.assertNotEqual(updated["acceptance_token"], old_token)
@@ -846,7 +837,7 @@ class GuidedSetupTests(unittest.TestCase):
             offline=False,
             review_command_builder=output_builder(
                 "review.public.json",
-                {"schema_version": 1, "summary": "No findings.", "findings": []},
+                self.review_value(),
             ),
         )
         self.assertNotEqual(updated["acceptance_token"], readiness["acceptance_token"])
@@ -871,7 +862,7 @@ class GuidedSetupTests(unittest.TestCase):
             offline=False,
             review_command_builder=output_builder(
                 "review.public.json",
-                {"schema_version": 1, "summary": "No findings.", "findings": []},
+                self.review_value(),
             ),
         )
         change = json.loads(
@@ -899,7 +890,7 @@ class GuidedSetupTests(unittest.TestCase):
                 offline=False,
                 review_command_builder=output_builder(
                     "review.public.json",
-                    {"schema_version": 1, "summary": "No findings.", "findings": []},
+                    self.review_value(),
                 ),
             )
         _, record = load_setup(self.data, "demo")
@@ -952,17 +943,7 @@ class GuidedSetupTests(unittest.TestCase):
                 command_builder=output_builder("build.public.json", self.build_value()),
                 review_command_builder=output_builder(
                     "review.public.json",
-                    {
-                        "schema_version": 1,
-                        "summary": "One defect.",
-                        "findings": [
-                            {
-                                "code": "SEED",
-                                "location": "adapter",
-                                "message": "Fix seed handling.",
-                            }
-                        ],
-                    },
+                    self.review_failure("SEED", "Fix seed handling."),
                 ),
             )
         _, record = load_setup(self.data, "demo")
@@ -973,7 +954,7 @@ class GuidedSetupTests(unittest.TestCase):
             command_builder=output_builder("build.public.json", self.build_value()),
             review_command_builder=output_builder(
                 "review.public.json",
-                {"schema_version": 1, "summary": "Repaired.", "findings": []},
+                self.review_value(),
             ),
         )
         self.assertEqual(second["review"], "ready")
@@ -1006,17 +987,10 @@ class GuidedSetupTests(unittest.TestCase):
                 ),
                 review_command_builder=output_builder(
                     "review.public.json",
-                    {
-                        "schema_version": 1,
-                        "summary": "The signed entrypoint is stale.",
-                        "findings": [
-                            {
-                                "code": "AUTHORIZED_ENTRYPOINT_MISMATCH",
-                                "location": "authorized-design.public.json: line 1",
-                                "message": "Runtime uses a safer direct-file entrypoint.",
-                            }
-                        ],
-                    },
+                    self.review_failure(
+                        "AUTHORIZED_ENTRYPOINT_MISMATCH",
+                        "Runtime uses a safer direct-file entrypoint.",
+                    ),
                 ),
             )
 
@@ -1072,7 +1046,7 @@ class GuidedSetupTests(unittest.TestCase):
             command_builder=builder,
             review_command_builder=output_builder(
                 "review.public.json",
-                {"schema_version": 1, "summary": "No findings.", "findings": []},
+                self.review_value(),
             ),
             progress=lambda event: events.append(dict(event)),
         )
@@ -1131,7 +1105,7 @@ class GuidedSetupTests(unittest.TestCase):
             command_builder=repair_builder,
             review_command_builder=output_builder(
                 "review.public.json",
-                {"schema_version": 1, "summary": "No findings.", "findings": []},
+                self.review_value(),
             ),
         )
         self.assertEqual(readiness["review"], "ready")
@@ -1273,25 +1247,6 @@ class GuidedSetupTests(unittest.TestCase):
             sum("process resource telemetry is unsupported" in item for item in findings),
             2,
         )
-
-    def test_build_v3_upgrade_preserves_program_but_controller_owns_python(self) -> None:
-        value = self.build_value()
-        value["schema_version"] = 3
-        value["task"]["public_checks"] = [["python", "-m", "unittest", "-q"]]
-        value["task"]["public_probe"] = {
-            "command": ["python", "tools/probe.py", "--json"],
-            "trial_equivalents": 1,
-        }
-        upgraded = _upgrade_build_v3(value)
-        self.assertEqual(upgraded["schema_version"], 4)
-        self.assertEqual(
-            upgraded["task"]["public_checks"][0],
-            {"kind": "module", "target": "unittest", "arguments": ["-q"]},
-        )
-        task, _, _ = _validate_build_contract(upgraded, self.record)
-        expected_python = str((self.workspace / ".venv" / "bin" / "python").resolve())
-        self.assertEqual(task["public_checks"][0][0], expected_python)
-        self.assertEqual(task["public_probe"]["command"][0], expected_python)
 
     def test_subject_only_environment_evidence_needs_no_environment_placeholder(self) -> None:
         value = self.build_value()
@@ -1439,7 +1394,7 @@ class GuidedSetupTests(unittest.TestCase):
                 command_builder=output_builder("build.public.json", broken),
                 review_command_builder=output_builder(
                     "review.public.json",
-                    {"schema_version": 1, "summary": "Static pass.", "findings": []},
+                    self.review_value(),
                 ),
             )
         _, record = load_setup(self.data, "demo")

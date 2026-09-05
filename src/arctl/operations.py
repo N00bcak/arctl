@@ -28,9 +28,9 @@ def _experiment_directories(task: LocatedTask) -> list[Path]:
     )
 
 
-def _latest_agent_process(root: Path, legacy: Path) -> Path:
+def _latest_agent_process(root: Path) -> Path:
     attempts = sorted((root / "attempts").glob("[0-9]" * 4))
-    return attempts[-1] / "process" if attempts else legacy
+    return attempts[-1] / "process"
 
 
 def _public_result(task: LocatedTask, directory: Path) -> dict[str, Any] | None:
@@ -225,8 +225,7 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
             if (
                 not isinstance(value, dict)
                 or set(value)
-                != {"schema_version", "experiment_id", "phase", "reason", "plan_hash"}
-                or value.get("schema_version") != 1
+                != {"experiment_id", "phase", "reason", "plan_hash"}
                 or isinstance(value.get("experiment_id"), bool)
                 or not isinstance(value.get("experiment_id"), int)
                 or value["experiment_id"] <= 0
@@ -242,7 +241,6 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
             mini_gc_failure = value
         except (OSError, json.JSONDecodeError, ValueError):
             mini_gc_failure = {
-                "schema_version": 1,
                 "experiment_id": None,
                 "phase": "unknown",
                 "reason": "experiment cleanup failure record is unreadable",
@@ -295,21 +293,15 @@ def task_status(task: LocatedTask) -> dict[str, Any]:
             else str(
                 _latest_agent_process(
                     strategy_failures[-1].parent,
-                    strategy_failures[-1].parent / "process",
                 )
             )
             if strategy_failed
             else str(
-                _latest_agent_process(
-                    attempts[-1] / "planning", attempts[-1] / "planning" / "process"
-                )
+                _latest_agent_process(attempts[-1] / "planning")
             )
             if planning_failed
             else str(
-                _latest_agent_process(
-                    attempts[-1] / "implementation",
-                    attempts[-1] / "process" / "implementation",
-                )
+                _latest_agent_process(attempts[-1] / "implementation")
             )
             if implementation_failed
             else str(attempts[-1] / "process")
@@ -461,7 +453,6 @@ def request_stop(task: LocatedTask) -> bool:
     atomic_write_json(
         path,
         {
-            "schema_version": 1,
             "requested_at_unix": time.time(),
         },
     )

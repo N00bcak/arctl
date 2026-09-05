@@ -100,7 +100,6 @@ def ensure_experiment_bytecode_cache(
     root = bytecode_root / identity["cache_tag"]
     relative = root.relative_to(task_directory).as_posix()
     expected: dict[str, Any] = {
-        "schema_version": 1,
         "experiment_id": int(experiment.name),
         "request_sha256": _sha256(request_bytes),
         "approval_sha256": _sha256(approval_bytes),

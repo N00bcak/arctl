@@ -48,22 +48,12 @@ def _load_process_record(directory: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError) as error:
         raise StateError("managed process identity is invalid") from error
     fields = {
-        1: {"schema_version", "pid", "start_time"},
-        2: {"schema_version", "pid", "pgid", "platform", "start_time"},
-        3: {
-            "schema_version", "pid", "pgid", "platform", "start_time",
-            "boot_identity", "launch_token", "launch_token_file",
-            "launch_token_identity",
-        },
+        "pid", "pgid", "platform", "start_time", "boot_identity",
+        "launch_token", "launch_token_file", "launch_token_identity",
     }
-    if not isinstance(value, dict) or value.get("schema_version") not in fields:
+    if not isinstance(value, dict) or set(value) != fields:
         raise StateError("managed process identity is invalid")
-    version = value["schema_version"]
-    if set(value) != fields[version]:
-        raise StateError("managed process identity is invalid")
-    integer_fields = ("pid", "start_time") if version == 1 else (
-        "pid", "pgid", "start_time"
-    )
+    integer_fields = ("pid", "pgid", "start_time")
     if any(
         isinstance(value[field], bool)
         or not isinstance(value[field], int)
@@ -71,67 +61,61 @@ def _load_process_record(directory: Path) -> dict[str, Any] | None:
         for field in integer_fields
     ):
         raise StateError("managed process identity is invalid")
-    if version >= 2 and value["platform"] not in {"Linux", "Darwin"}:
+    if value["platform"] not in {"Linux", "Darwin"}:
         raise StateError("managed process identity is invalid")
-    if version == 1 and platform.system() != "Linux":
-        raise StateError("managed process identity schema 1 is supported only on Linux")
-    if version == 3:
-        if any(
-            not isinstance(value[field], str) or not value[field]
-            for field in ("boot_identity", "launch_token", "launch_token_file")
-        ):
-            raise StateError("managed process identity is invalid")
-        token_path = Path(value["launch_token_file"])
-        if token_path.is_absolute() or token_path.parts != ("launch.token",):
-            raise StateError("managed process identity is invalid")
-        token_identity = value["launch_token_identity"]
-        if (
-            not isinstance(token_identity, dict)
-            or set(token_identity) != {"device", "inode"}
-            or any(
-                isinstance(item, bool) or not isinstance(item, int) or item <= 0
-                for item in token_identity.values()
-            )
-        ):
-            raise StateError("managed process identity is invalid")
+    if any(
+        not isinstance(value[field], str) or not value[field]
+        for field in ("boot_identity", "launch_token", "launch_token_file")
+    ):
+        raise StateError("managed process identity is invalid")
+    token_path = Path(value["launch_token_file"])
+    if token_path.is_absolute() or token_path.parts != ("launch.token",):
+        raise StateError("managed process identity is invalid")
+    token_identity = value["launch_token_identity"]
+    if (
+        not isinstance(token_identity, dict)
+        or set(token_identity) != {"device", "inode"}
+        or any(
+            isinstance(item, bool) or not isinstance(item, int) or item <= 0
+            for item in token_identity.values()
+        )
+    ):
+        raise StateError("managed process identity is invalid")
     return value
 
 
 def _matching_managed_process(
     directory: Path, value: Mapping[str, Any]
 ) -> Any | None:
-    version = value["schema_version"]
-    if version == 3:
-        token = directory / value["launch_token_file"]
-        if token.is_symlink() or not token.is_file():
-            raise StateError("managed process launch token is invalid")
-        token_stat = token.stat(follow_symlinks=False)
-        if {
-            "device": token_stat.st_dev,
-            "inode": token_stat.st_ino,
-        } != value["launch_token_identity"]:
-            raise StateError("managed process launch token identity changed")
-        if token.read_text(encoding="utf-8") != value["launch_token"]:
-            raise StateError("managed process launch token is invalid")
-        if value["boot_identity"] != boot_identity():
+    token = directory / value["launch_token_file"]
+    if token.is_symlink() or not token.is_file():
+        raise StateError("managed process launch token is invalid")
+    token_stat = token.stat(follow_symlinks=False)
+    if {"device": token_stat.st_dev, "inode": token_stat.st_ino} != value[
+        "launch_token_identity"
+    ]:
+        raise StateError("managed process launch token identity changed")
+    if token.read_text(encoding="utf-8") != value["launch_token"]:
+        raise StateError("managed process launch token is invalid")
+    if value["boot_identity"] != boot_identity():
+        return None
+    with token.open("r+") as stream:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pass
+        else:
             return None
-        with token.open("r+") as stream:
+        finally:
             try:
-                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
+                fcntl.flock(stream, fcntl.LOCK_UN)
+            except OSError:
                 pass
-            else:
-                return None
-            finally:
-                try:
-                    fcntl.flock(stream, fcntl.LOCK_UN)
-                except OSError:
-                    pass
     current = inspect_process(value["pid"])
     if current is None or not current.alive:
         return None
-    recorded_pgid = value["pid"] if version == 1 else value["pgid"]
-    if version >= 2 and current.platform != value["platform"]:
+    recorded_pgid = value["pgid"]
+    if current.platform != value["platform"]:
         return None
     if current.start_time != value["start_time"] or current.pgid != recorded_pgid:
         return None
@@ -148,12 +132,11 @@ def _kill_recorded_process(directory: Path) -> None:
     value = _load_process_record(directory)
     if value is None:
         return
-    version = value["schema_version"]
     current = _matching_managed_process(directory, value)
     if current is None:
         return
     pid = value["pid"]
-    recorded_pgid = pid if version == 1 else value["pgid"]
+    recorded_pgid = value["pgid"]
     try:
         os.killpg(recorded_pgid, signal.SIGKILL)
     except ProcessLookupError:
@@ -198,7 +181,6 @@ def run_once(
     atomic_write_json(
         started,
         {
-            "schema_version": 2 if stdin_record is not None else 1,
             "command": list(command),
             "cwd": str(cwd.resolve()) if cwd is not None else None,
             "environment": dict(env) if env is not None else None,
@@ -270,7 +252,6 @@ def run_once(
             atomic_write_json(
                 directory / "process.json",
                 {
-                    "schema_version": 3,
                     "platform": identity.platform,
                     "pid": identity.pid,
                     "pgid": identity.pgid,
@@ -354,7 +335,6 @@ def run_once(
                 process.stderr.close()
 
         record = {
-            "schema_version": 2,
             "return_code": return_code,
             "stdout_bytes": stdout_path.stat().st_size,
             "stderr_bytes": stderr_path.stat().st_size,
@@ -382,21 +362,17 @@ def read_valid_result(directory: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise StateError("process has no valid result") from error
-    legacy = {"schema_version", "return_code", "stdout_bytes", "stderr_bytes"}
-    current = legacy | {"elapsed_seconds"}
+    current = {"return_code", "stdout_bytes", "stderr_bytes", "elapsed_seconds"}
     if (
         not isinstance(value, dict)
-        or set(value) not in (legacy, current)
-        or value["schema_version"] not in (1, 2)
-        or (value["schema_version"] == 1 and set(value) != legacy)
-        or (value["schema_version"] == 2 and set(value) != current)
+        or set(value) != current
         or any(
             isinstance(value[field], bool) or not isinstance(value[field], int)
             for field in ("return_code", "stdout_bytes", "stderr_bytes")
         )
     ):
         raise StateError("process has no valid result")
-    if value["schema_version"] == 2 and (
+    if (
         isinstance(value["elapsed_seconds"], bool)
         or not isinstance(value["elapsed_seconds"], (int, float))
         or value["elapsed_seconds"] < 0
@@ -411,12 +387,11 @@ def read_valid_started(directory: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise StateError("process has no valid started record") from error
-    base = {"schema_version", "command", "cwd", "environment", "stop_path"}
-    fields = {1: base, 2: base | {"stdin"}}
+    base = {"command", "cwd", "environment", "stop_path"}
+    fields = (base, base | {"stdin"})
     if (
         not isinstance(value, dict)
-        or value.get("schema_version") not in fields
-        or set(value) != fields[value["schema_version"]]
+        or set(value) not in fields
         or not isinstance(value["command"], list)
         or not value["command"]
         or not all(isinstance(argument, str) for argument in value["command"])
@@ -439,7 +414,7 @@ def read_valid_started(directory: Path) -> dict[str, Any]:
         )
     ):
         raise StateError("process has no valid started record")
-    if value["schema_version"] == 2:
+    if "stdin" in value:
         stdin = value["stdin"]
         if (
             not isinstance(stdin, dict)
@@ -469,7 +444,6 @@ def run_or_load_once(
 ) -> dict[str, Any]:
     stdin_record = _stdin_record(stdin_path)
     expected_started = {
-        "schema_version": 2 if stdin_record is not None else 1,
         "command": list(command),
         "cwd": str(cwd.resolve()),
         "environment": dict(env) if env is not None else None,

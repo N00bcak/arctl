@@ -29,13 +29,12 @@ ReflectionCommandBuilder = Callable[[Path, Path, Path, str], Sequence[str]]
 
 def reflection_schema(
     *,
-    version: int = 2,
     metric_names: Sequence[str] | None = None,
     strategy_behavior_id: str | None = None,
     history_entry_ids: Sequence[str] | None = None,
 ) -> dict[str, Any]:
-    if version in {3, 4} and metric_names is None:
-        raise ValueError(f"reflection schema version {version} requires metric_names")
+    if metric_names is None:
+        raise ValueError("reflection schema requires metric_names")
     text = {"type": "string", "minLength": 1}
 
     def strict(
@@ -48,241 +47,80 @@ def reflection_schema(
             "properties": dict(properties),
         }
 
-    if version == 4:
-        history_id_schema: dict[str, Any]
-        if history_entry_ids:
-            history_id_schema = {"type": "string", "enum": list(history_entry_ids)}
-        else:
-            history_id_schema = text
-        properties = {
-            "schema_version": {"type": "integer", "const": 4},
-            "summary": text,
-            "strategy_behavior": strict(
-                {
-                    "id": (
-                        {"type": "string", "const": strategy_behavior_id}
-                        if strategy_behavior_id is not None
-                        else text
-                    ),
-                    "realization": {
-                        "type": "string",
-                        "enum": ["expressed", "not_expressed", "unclear"],
-                    },
-                    "evidence": {"type": "array", "items": text, "maxItems": 2},
-                }
-            ),
-            "mechanism": strict(
-                {
-                    "status": {
-                        "type": "string",
-                        "enum": ["supported", "contradicted", "not_demonstrated"],
-                    },
-                    "evidence": {"type": "array", "items": text, "maxItems": 2},
-                    "missing_evidence": {
-                        "type": "array",
-                        "items": text,
-                        "maxItems": 2,
-                    },
-                }
-            ),
-            "implementation": strict(
-                {
-                    "status": {
-                        "type": "string",
-                        "enum": [
-                            "no_specific_concern",
-                            "activation_unclear",
-                            "test_gap",
-                            "implementation_concern",
-                        ],
-                    },
-                    "concerns": {"type": "array", "items": text, "maxItems": 2},
-                }
-            ),
-            "material_signals": {
-                "type": "array",
-                "maxItems": 5,
-                "items": strict(
-                    {
-                        "metric": {"type": "string", "enum": list(metric_names)},
-                        "finding": {
-                            "type": "string",
-                            "enum": [
-                                "supports",
-                                "contradicts",
-                                "inconclusive",
-                                "anomalous",
-                            ],
-                        },
-                        "interpretation": text,
-                    }
-                ),
-            },
-            "history_citations": {
-                "type": "array",
-                "maxItems": 3,
-                "items": strict(
-                    {
-                        "entry_id": history_id_schema,
-                        "bearing": {
-                            "type": "string",
-                            "enum": ["supports", "contradicts", "unresolved"],
-                        },
-                        "finding": text,
-                    }
-                ),
-            },
-            "policy_observations": {
-                "type": "array",
-                "maxItems": 3,
-                "items": strict(
-                    {"finding": text, "evidence": text, "implication": text}
-                ),
-            },
-            "next_action": strict(
-                {
-                    "kind": {
-                        "type": "string",
-                        "enum": [
-                            "retain",
-                            "refine",
-                            "revisit_after_better_evidence",
-                            "audit_implementation",
-                            "abandon_direction",
-                        ],
-                    },
-                    "rationale": text,
-                    "test": {"type": ["string", "null"], "minLength": 1},
-                }
-            ),
-        }
-        schema = strict(properties)
-        if history_entry_ids is not None and not history_entry_ids:
-            schema["properties"]["history_citations"]["maxItems"] = 0
-        return schema
-
+    history_id_schema: dict[str, Any]
+    if history_entry_ids:
+        history_id_schema = {"type": "string", "enum": list(history_entry_ids)}
+    else:
+        history_id_schema = text
     properties = {
-            "schema_version": {"type": "integer", "const": version},
-            "summary": text,
-            "strategy_behavior": strict(
-                {
-                    "id": (
-                        {"type": "string", "const": strategy_behavior_id}
-                        if strategy_behavior_id is not None
-                        else text
-                    ),
-                    "realization": {
-                        "type": "string",
-                        "enum": ["expressed", "not_expressed", "unclear"],
-                    },
-                    "evidence": {"type": "array", "items": text},
-                }
-            ),
-            "metric_assessments": (
-                strict(
-                    {
-                        name: strict(
-                            {
-                                "finding": {
-                                    "type": "string",
-                                    "enum": ["supports", "contradicts", "inconclusive"],
-                                },
-                                "rationale": text,
-                            }
-                        )
-                        for name in metric_names
-                    }
-                )
-                if version == 3 and metric_names is not None
-                else {
-                    "type": "object",
-                    "additionalProperties": strict(
-                        {
-                            "finding": {
-                                "type": "string",
-                                "enum": ["supports", "contradicts", "inconclusive"],
-                            },
-                            "rationale": text,
-                        }
-                    ),
-                }
-                if version == 3
-                else {
-                    "type": "array",
-                    "items": strict(
-                        {
-                            "metric": text,
-                            "finding": {
-                                "type": "string",
-                                "enum": ["supports", "contradicts", "inconclusive"],
-                            },
-                            "rationale": text,
-                        }
-                    ),
-                }
-            ),
-            "mechanism": strict(
-                {
-                    "status": {
-                        "type": "string",
-                        "enum": ["supported", "contradicted", "not_demonstrated"],
-                    },
-                    "evidence": {"type": "array", "items": text},
-                    "missing_evidence": {"type": "array", "items": text},
-                }
-            ),
-            "implementation": strict(
-                {
-                    "status": {
-                        "type": "string",
-                        "enum": [
-                            "no_specific_concern",
-                            "activation_unclear",
-                            "test_gap",
-                            "implementation_concern",
-                        ],
-                    },
-                    "evidence": {"type": "array", "items": text},
-                    "concerns": {"type": "array", "items": text},
-                }
-            ),
-            "policy_observations": {
-                "type": "array",
-                "items": strict(
-                    {
-                        "finding": text,
-                        "evidence": text,
-                        "implication": text,
-                    }
+        "summary": text,
+        "strategy_behavior": strict(
+            {
+                "id": (
+                    {"type": "string", "const": strategy_behavior_id}
+                    if strategy_behavior_id is not None
+                    else text
                 ),
-            },
-            "next_action": strict(
-                {
-                    "kind": {
-                        "type": "string",
-                        "enum": [
-                            "retain",
-                            "refine",
-                            "revisit_after_better_evidence",
-                            "audit_implementation",
-                            "abandon_direction",
-                        ],
-                    },
-                    "rationale": text,
-                    "test": text,
-                }
-            ),
-        }
-    if version in {2, 3}:
-        properties["history_citations"] = {
+                "realization": {
+                    "type": "string",
+                    "enum": ["expressed", "not_expressed", "unclear"],
+                },
+                "evidence": {"type": "array", "items": text, "maxItems": 2},
+            }
+        ),
+        "mechanism": strict(
+            {
+                "status": {
+                    "type": "string",
+                    "enum": ["supported", "contradicted", "not_demonstrated"],
+                },
+                "evidence": {"type": "array", "items": text, "maxItems": 2},
+                "missing_evidence": {
+                    "type": "array",
+                    "items": text,
+                    "maxItems": 2,
+                },
+            }
+        ),
+        "implementation": strict(
+            {
+                "status": {
+                    "type": "string",
+                    "enum": [
+                        "no_specific_concern",
+                        "activation_unclear",
+                        "test_gap",
+                        "implementation_concern",
+                    ],
+                },
+                "concerns": {"type": "array", "items": text, "maxItems": 2},
+            }
+        ),
+        "material_signals": {
             "type": "array",
+            "maxItems": 5,
             "items": strict(
                 {
-                    "entry_id": (
-                        {"type": "string", "enum": list(history_entry_ids)}
-                        if version == 3 and history_entry_ids
-                        else text
-                    ),
+                    "metric": {"type": "string", "enum": list(metric_names)},
+                    "finding": {
+                        "type": "string",
+                        "enum": [
+                            "supports",
+                            "contradicts",
+                            "inconclusive",
+                            "anomalous",
+                        ],
+                    },
+                    "interpretation": text,
+                }
+            ),
+        },
+        "history_citations": {
+            "type": "array",
+            "maxItems": 3,
+            "items": strict(
+                {
+                    "entry_id": history_id_schema,
                     "bearing": {
                         "type": "string",
                         "enum": ["supports", "contradicts", "unresolved"],
@@ -290,10 +128,35 @@ def reflection_schema(
                     "finding": text,
                 }
             ),
-        }
-        if version == 3 and history_entry_ids is not None and not history_entry_ids:
-            properties["history_citations"]["maxItems"] = 0
-    return strict(properties)
+        },
+        "policy_observations": {
+            "type": "array",
+            "maxItems": 3,
+            "items": strict(
+                {"finding": text, "evidence": text, "implication": text}
+            ),
+        },
+        "next_action": strict(
+            {
+                "kind": {
+                    "type": "string",
+                    "enum": [
+                        "retain",
+                        "refine",
+                        "revisit_after_better_evidence",
+                        "audit_implementation",
+                        "abandon_direction",
+                    ],
+                },
+                "rationale": text,
+                "test": {"type": ["string", "null"], "minLength": 1},
+            }
+        ),
+    }
+    schema = strict(properties)
+    if history_entry_ids is not None and not history_entry_ids:
+        schema["properties"]["history_citations"]["maxItems"] = 0
+    return schema
 
 
 def _basis(
@@ -372,16 +235,13 @@ def validate_reflection(
     metric_names: Sequence[str],
 ) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != {
-        "schema_version",
         "status",
         "warning",
         "basis",
         "assessment",
     }:
         raise StateError("saved reflection fields are invalid")
-    if value["schema_version"] not in {1, 2, 3, 4} or not isinstance(
-        value["basis"], Mapping
-    ):
+    if not isinstance(value["basis"], Mapping):
         raise StateError("saved reflection values are invalid")
     if value["status"] == "SKIPPED_NO_TELEMETRY":
         if (
@@ -395,60 +255,36 @@ def validate_reflection(
         if value["warning"] is not None or not isinstance(assessment, Mapping):
             raise StateError("saved complete reflection is invalid")
         try:
-            assessment_version = assessment.get("schema_version")
-            if assessment_version not in {1, 2, 3, 4}:
-                raise StateError("saved reflection assessment version is invalid")
             Draft202012Validator(
                 reflection_schema(
-                    version=assessment_version,
-                    metric_names=(
-                        metric_names if assessment_version in {3, 4} else None
-                    ),
-                    strategy_behavior_id=(
-                        value["basis"].get("strategy_behavior_id")
-                        if assessment_version in {3, 4}
-                        else None
-                    ),
+                    metric_names=metric_names,
+                    strategy_behavior_id=value["basis"].get("strategy_behavior_id"),
                 )
             ).validate(assessment)
         except JsonSchemaError as error:
             raise StateError("saved reflection assessment is invalid") from error
-        if assessment_version == 4:
-            names = [item["metric"] for item in assessment["material_signals"]]
-            if len(names) != len(set(names)) or any(
-                name not in metric_names for name in names
-            ):
-                raise StateError(
-                    "reflection material signals must be unique declared metrics"
-                )
-            citation_ids = [
-                item["entry_id"] for item in assessment["history_citations"]
-            ]
-            if len(citation_ids) != len(set(citation_ids)):
-                raise StateError("reflection history citations must be unique")
-            raw_history_ids = value["basis"].get("history_entry_ids", [])
-            if (
-                not isinstance(raw_history_ids, list)
-                or not all(isinstance(identifier, str) for identifier in raw_history_ids)
-                or len(raw_history_ids) != len(set(raw_history_ids))
-            ):
-                raise StateError("saved reflection history basis is invalid")
-            known_history_ids = set(raw_history_ids)
-            if any(identifier not in known_history_ids for identifier in citation_ids):
-                raise StateError("reflection cites unknown history entries")
-        elif assessment_version == 3:
-            assessments = assessment["metric_assessments"]
-            if set(assessments) != set(metric_names):
-                raise StateError(
-                    "reflection must assess every telemetry metric exactly once"
-                )
-        else:
-            assessments = assessment["metric_assessments"]
-            names = [item["metric"] for item in assessments]
-            if len(names) != len(set(names)) or set(names) != set(metric_names):
-                raise StateError(
-                    "reflection must assess every telemetry metric exactly once"
-                )
+        names = [item["metric"] for item in assessment["material_signals"]]
+        if len(names) != len(set(names)) or any(
+            name not in metric_names for name in names
+        ):
+            raise StateError(
+                "reflection material signals must be unique declared metrics"
+            )
+        citation_ids = [
+            item["entry_id"] for item in assessment["history_citations"]
+        ]
+        if len(citation_ids) != len(set(citation_ids)):
+            raise StateError("reflection history citations must be unique")
+        raw_history_ids = value["basis"].get("history_entry_ids", [])
+        if (
+            not isinstance(raw_history_ids, list)
+            or not all(isinstance(identifier, str) for identifier in raw_history_ids)
+            or len(raw_history_ids) != len(set(raw_history_ids))
+        ):
+            raise StateError("saved reflection history basis is invalid")
+        known_history_ids = set(raw_history_ids)
+        if any(identifier not in known_history_ids for identifier in citation_ids):
+            raise StateError("reflection cites unknown history entries")
         if (
             assessment["strategy_behavior"]["id"]
             != value["basis"].get("strategy_behavior_id")
@@ -473,7 +309,7 @@ def run_reflection(
     python_cache: Path | None = None,
 ) -> dict[str, Any]:
     assert task.method is not None
-    task.method.require_component("reflect", "reflect.evidence-v1")
+    task.method.require_component("reflect", "reflect.evidence")
     basis = _basis(task, manifest, request, result)
     context = _research_context(experiment)
     basis["context_refs"] = {
@@ -505,7 +341,6 @@ def run_reflection(
     scratch.mkdir(parents=True, exist_ok=True)
     if not manifest.public_telemetry:
         value = {
-            "schema_version": 1,
             "status": "SKIPPED_NO_TELEMETRY",
             "warning": (
                 "The approved evaluator publishes no telemetry; causal reflection "
@@ -519,7 +354,6 @@ def run_reflection(
 
     basis["history_entry_ids"] = list(history_ids)
     schema = reflection_schema(
-        version=4,
         metric_names=tuple(manifest.public_telemetry),
         strategy_behavior_id=request["strategy_behavior_id"],
         history_entry_ids=history_ids,
@@ -599,7 +433,7 @@ def run_reflection(
     except (OSError, ArctlError) as error:
         write_json_once(
             attempt / "reflection.failure.json",
-            {"schema_version": 1, "message": str(error)},
+            {"message": str(error)},
         )
         raise StateError(f"post-trial reflection failed: {error}") from error
     try:
@@ -627,9 +461,6 @@ def run_reflection(
         assessment = json.loads(
             (scratch / "assessment.public.json").read_text(encoding="utf-8")
         )
-        assessment_version = assessment.get("schema_version")
-        if assessment_version != 4:
-            raise StateError("new reflections must use schema version 4")
         Draft202012Validator(schema).validate(assessment)
         names = [item["metric"] for item in assessment["material_signals"]]
         if len(names) != len(set(names)):
@@ -649,7 +480,7 @@ def run_reflection(
     except TransientDownstreamError as error:
         write_json_once(
             attempt / "reflection.failure.json",
-            {"schema_version": 1, "message": str(error)},
+            {"message": str(error)},
         )
         raise
     except ProcessError as error:
@@ -662,22 +493,21 @@ def run_reflection(
         if transient is not None:
             write_json_once(
                 attempt / "reflection.failure.json",
-                {"schema_version": 1, "message": str(transient)},
+                {"message": str(transient)},
             )
             raise transient from error
         write_json_once(
             attempt / "reflection.failure.json",
-            {"schema_version": 1, "message": str(error)},
+            {"message": str(error)},
         )
         raise StateError(f"post-trial reflection failed: {error}") from error
     except (OSError, json.JSONDecodeError, JsonSchemaError, StateError) as error:
         write_json_once(
             attempt / "reflection.failure.json",
-            {"schema_version": 1, "message": str(error)},
+            {"message": str(error)},
         )
         raise StateError(f"post-trial reflection failed: {error}") from error
     value = {
-        "schema_version": 4,
         "status": "COMPLETE",
         "warning": None,
         "basis": basis,

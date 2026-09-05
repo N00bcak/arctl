@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 from arctl.dossier import (
-    _v4_reflection_document,
+    _reflection_document,
     ensure_experiment_dossier,
     rebuild_task_index,
 )
@@ -27,11 +27,10 @@ def git(repo: Path, *arguments: str) -> str:
 
 
 class DossierTests(unittest.TestCase):
-    def test_v4_reflection_omits_empty_nonmaterial_sections(self) -> None:
-        rendered = _v4_reflection_document(
+    def test_reflection_omits_empty_nonmaterial_sections(self) -> None:
+        rendered = _reflection_document(
             1,
             {
-                "schema_version": 4,
                 "summary": "No material causal signal emerged.",
                 "strategy_behavior": {
                     "id": "safe-action",
@@ -117,12 +116,11 @@ class DossierTests(unittest.TestCase):
             )
             (experiment / "process" / "public-check-0001").mkdir(parents=True)
             (experiment / "process" / "public-check-0001" / "result.json").write_text(
-                json.dumps({"schema_version": 1, "return_code": 0})
+                json.dumps({"return_code": 0})
             )
             (experiment / "request.public.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": 2,
                         "strategy_behavior_id": "improve-score",
                         "claim": "<img src=https://invalid.example> improve score",
                         "mechanism": "Increase score.",
@@ -141,7 +139,6 @@ class DossierTests(unittest.TestCase):
             (experiment / "implementation.public.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": 3,
                         "status": "implemented",
                         "summary": "Implemented the score change.",
                         "deviations": [],
@@ -169,7 +166,6 @@ class DossierTests(unittest.TestCase):
             (experiment / "planning.public.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": 2,
                         "directions": [
                             {
                                 "strategy_behavior_id": "improve-score",
@@ -192,7 +188,6 @@ class DossierTests(unittest.TestCase):
             (experiment / "implementation-origin.public.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
                         "transcript": "searches/000001/attempts/01/implementation/attempts/0001/process/stdout.bin",
                     }
                 )
@@ -200,10 +195,12 @@ class DossierTests(unittest.TestCase):
             (experiment / "reflection.public.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": 3,
                         "status": "COMPLETE",
                         "warning": None,
-                        "basis": {"strategy_behavior_id": "improve-score"},
+                        "basis": {
+                            "strategy_behavior_id": "improve-score",
+                            "history_entry_ids": [],
+                        },
                         "assessment": {
                             "summary": "The public metric supports the mechanism.",
                             "strategy_behavior": {
@@ -211,12 +208,13 @@ class DossierTests(unittest.TestCase):
                                 "realization": "expressed",
                                 "evidence": [],
                             },
-                            "metric_assessments": {
-                                "public_metric": {
+                            "material_signals": [
+                                {
+                                    "metric": "public_metric",
                                     "finding": "supports",
-                                    "rationale": "The candidate value increased.",
+                                    "interpretation": "The candidate value increased.",
                                 }
-                            },
+                            ],
                             "mechanism": {
                                 "status": "supported",
                                 "evidence": [],
@@ -224,7 +222,6 @@ class DossierTests(unittest.TestCase):
                             },
                             "implementation": {
                                 "status": "no_specific_concern",
-                                "evidence": [],
                                 "concerns": [],
                             },
                             "policy_observations": [],
@@ -234,7 +231,6 @@ class DossierTests(unittest.TestCase):
                                 "test": "Continue with another mechanism.",
                             },
                             "history_citations": [],
-                            "schema_version": 3,
                         },
                     }
                 )

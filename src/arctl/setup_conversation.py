@@ -222,7 +222,6 @@ def batch_schema(
     )
     return _object(
         {
-            "schema_version": {"type": "integer", "const": 1},
             "revision": (
                 {"type": "integer", "const": revision}
                 if revision is not None
@@ -245,7 +244,6 @@ def finalized_design_schema() -> dict[str, Any]:
     text = {"type": "string", "minLength": 1}
     properties.update(
         {
-            "schema_version": {"type": "integer", "const": 3},
             "revision": {"type": "integer", "minimum": 1},
             "decision_revision": {"type": "integer", "minimum": 1},
             "source_provenance": _object(
@@ -256,7 +254,6 @@ def finalized_design_schema() -> dict[str, Any]:
             ),
             "controller_contract": _object(
                 {
-                    "version": {"type": "integer", "const": 1},
                     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
                 }
             ),
@@ -274,14 +271,14 @@ def finalized_design_schema() -> dict[str, Any]:
 def load_decisions(directory: Path) -> dict[str, Any]:
     path = directory / "setup" / "decisions.public.json"
     if not path.is_file():
-        return {"schema_version": 1, "revision": 0, "decisions": []}
+        return {"revision": 0, "decisions": []}
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise StateError("saved setup decisions are invalid") from error
     if (
         not isinstance(value, dict)
-        or value.get("schema_version") != 1
+        or set(value) != {"revision", "decisions"}
         or not isinstance(value.get("revision"), int)
         or not isinstance(value.get("decisions"), list)
     ):
@@ -611,7 +608,6 @@ def finalize_design(
         )
     design = {
         **deepcopy(batch["design"]),
-        "schema_version": 3,
         "revision": batch["revision"],
         "decision_revision": decisions["revision"],
         "source_provenance": {
@@ -619,7 +615,6 @@ def finalize_design(
             "commit": setup["source_commit"],
         },
         "controller_contract": {
-            "version": 1,
             "sha256": hashlib.sha256(
                 _canonical_bytes(controller_contract or {})
             ).hexdigest(),
@@ -749,7 +744,6 @@ def authorize_design(directory: Path, setup: dict[str, Any], token: str) -> None
         atomic_write_json(
             authorization_path,
             {
-                "schema_version": 1,
                 "design_sha256": digest,
                 "decision_revision": design["decision_revision"],
                 "authorized": True,

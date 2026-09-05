@@ -118,7 +118,6 @@ class SetupConversationTests(unittest.TestCase):
                 }
             )
         return {
-            "schema_version": 1,
             "revision": revision,
             "summary": "Three consequential choices remain.",
             "questions": questions,
@@ -132,7 +131,6 @@ class SetupConversationTests(unittest.TestCase):
             "citations": [],
         }
         return {
-            "schema_version": 1,
             "revision": revision,
             "summary": "The setup design is complete.",
             "questions": [],
@@ -203,7 +201,6 @@ class SetupConversationTests(unittest.TestCase):
         design = self.design_batch()["design"]
         design.update(
             {
-                "schema_version": 2,
                 "revision": 1,
                 "decision_revision": 1,
                 "source_provenance": {
@@ -211,7 +208,6 @@ class SetupConversationTests(unittest.TestCase):
                     "commit": self.record["source_commit"],
                 },
                 "controller_contract": {
-                    "version": 1,
                     "sha256": hashlib.sha256(
                         json.dumps(
                             SETUP_CONTROLLER_CONTRACT,
@@ -235,7 +231,6 @@ class SetupConversationTests(unittest.TestCase):
         atomic_write_json(
             self.directory / "setup" / "authorization.public.json",
             {
-                "schema_version": 1,
                 "authorized": True,
                 "design_sha256": hashlib.sha256(
                     json.dumps(design, sort_keys=True, separators=(",", ":")).encode()
@@ -248,7 +243,6 @@ class SetupConversationTests(unittest.TestCase):
             atomic_write_json(
                 decisions_path,
                 {
-                    "schema_version": 1,
                     "revision": design["decision_revision"],
                     "decisions": [],
                 },
@@ -256,7 +250,7 @@ class SetupConversationTests(unittest.TestCase):
         return design
 
     def test_init_creates_output_free_workspace_and_location_safe_resume(self) -> None:
-        self.assertEqual(self.record["setup_contract"], "conversation-v2")
+        self.assertEqual(self.record["setup_contract"], "conversation")
         self.assertFalse((self.workspace / "ARCTL_SETUP.md").exists())
         payload = _init(self.source, self.root / "other-workspace", "other", None)
         self.assertIn("--data", payload["next_command"])
@@ -270,26 +264,6 @@ class SetupConversationTests(unittest.TestCase):
             self.assertEqual(_data_root(None), self.data.resolve())
         finally:
             os.chdir(previous)
-
-    def test_legacy_setup_state_is_reported_without_mutation(self) -> None:
-        setup_path = self.directory / "setup.json"
-        legacy = json.loads(setup_path.read_text())
-        legacy["schema_version"] = 1
-        legacy.pop("setup_contract", None)
-        atomic_write_json(setup_path, legacy)
-        before = setup_path.read_bytes()
-        with self.assertRaisesRegex(StateError, "legacy guided-setup state"):
-            _setup(
-                data_root=self.data,
-                task_id="demo",
-                answers_path=None,
-                offline=True,
-                acceptance=None,
-                design_authorization=None,
-                interactive=False,
-                preflight=False,
-            )
-        self.assertEqual(setup_path.read_bytes(), before)
 
     def test_setup_reports_an_already_accepted_setup_as_ready_for_approval(self) -> None:
         setup_path = self.directory / "setup.json"
@@ -379,7 +353,6 @@ class SetupConversationTests(unittest.TestCase):
         resolved = json.loads(
             (self.directory / "setup" / "authorized-design.public.json").read_text()
         )
-        self.assertEqual(resolved["schema_version"], 3)
         note = render_setup_note(self.directory, record)
         self.assertIn("## Confirmed choices", note.read_text())
         self.assertIn("## Authorized setup", note.read_text())
@@ -494,7 +467,6 @@ class SetupConversationTests(unittest.TestCase):
         atomic_write_json(
             self.directory / "setup" / "decisions.public.json",
             {
-                "schema_version": 1,
                 "revision": 1,
                 "decisions": [
                     {
@@ -529,7 +501,6 @@ class SetupConversationTests(unittest.TestCase):
         atomic_write_json(
             self.directory / "setup" / "decisions.public.json",
             {
-                "schema_version": 1,
                 "revision": 1,
                 "decisions": [
                     {"id": "objective"},
@@ -565,7 +536,6 @@ class SetupConversationTests(unittest.TestCase):
         self,
     ) -> None:
         decisions = {
-            "schema_version": 1,
             "revision": 1,
             "decisions": [
                 {"id": "objective"},
@@ -610,7 +580,6 @@ class SetupConversationTests(unittest.TestCase):
         atomic_write_json(
             self.directory / "setup" / "decisions.public.json",
             {
-                "schema_version": 1,
                 "revision": 1,
                 "decisions": [
                     {"id": "objective", "answer": "Maximize reward."},
@@ -649,7 +618,6 @@ class SetupConversationTests(unittest.TestCase):
         atomic_write_json(
             self.directory / "setup" / "decisions.public.json",
             {
-                "schema_version": 1,
                 "revision": 1,
                 "decisions": [
                     {"id": "objective", "answer": "Maximize cleared lines."},
@@ -697,7 +665,6 @@ class SetupConversationTests(unittest.TestCase):
         atomic_write_json(
             self.directory / "setup" / "decisions.public.json",
             {
-                "schema_version": 1,
                 "revision": 2,
                 "decisions": [
                     {"id": "seed_isolation", "answer": "Use a seedless process."}
@@ -705,7 +672,6 @@ class SetupConversationTests(unittest.TestCase):
             },
         )
         redundant = {
-            "schema_version": 1,
             "revision": 3,
             "summary": "Redundant question.",
             "questions": [
@@ -766,7 +732,6 @@ class SetupConversationTests(unittest.TestCase):
         atomic_write_json(
             self.directory / "setup" / "decisions.public.json",
             {
-                "schema_version": 1,
                 "revision": 2,
                 "decisions": [
                     {"id": "objective", "answer": "Maximize cleared lines."},
@@ -848,7 +813,6 @@ class SetupConversationTests(unittest.TestCase):
             (evaluator / "_arctl" / "hook.py").write_text("# evaluator hooks\n")
             (evaluator / "test_generated_evaluator.py").write_text("# tests\n")
             return {
-                "schema_version": 3,
                 "summary": "Compact build.",
                 "files": [
                     {
@@ -977,10 +941,7 @@ class SetupConversationTests(unittest.TestCase):
         self.assertTrue(captured["offline"])
         self.assertTrue(callable(captured["normalize_output"]))
         self.assertEqual(captured["output_name"], "build-report.public.json")
-        self.assertEqual(
-            captured["schema_value"]["properties"]["schema_version"],
-            {"type": "integer", "const": 3},
-        )
+        self.assertNotIn("schema" + "_version", captured["schema_value"]["properties"])
         self.assertIn("task", captured["schema_value"]["properties"])
         self.assertIn("evaluator", captured["schema_value"]["properties"])
         task_schema = captured["schema_value"]["properties"]["task"]["properties"]
@@ -1146,30 +1107,6 @@ class SetupConversationTests(unittest.TestCase):
             _declared_dependency_requirements(design, subject=self.subject)
         self.assertIn("not valid PEP 508", str(caught.exception))
         self.assertIn("supplied by the subject tree", str(caught.exception))
-
-    def test_legacy_dependency_design_preserves_decisions_and_reopens_discovery(
-        self,
-    ) -> None:
-        self.write_authorized_design(
-            [
-                {
-                    "requirement": "numpy (runtime dependency)",
-                    "reason": "Legacy prose.",
-                    "origin": "repository",
-                    "authorization_decision": None,
-                }
-            ]
-        )
-        decisions_path = self.directory / "setup" / "decisions.public.json"
-        before = decisions_path.read_bytes()
-        with patch("arctl.setup._agent_run") as agent:
-            with self.assertRaisesRegex(StateError, "deterministic validation"):
-                build_setup_direct(self.directory, self.record, offline=False)
-        agent.assert_not_called()
-        _, saved = load_setup(self.data, "demo")
-        self.assertEqual(saved["state"], "DISCOVERY_REQUIRED")
-        self.assertEqual(decisions_path.read_bytes(), before)
-        self.assertIn("DESIGN_DEPENDENCY", saved["prior_design_findings"][0])
 
     def test_invalid_cross_artifact_fixture_is_portable(self) -> None:
         fixture = (

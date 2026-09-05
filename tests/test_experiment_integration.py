@@ -82,7 +82,6 @@ class ExperimentIntegrationTests(unittest.TestCase):
             self.champion,
         )
         self.request = {
-            "schema_version": 2,
             "strategy_behavior_id": "recoverable-routing",
             "claim": "Prefer recoverable routes.",
             "mechanism": "Penalize branches without retreat.",
@@ -208,7 +207,6 @@ class ExperimentIntegrationTests(unittest.TestCase):
         (self.experiment_directory / "reflection.public.json").write_text(
             json.dumps(
                 {
-                    "schema_version": 1,
                     "status": "SKIPPED_NO_TELEMETRY",
                     "warning": "No telemetry.",
                     "basis": {},
@@ -290,7 +288,6 @@ class ExperimentIntegrationTests(unittest.TestCase):
     def test_public_checks_use_subject_sandbox_by_default(self) -> None:
         self.freeze()
         completed = {
-            "schema_version": 1,
             "return_code": 0,
             "duration_seconds": 0.1,
             "stdout_bytes": 0,
@@ -342,7 +339,6 @@ class ExperimentIntegrationTests(unittest.TestCase):
     def test_public_check_sandbox_launch_failure_is_a_system_error(self) -> None:
         self.freeze()
         failed = {
-            "schema_version": 1,
             "return_code": 1,
             "stdout_bytes": 0,
             "stderr_bytes": 1,

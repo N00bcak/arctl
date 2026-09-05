@@ -42,18 +42,32 @@ class RetentionTests(unittest.TestCase):
         process = task / "setup" / "fixture" / "process"
         write_json(
             process / "started.json",
-            {"schema_version": 1, "command": ["true"], "cwd": str(task),
+            {"command": ["true"], "cwd": str(task),
              "environment": {"HOME": str(home)}, "stop_path": None},
         )
         write_json(
             process / "result.json",
-            {"schema_version": 2, "return_code": 0, "stdout_bytes": 0,
+            {"return_code": 0, "stdout_bytes": 0,
              "stderr_bytes": 0, "elapsed_seconds": 0.1},
         )
+        token = process / "launch.token"
+        token.write_text("completed-process")
+        token_stat = token.stat()
         write_json(
             process / "process.json",
-            {"schema_version": 2, "pid": 999999, "pgid": 999999,
-             "platform": "Darwin", "start_time": 1},
+            {
+                "pid": 999999,
+                "pgid": 999999,
+                "platform": "Darwin",
+                "start_time": 1,
+                "boot_identity": "fixture-boot",
+                "launch_token": "completed-process",
+                "launch_token_file": "launch.token",
+                "launch_token_identity": {
+                    "device": token_stat.st_dev,
+                    "inode": token_stat.st_ino,
+                },
+            },
         )
         return cache
 
@@ -117,7 +131,7 @@ class RetentionTests(unittest.TestCase):
             write_json(forged / "started.json", {"environment": {"HOME": str(valuable)}})
             write_json(
                 forged / "result.json",
-                {"schema_version": 2, "return_code": 0, "stdout_bytes": 0,
+                {"return_code": 0, "stdout_bytes": 0,
                  "stderr_bytes": 0, "elapsed_seconds": 0.1},
             )
 
@@ -140,8 +154,8 @@ class RetentionTests(unittest.TestCase):
             experiment = task / "experiments" / "000001"
             experiment.mkdir(parents=True)
             (task / "task.yaml").write_text("task_id: demo\n")
-            write_json(task / "approval.json", {"schema_version": 1})
-            write_json(task / "evaluator.manifest.json", {"schema_version": 1})
+            write_json(task / "approval.json", {})
+            write_json(task / "evaluator.manifest.json", {})
             write_json(experiment / "experiment.json", {"state": "COMPLETE"})
             write_json(experiment / "request.public.json", {"claim": "one"})
             write_json(experiment / "result.public.json", {"decision": "REJECT"})
@@ -175,8 +189,8 @@ class RetentionTests(unittest.TestCase):
             experiment = task / "experiments" / "000001"
             experiment.mkdir(parents=True)
             (task / "task.yaml").write_text("task_id: demo\n")
-            write_json(task / "approval.json", {"schema_version": 1})
-            write_json(task / "evaluator.manifest.json", {"schema_version": 1})
+            write_json(task / "approval.json", {})
+            write_json(task / "evaluator.manifest.json", {})
             write_json(experiment / "experiment.json", {"state": "COMPLETE"})
             write_json(experiment / "request.public.json", {"claim": "one"})
             write_json(experiment / "result.public.json", {"decision": "REJECT"})
@@ -216,8 +230,8 @@ class RetentionTests(unittest.TestCase):
             experiment = task / "experiments" / "000001"
             (experiment / "runtime").mkdir(parents=True)
             (task / "task.yaml").write_text("task_id: demo\n")
-            write_json(task / "approval.json", {"schema_version": 1})
-            write_json(task / "evaluator.manifest.json", {"schema_version": 1})
+            write_json(task / "approval.json", {})
+            write_json(task / "evaluator.manifest.json", {})
             write_json(experiment / "experiment.json", {"state": "COMPLETE"})
             write_json(experiment / "request.public.json", {"claim": "one"})
             write_json(experiment / "result.public.json", {"decision": "REJECT"})
@@ -228,7 +242,7 @@ class RetentionTests(unittest.TestCase):
             )
             write_json(
                 experiment / "runtime" / "bytecode-cache.private.json",
-                {"schema_version": 1, "invalid": True},
+                {"invalid": True},
             )
 
             with self.assertRaisesRegex(StateError, "manifest is invalid"):
@@ -258,8 +272,8 @@ class RetentionTests(unittest.TestCase):
             experiment = task / "experiments" / "000001"
             experiment.mkdir(parents=True)
             (task / "task.yaml").write_text("task_id: demo\n")
-            write_json(task / "approval.json", {"schema_version": 1})
-            write_json(task / "evaluator.manifest.json", {"schema_version": 1})
+            write_json(task / "approval.json", {})
+            write_json(task / "evaluator.manifest.json", {})
             write_json(experiment / "experiment.json", {"state": "COMPLETE"})
             write_json(experiment / "request.public.json", {"claim": "one"})
             write_json(experiment / "result.public.json", {"decision": "REJECT"})
@@ -301,7 +315,7 @@ class RetentionTests(unittest.TestCase):
             execution[remove_action["action_id"]] = "conditional"
             write_json(
                 task / ".gc" / "transaction.json",
-                {"schema_version": 1, "plan": plan, "execution": execution},
+                {"plan": plan, "execution": execution},
             )
 
             recovered = recover_gc_transaction(task)
@@ -357,7 +371,7 @@ class RetentionTests(unittest.TestCase):
             }
             write_json(
                 task / ".gc" / "transaction.json",
-                {"schema_version": 1, "plan": plan, "execution": execution},
+                {"plan": plan, "execution": execution},
             )
 
             recovered = recover_gc_transaction(task)
@@ -381,7 +395,6 @@ class RetentionTests(unittest.TestCase):
             write_json(
                 task / "exploration" / "entries" / "entry-000001.public.json",
                 {
-                    "schema_version": 1,
                     "entry_id": "entry-000001",
                     "source": "search:000001:attempt:01",
                     "kind": "research_miss",
@@ -443,7 +456,7 @@ class RetentionTests(unittest.TestCase):
             execution = {item["action_id"]: item["initial_status"] for item in plan["actions"]}
             write_json(
                 task / ".gc" / "transaction.json",
-                {"schema_version": 1, "plan": plan, "execution": execution},
+                {"plan": plan, "execution": execution},
             )
 
             result = run_gc(task, dry_run=False)
@@ -518,7 +531,7 @@ class RetentionTests(unittest.TestCase):
             task = workspace / "data" / "tasks" / "demo"
             task.mkdir(parents=True)
             (task / "task.yaml").write_text("task_id: demo\n")
-            write_json(task / "approval.json", {"schema_version": 1})
+            write_json(task / "approval.json", {})
             repos = {name: workspace / name for name in ("subject", "environment", "evaluator")}
             commits = {name: self.init_repo(path) for name, path in repos.items()}
             attempt = task / "setup" / "staging" / "0001"
@@ -533,11 +546,9 @@ class RetentionTests(unittest.TestCase):
             (roots["runtime"] / "uv.lock").write_bytes(lock)
             owned: dict[str, list[object]] = {}
             readiness = {
-                "schema_version": 2,
                 "staging": {name: str(path) for name, path in roots.items()},
                 "dependency_lock_sha256": hashlib.sha256(lock).hexdigest(),
                 "dependency_resolution": {
-                    "schema_version": 1,
                     "name": "uv",
                     "version": "0.8.14",
                     "index": "https://pypi.org/simple",
@@ -635,7 +646,6 @@ class RetentionTests(unittest.TestCase):
             self.assertEqual((provenance / "uv.lock").read_bytes(), lock)
             manifest = json.loads((provenance / "manifest.public.json").read_text())
             self.assertEqual(manifest["python"]["cache_tag"], "cpython-313")
-            self.assertEqual(manifest["schema_version"], 2)
 
 
 if __name__ == "__main__":

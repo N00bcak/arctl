@@ -129,10 +129,7 @@ class SandboxCommandTests(unittest.TestCase):
 
         schema = _research_schema(manifest)
 
-        self.assertEqual(
-            schema["properties"]["schema_version"],
-            {"type": "integer", "const": 2},
-        )
+        self.assertNotIn("schema" + "_version", schema["properties"])
         telemetry = schema["properties"]["expected_telemetry"]
         self.assertIs(telemetry["additionalProperties"], False)
         self.assertEqual(telemetry["required"], list(manifest.public_telemetry))

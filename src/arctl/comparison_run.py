@@ -156,12 +156,11 @@ def _validate_batch(
     manifest: EvaluatorManifest,
 ) -> list[Any]:
     batch = _load_json_object(path, source="evaluator", label="public batch")
-    if set(batch) != {"schema_version", "trial_count", "cases"}:
+    if set(batch) != {"trial_count", "cases"}:
         raise ComparisonFailure("evaluator", "public batch fields are invalid")
     cases = batch["cases"]
     if (
-        batch["schema_version"] != 1
-        or batch["trial_count"] != trial_count
+        batch["trial_count"] != trial_count
         or not isinstance(cases, list)
         or len(cases) != trial_count
     ):
@@ -183,12 +182,11 @@ def _validate_subject_output(
     manifest: EvaluatorManifest,
 ) -> None:
     output = _load_json_object(path, source=subject, label=f"{subject} output")
-    if set(output) != {"schema_version", "trial_count", "results"}:
+    if set(output) != {"trial_count", "results"}:
         raise ComparisonFailure(subject, f"{subject} output fields are invalid")
     results = output["results"]
     if (
-        output["schema_version"] != 1
-        or output["trial_count"] != trial_count
+        output["trial_count"] != trial_count
         or not isinstance(results, list)
         or len(results) != trial_count
     ):
@@ -209,7 +207,6 @@ def _validate_prepare_response(
 ) -> None:
     response = _load_json_object(path, source="evaluator", label="prepare response")
     expected = {
-        "schema_version": 1,
         "operation": "prepare",
         "kind": kind,
         "trial_count": trial_count,
@@ -270,12 +267,6 @@ def _run_subject_arm(
             manifest=manifest,
         )
         return output, True
-    if (process_root / subject / "started.json").is_file():
-        raise ComparisonFailure(
-            subject,
-            f"legacy serial {subject} process started without a recoverable output",
-        )
-
     shards = _subject_case_shards(cases, subject_workers=subject_workers)
 
     def run_worker(index: int, shard: tuple[Any, ...]) -> None:
@@ -287,7 +278,6 @@ def _run_subject_arm(
         write_json_once(
             worker_batch,
             {
-                "schema_version": 1,
                 "trial_count": len(shard),
                 "cases": list(shard),
             },
@@ -352,7 +342,6 @@ def _run_subject_arm(
     write_json_once(
         output,
         {
-            "schema_version": 1,
             "trial_count": len(cases),
             "results": combined,
         },
@@ -451,7 +440,6 @@ def run_comparison(
     write_json_once(
         prepare_request,
         {
-            "schema_version": 1,
             "operation": "prepare",
             "kind": reservation.kind,
             "experiment_id": reservation.experiment_id,
@@ -568,7 +556,6 @@ def run_comparison(
     write_json_once(
         score_request,
         {
-            "schema_version": 1,
             "operation": "score",
             "kind": reservation.kind,
             "experiment_id": reservation.experiment_id,

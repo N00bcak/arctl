@@ -29,10 +29,8 @@ class ExperimentBytecodeTests(unittest.TestCase):
     def make_task(self, root: Path) -> Path:
         task = root / "task"
         task.mkdir()
-        (task / "approval.json").write_text('{"schema_version":1}\n')
-        (task / "evaluator.manifest.json").write_text(
-            '{"schema_version":1}\n'
-        )
+        (task / "approval.json").write_text('{}\n')
+        (task / "evaluator.manifest.json").write_text('{}\n')
         return task
 
     def run_import(self, source: Path, cache: Path) -> str:

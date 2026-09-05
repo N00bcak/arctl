@@ -89,8 +89,7 @@ def _load_runtime_artifact_events(path: Path) -> list[dict[str, object]]:
         raise StateError(f"runtime artifact audit is invalid: {path}") from error
     if (
         not isinstance(value, dict)
-        or set(value) != {"schema_version", "events"}
-        or value["schema_version"] != 1
+        or set(value) != {"events"}
         or not isinstance(value["events"], list)
     ):
         raise StateError(f"runtime artifact audit is invalid: {path}")
@@ -149,7 +148,7 @@ def normalize_runtime_artifacts(
             events.append({"stage": stage, "discarded_paths": list(discarded)})
             atomic_write_json(
                 audit_path,
-                {"schema_version": 1, "events": events},
+                {"events": events},
             )
 
     eligible_set = set(eligible)

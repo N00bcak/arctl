@@ -27,7 +27,6 @@ request = json.loads(Path(sys.argv[1]).read_text())
 response = Path(sys.argv[2])
 if request["operation"] == "calibrate":
     response.write_text(json.dumps({
-        "schema_version": 2,
         "operation": "calibrate",
         "champion": request["champion"],
         "evaluator": request["evaluator"],
@@ -41,13 +40,11 @@ if request["operation"] == "calibrate":
 elif request["operation"] == "prepare":
     cases = [{"value": seed % 100} for seed in request["trial_seeds"]]
     Path(request["public_batch"]).write_text(json.dumps({
-        "schema_version": 1,
         "trial_count": request["trial_count"],
         "cases": cases,
     }))
     Path(request["private_scoring"]).write_text(json.dumps({"prepared": True}))
     response.write_text(json.dumps({
-        "schema_version": 1,
         "operation": "prepare",
         "kind": request["kind"],
         "trial_count": request["trial_count"],
@@ -58,7 +55,6 @@ elif request["operation"] == "score":
     differences = [b["score"] - a["score"] for a, b in zip(champion, candidate)]
     effect = sum(differences) / len(differences)
     response.write_text(json.dumps({
-        "schema_version": 1,
         "kind": request["kind"],
         "trial_count": request["trial_count"],
         "hard_rules_pass": True,
@@ -81,7 +77,6 @@ from pathlib import Path
 batch = json.loads(Path(sys.argv[1]).read_text())
 results = [{"score": case["value"] + BIAS} for case in batch["cases"]]
 Path(sys.argv[2]).write_text(json.dumps({
-    "schema_version": 1,
     "trial_count": batch["trial_count"],
     "results": results,
 }))
@@ -221,7 +216,6 @@ class ComparisonRunIntegrationTests(unittest.TestCase):
                 time.sleep(0.01)
             results = [{"score": case["value"] + BIAS} for case in batch["cases"]]
             output.write_text(json.dumps({
-                "schema_version": 1,
                 "trial_count": batch["trial_count"],
                 "results": results,
             }))
@@ -293,56 +287,10 @@ class ComparisonRunIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(combined["trial_count"], 17)
 
-    def test_completed_legacy_serial_outputs_remain_recoverable(self) -> None:
-        values = [seed % 100 for seed in self.reservation.trial_seeds]
-        for subject, bias in (("champion", 0), ("candidate", 1)):
-            output = self.comparison / "outputs" / subject / "result.json"
-            output.parent.mkdir(parents=True, exist_ok=True)
-            output.write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "trial_count": 4,
-                        "results": [{"score": value + bias} for value in values],
-                    }
-                )
-            )
-
-        evidence = self.execute_comparison()
-
-        self.assertEqual(evidence.effect_estimate, 1)
-        self.assertFalse(
-            (self.comparison / "outputs" / "champion" / "workers").exists()
-        )
-        self.assertFalse(
-            (self.comparison / "outputs" / "candidate" / "workers").exists()
-        )
-
-    def test_incomplete_legacy_serial_process_fails_without_starting_workers(
-        self,
-    ) -> None:
-        for subject in ("champion", "candidate"):
-            process = self.comparison / "process" / subject
-            process.mkdir(parents=True, exist_ok=True)
-            (process / "started.json").write_text("{}")
-
-        with self.assertRaisesRegex(
-            ComparisonFailure,
-            "legacy serial .* process started without a recoverable output",
-        ):
-            self.execute_comparison()
-
-        self.assertFalse(
-            (self.comparison / "outputs" / "champion" / "workers").exists()
-        )
-        self.assertFalse(
-            (self.comparison / "outputs" / "candidate" / "workers").exists()
-        )
-
     def test_invalid_candidate_output_is_reject_domain_and_never_reruns(self) -> None:
         (self.candidate / "subject.py").write_text(
             "import json,sys; open(sys.argv[2], 'w').write(json.dumps({"
-            "'schema_version':1,'trial_count':4,'results':[]}))"
+            "'obsolete':1,'trial_count':4,'results':[]}))"
         )
         subprocess.run(["git", "-C", str(self.candidate), "add", "."], check=True)
         subprocess.run(

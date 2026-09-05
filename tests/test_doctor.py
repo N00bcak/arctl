@@ -94,7 +94,6 @@ class DoctorTests(unittest.TestCase):
         ):
             report = run_doctor()
 
-        self.assertEqual(report["schema_version"], 2)
         self.assertFalse(report["checks"]["codex"])
         self.assertFalse(doctor_succeeded(report))
         profile.assert_not_called()
